@@ -73,7 +73,7 @@ async fn index(State(st): State<Arc<App>>) -> Response {
             "ok": true, "service": crate::VERSION, "data_dir": st.dir.display().to_string(),
             "routes": ["/v1/earth/latest (incl. .bio = K_bio, breathing, Lloyd ladder)", "/v1/earth/series?days=433", "/v1/earth/forecast", "/v1/earth/excitation", "/v1/earth/bio (3-year Mauna Loa CO₂ series + fit)",
                        "/v1/earth/provenance", "/v1/earth/tips", "/v1/earth/alerts?last=20", "/v1/earth/attest?last=20", "/v1/earth/health",
-                       "/v1/earth/stream (text/event-stream: reading | alert | attest)", "/v1/earth/badge.svg (live SVG badge: K⊕ · regime · date)"],
+                       "/v1/earth/stream (text/event-stream: reading | alert | attest)", "/v1/earth/badge.svg (live SVG badge: K⊕ · regime · date)", "/v1/earth/search?q=… (the aether search: publications, readings by date/MJD/regime, attest rows, alerts)"],
             "pages": ["https://sigilgraph.org/datacenter.html", "https://sigilgraph.org/kristensen-earth.html", "https://sigilgraph.org/kristensen-board.html"]
         }),
     )
@@ -129,6 +129,110 @@ async fn attest(State(st): State<Arc<App>>, Query(q): Query<Last>) -> Response {
     let rows = tail_jsonl(&st.dir.join("attest.jsonl"), q.last.unwrap_or(20).clamp(1, 500));
     let v = crate::attest::verify(&st.dir.join("attest.jsonl"), Some(&st.dir.join("latest.json")));
     json_value(StatusCode::OK, json!({"ok": true, "count": rows.len(), "verification": v, "rows": rows}))
+}
+
+#[derive(Deserialize)]
+struct SearchQ {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `/v1/earth/search?q=…` — the aether search bar behind the 3D Earth (2026-09-17). Four sources,
+/// all files this service already serves or that `sigil-earth publish` writes, none invented:
+///   publication — flux-search over the publish index (`DEFAULT_SEARCH_INDEX`), one doc per
+///                 attested reading pushed to the nodes' aether store; `node_copy` is the node's
+///                 own copy of that reading (`/v1/aether/cat?name=…`, same origin on sigilgraph.org).
+///   reading     — the EOP series by date (2026-09-14, or a 2026-09 prefix), MJD (61297), or
+///                 regime word (stable / elevated / critical; `forecast` for predicted rows).
+///   attest      — attest.jsonl rows by row number, date, tx or digest prefix.
+///   alert       — alerts.jsonl rows containing the query.
+/// Nothing here is ranked across kinds; the page groups them. Empty query → the hint only.
+async fn search(State(st): State<Arc<App>>, Query(q): Query<SearchQ>) -> Response {
+    let t0 = std::time::Instant::now();
+    let query = q.q.unwrap_or_default().trim().to_string();
+    let ql = query.to_lowercase();
+    let limit = q.limit.unwrap_or(12).clamp(1, 50);
+    let hint = "a date (2026-09-14 or 2026-09), an MJD (61297), a regime (stable / elevated / critical), 'forecast', 'attest', 'alert', a tx or digest prefix, or words from the fortolkning";
+    if query.is_empty() {
+        return json_value(StatusCode::OK, json!({"ok": true, "data": {"query": "", "hits": [], "hint": hint}}));
+    }
+    let mut hits: Vec<Value> = vec![];
+    // 1. publications — the flux-search index sigil-earth publish maintains
+    let idx = std::env::var("SIGIL_EARTH_SEARCH_INDEX").unwrap_or_else(|_| crate::publish::DEFAULT_SEARCH_INDEX.into());
+    let mut index_docs = 0usize;
+    if let Ok(mut eng) = flux_search::SearchEngine::load_from_path(&idx) {
+        index_docs = eng.doc_count();
+        let resp = eng.search(flux_search::SearchQuery { q: query.clone(), page: 1, per_page: limit, ..Default::default() });
+        for r in resp.results {
+            let blake3 = r.url.rsplit('/').next().unwrap_or("").to_string();
+            let date = r.title.split_whitespace().find(|w| w.len() == 10 && w.as_bytes()[4] == b'-').unwrap_or("").to_string();
+            hits.push(json!({"kind": "publication", "title": r.title, "snippet": r.snippet, "url": r.url, "blake3": blake3, "date": date,
+                "score": r.score, "attest": "/v1/earth/attest?last=500", "bundle": format!("flux_aether_retrieve {{content_root: \"{blake3}\"}}")}));
+        }
+    }
+    // 2. readings — the series by date / MJD / regime
+    let is_date = ql.len() >= 7 && ql.as_bytes()[4] == b'-' && ql[..4].chars().all(|c| c.is_ascii_digit());
+    let mjd_q: Option<f64> = if ql.len() == 5 && ql.chars().all(|c| c.is_ascii_digit()) { ql.parse().ok() } else { None };
+    let regime_q = ["stable", "elevated", "critical"].iter().find(|r| ql.contains(*r)).copied();
+    let want_forecast = ql.contains("forecast") || ql.contains("predict");
+    if is_date || mjd_q.is_some() || regime_q.is_some() || want_forecast {
+        if let Ok(text) = std::fs::read_to_string(st.dir.join("series.json")) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                let mut rows: Vec<&Value> = v["rows"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
+                if !(want_forecast && !is_date && mjd_q.is_none() && regime_q.is_none()) { rows.reverse(); } // most recent first; the forecast reads forward from today
+                let mut n = 0usize;
+                for r in rows {
+                    let date = r["date"].as_str().unwrap_or("");
+                    let mjd = r["mjd"].as_f64().unwrap_or(f64::NAN);
+                    let predicted = r["flag"].as_str() == Some("P");
+                    let k = r["k_resid"].as_f64();
+                    let regime = k.map(crate::regime);
+                    let m = (is_date && date.starts_with(&ql))
+                        || mjd_q.map(|m| (m - mjd).abs() < 0.5).unwrap_or(false)
+                        || (regime_q.is_some() && !predicted && regime == regime_q)
+                        || (want_forecast && predicted && !is_date);
+                    if !m { continue; }
+                    hits.push(json!({"kind": "reading", "date": date, "mjd": mjd, "predicted": predicted, "k_resid": k, "k_raw": r["k_raw"], "regime": regime,
+                        "lod_ms": r["lod"], "xp": r["xp"], "yp": r["yp"], "ut1utc": r["ut1utc"],
+                        "title": format!("{date} · MJD {mjd:.0}{}{}", k.map(|k| format!(" · K⊕ {k:.2}σ {}", crate::regime(k))).unwrap_or_default(), if predicted { " · IERS prediction" } else { "" })}));
+                    n += 1;
+                    if n >= limit { break; }
+                }
+            }
+        }
+    }
+    // 3. attest rows — by n, date, tx / digest prefix, or the word attest
+    let attest_rows = tail_jsonl(&st.dir.join("attest.jsonl"), 500);
+    let want_attest = ql.contains("attest") || ql.contains("anchor");
+    let mut n = 0usize;
+    for r in attest_rows.iter().rev() {
+        let s = r.to_string().to_lowercase();
+        let row_n = r["n"].as_u64().unwrap_or(0);
+        let m = want_attest || (ql.len() >= 6 && s.contains(&ql)) || (is_date && r["date"].as_str().map(|d| d.starts_with(&ql)).unwrap_or(false))
+            || ql.strip_prefix("attest").and_then(|x| x.trim().parse::<u64>().ok()) == Some(row_n);
+        if !m { continue; }
+        hits.push(json!({"kind": "attest", "n": row_n, "date": r["date"], "ts": r["ts"], "blake3": r["blake3"], "tx": r["anchor"]["tx_hash"], "executed": r["anchor"]["executed"], "wallet": r["anchor"]["wallet"],
+            "title": format!("attest row {row_n} · {} · {}", r["date"].as_str().unwrap_or("?"), r["blake3"].as_str().map(|b| &b[..12]).unwrap_or("?"))}));
+        n += 1;
+        if n >= limit { break; }
+    }
+    // 4. alerts
+    let alert_rows = tail_jsonl(&st.dir.join("alerts.jsonl"), 500);
+    let want_alert = ql.contains("alert");
+    let mut n = 0usize;
+    for r in alert_rows.iter().rev() {
+        let s = r.to_string().to_lowercase();
+        if !(want_alert || (ql.len() >= 4 && s.contains(&ql))) { continue; }
+        hits.push(json!({"kind": "alert", "row": r, "title": format!("alert · {} · {}", r["date"].as_str().or(r["ts"].as_str()).unwrap_or("?"), r["kind"].as_str().or(r["metric"].as_str()).unwrap_or("?"))}));
+        n += 1;
+        if n >= limit { break; }
+    }
+    // the publish index and attest.jsonl carry re-publications of one reading: one line per (kind, title)
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|h| seen.insert(format!("{}|{}", h["kind"], h["title"])));
+    json_value(StatusCode::OK, json!({"ok": true, "data": {"query": query, "hits": hits, "count": hits.len(), "took_ms": t0.elapsed().as_millis() as u64,
+        "index_docs": index_docs, "index": idx, "hint": hint,
+        "sources": ["flux-search index (sigil-earth publish)", "series.json", "attest.jsonl", "alerts.jsonl"]}}))
 }
 
 fn mtime(p: &Path) -> Option<f64> {
@@ -258,6 +362,7 @@ pub async fn run(bind: &str, dir: PathBuf) -> anyhow::Result<()> {
         .route("/v1/earth/health", get(health))
         .route("/v1/earth/stream", get(stream))
         .route("/v1/earth/badge.svg", get(badge))
+        .route("/v1/earth/search", get(search))
         .fallback(fallback)
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(app);

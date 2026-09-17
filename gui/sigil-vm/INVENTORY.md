@@ -191,5 +191,8 @@ New since the inventory above. None of it invents a chain figure; the first thre
 | Links: Rocky K⊕ Cover → `/v1/rocky`, USDS → the wallet's USDS desk + `/v1/usds/status`, bench/honours → wallet `#court` (court.js now opens on that hash) | LIVE | every "source page" was followed to what it actually shows |
 | Gate: keyboard-ring contrast (24 Tab stops/theme), 8 by-hand states scanned, search dropdown at every viewport, `[hidden]` honoured, one starred row before the scan | — | `guard.mjs` |
 | Reduced motion keeps the ticker (hand-scrollable); forced colours get Highlight markers; landscape phones get a text-height hero and a compact drawer | — | `style.css` media blocks |
+| Shareable URLs — `#coll=<id>` opens a collection sheet, `#tok=<symbol>` opens a token drawer; copy-link buttons in the sheet head and the drawer | — | the hash follows the sheet open/close |
+| Per-collection meaning of Floor / Items / Owners / Volume (Info tab + tooltips on hero stats and cards); route + derivation tooltips on every strip cell | — | a floor is never a price here |
+| Supply = open wallets + sealed pool (`native_supply` alone FALLS when coins are shielded — 29K moved on 09-17) | LIVE | strip, token row, money words |
 
 Still exactly as pretend as before: listings, sales, prices, liquidity, signing from the page, item metadata, chain-wide series.

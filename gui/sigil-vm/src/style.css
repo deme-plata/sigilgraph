@@ -418,7 +418,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .trending tbody tr { cursor: pointer; transition: background .12s; }
 .trending tbody tr:hover { background: var(--hover); }
 .trending .tcol.wide { grid-column: 1 / -1; }
-.trending .star { flex: 0 0 auto; margin-left: auto; padding: 2px 5px; font-size: 15px; line-height: 1; color: var(--muted); border-radius: 6px; opacity: .7; transition: .15s; } /* in the name cell — the owners cell is hidden at most widths */
+.trending .star { flex: 0 0 auto; margin-left: auto; padding: 5px 6px; margin-top: -3px; margin-bottom: -3px; font-size: 15px; line-height: 1; color: var(--muted); border-radius: 6px; opacity: .7; transition: .15s; } /* in the name cell — the owners cell is hidden at most widths */
 .trending tbody tr:hover .star, .trending .star:focus-visible, .trending .star[aria-pressed="true"] { opacity: 1; }
 :root[data-theme="light"] .trending .star:hover, :root[data-theme="light"] .trending .star[aria-pressed="true"], :root[data-theme="light"] .cm-foot [data-watch][aria-pressed="true"] { color: #8a6d00; } /* --gold-b reads 1.4:1 on the white table */
 .trending .star:hover, .trending .star[aria-pressed="true"] { color: var(--gold-b); }
@@ -469,7 +469,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .field { margin-top: 12px; }
 .field label { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
 .field label .bal { font-family: var(--mono); font-size: 12px; }
-.field label .bal .maxbtn { color: var(--cyan); cursor: pointer; margin-left: 6px; font-weight: 700; font-family: var(--mono); font-size: 12px; padding: 0; }
+.field label .bal .maxbtn { color: var(--cyan); cursor: pointer; margin-left: 6px; font-weight: 700; font-family: var(--mono); font-size: 12px; padding: 4px 0; margin-top: -4px; margin-bottom: -4px; } /* 24px tall, no extra line height */
 .field label .bal .maxbtn:hover { color: var(--violet); }
 .amt { position: relative; margin-top: 6px; display: flex; gap: 8px; }
 .amt input { flex: 1; min-width: 0; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 12px 14px; font-size: 20px; font-family: var(--mono); outline: none; transition: .15s; -moz-appearance: textfield; appearance: textfield; }
@@ -485,7 +485,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .slider .lab b { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; font-family: var(--mono); font-size: 12px; }
 .slider .track { position: relative; height: 12px; background: rgba(255,255,255,.05); border-radius: 999px; overflow: hidden; margin-top: 8px; }
 .slider .track .fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--grad-3); animation: glow 3s ease-in-out infinite; width: 0; transition: width .12s; }
-.slider input[type=range] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; margin: 0; }
+.slider input[type=range] { position: absolute; inset: -8px 0; width: 100%; height: 28px; opacity: 0; cursor: pointer; margin: 0; } /* the 12px bar keeps its look; the invisible control is 28px tall */
+.slider .track { overflow: visible; } .slider .track .fill { overflow: hidden; }
 .slider .track { position: relative; }
 .quick { display: flex; gap: 8px; margin-top: 10px; }
 .quick button { flex: 1; padding: 8px; border-radius: 9px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); font-size: 12px; font-weight: 600; color: var(--muted); transition: .15s; }
@@ -527,7 +528,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 @container (max-width: 680px) { .ttable th:nth-child(9), .ttable td:nth-child(9), .ttable .act button:not(.sw) { display: none; } .ttable td, .ttable th { padding-left: 5px; padding-right: 5px; } }
 @container (max-width: 520px) { .ttable th:nth-child(4), .ttable td:nth-child(4), .ttable th:nth-child(2), .ttable td:nth-child(2) { display: none; } .ttable .tk { max-width: 210px; } .ttable .tk img { width: 28px; height: 28px; } .ttable td, .ttable th { padding-left: 4px; padding-right: 4px; } .ttable table { table-layout: fixed; } .ttable th:nth-child(7), .ttable td:nth-child(7) { width: 88px; overflow: hidden; text-overflow: ellipsis; } .ttable td:nth-child(7) .muted { display: none; } /* '175.76K …' → '175.76K'; the / 21M cap lives in the drawer */ .ttable th:nth-child(11), .ttable td:nth-child(11) { width: 64px; } .ttable .sym .tag { display: none; } .ttable .tk > div { overflow: hidden; } }
 .ttable table { width: 100%; border-collapse: collapse; }
-.ttable th .sortbtn { padding: 0; color: inherit; font: inherit; white-space: nowrap; border-radius: 4px; } .ttable th .sortbtn:hover { color: var(--ink); }
+.ttable th .sortbtn { padding: 4px 0; margin: -4px 0; color: inherit; font: inherit; white-space: nowrap; border-radius: 4px; } /* 25px tap height inside the 17px header text */ .ttable th .sortbtn:hover { color: var(--ink); }
 .ttable th { position: sticky; top: 0; background: var(--th-bg); backdrop-filter: blur(6px); text-align: right; font-size: 11.5px; color: var(--muted); font-weight: 500; padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,.1); white-space: nowrap; cursor: pointer; z-index: 2; }
 .ttable th:first-child { text-align: left; }
 .ttable th:hover { color: var(--ink); }
@@ -901,6 +902,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .chip { border-color: rgba(0,0,0,.3); }
 }
 .ext { font-size: .85em; opacity: .75; }
+.l .viewall { padding: 4px 0; margin: -4px 0; } /* 27px tap height for the inventory link */
 /* forced colours (Windows high contrast): backgrounds are flattened to Canvas, so every state that was only a fill —
    the active segment/tab/filter/category, the slider fill, the hero progress bars — needs a system-colour marker */
 @media (forced-colors: active) {

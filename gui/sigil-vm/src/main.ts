@@ -50,7 +50,7 @@ function setPanel(open: boolean, persist = true, fromHistory = false): void {
   app.classList.toggle('panel-open', open)
   if (persist) { try { localStorage.setItem('sigilvm-panel', open ? 'open' : 'closed') } catch { /* */ } }
   const drawer = innerWidth <= 1100
-  if (drawer && open && !was && !fromHistory) { try { history.pushState({ drawer: 1 }, ''); drawerPushed = true } catch { /* */ } }
+  if (drawer && open && !was && !fromHistory) { try { if (modalPushed && (history.state as { modal?: number } | null)?.modal) { history.replaceState({ drawer: 1 }, ''); modalPushed = false } else history.pushState({ drawer: 1 }, ''); drawerPushed = true } catch { /* */ } } // a sheet handing off to the drawer swaps its entry rather than stacking (back() + push raced and closed the drawer)
   if (!open && was && drawerPushed && !fromHistory) { drawerPushed = false; try { if ((history.state as { drawer?: number } | null)?.drawer) history.back() } catch { /* */ } }
   if (fromHistory) drawerPushed = false
   if (open && !was) {
@@ -383,7 +383,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'modalClose' || btn.id === 'modalClose2' || btn.closest('#modal') === btn) { closeModal(); return }
   if (ds.pick && ds.which) { if (ds.which === 'from') { if (swapSt.to === ds.pick) swapSt.to = swapSt.from; swapSt.from = ds.pick } else { if (swapSt.from === ds.pick) swapSt.from = swapSt.to; swapSt.to = ds.pick } closeModal(); renderSwap(); return }
   if (ds.slip) { swapSt.slippage = Number(ds.slip); try { localStorage.setItem('sigilvm-slippage', ds.slip) } catch { /* */ } closeModal(); renderSwap(); return }
-  if (btn.id === 'walletUse') { const inp = $('#walletIn') as HTMLInputElement; const v = inp.value.trim().toLowerCase().replace(/^sigil1s:/, '').split(':')[0]; if (!/^[0-9a-f]{64}$/.test(v)) { inp.classList.add('over'); inp.setAttribute('aria-invalid', 'true'); const hint = $('#walletHint'); if (hint) hint.textContent = `That is ${v.length} characters — a SIGIL wallet id is 64 hex characters (0-9, a-f).`; inp.focus(); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); setPanel(true, false); poll(); return }
+  if (btn.id === 'walletUse') { const inp = $('#walletIn') as HTMLInputElement; const v = inp.value.trim().toLowerCase().replace(/^sigil1s:/, '').split(':')[0]; if (!/^[0-9a-f]{64}$/.test(v)) { inp.classList.add('over'); inp.setAttribute('aria-invalid', 'true'); const hint = $('#walletHint'); if (hint) hint.textContent = `That is ${v.length} characters — a SIGIL wallet id is 64 hex characters (0-9, a-f).`; inp.focus(); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(false, true); setPanel(true, false); poll(); return }
   const nav = btn.closest('[data-nav]') as HTMLElement | null
   if (nav) { document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', (a as HTMLElement).dataset.nav === nav.dataset.nav)) }
 })
@@ -465,16 +465,18 @@ document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement;
 
 // ── modals ────────────────────────────────────────────────────────────────
 let modalOpener: HTMLElement | null = null
+let modalPushed = false // phones: any sheet pushes a history entry so Back closes it (the collection sheet has its own #coll entry)
 function openModal(html: string, cls = ''): void {
   const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose" aria-label="Close" title="Close (Esc)">${I.x}</button>`) + html
   modalOpener = document.activeElement as HTMLElement | null
   $('#chainMenu').classList.remove('open'); $('#qres').classList.remove('open'); pv.hidden = true // popovers close under a dialog
-  const modal = $('#modal'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')
+  const modal = $('#modal'); const wasOpen = modal.classList.contains('open'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')
+  if (cls !== 'coll' && innerWidth <= 760 && !wasOpen) { try { history.pushState({ modal: 1 }, ''); modalPushed = true } catch { /* */ } }
   const h = box.querySelector<HTMLElement>('h2, h3, h4'); if (h) { h.id = 'modalTitle'; modal.setAttribute('aria-labelledby', 'modalTitle'); modal.removeAttribute('aria-label') } else { modal.removeAttribute('aria-labelledby'); modal.setAttribute('aria-label', 'Dialog') } // the dialog is named by its own heading
   $('#main').setAttribute('inert', ''); $('#panel').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.rail')?.setAttribute('inert', '')
   const first = box.querySelector<HTMLElement>('input, button:not(#modalClose):not(.share), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
 }
-function closeModal(fromHistory = false): void {
+function closeModal(fromHistory = false, handoff = false): void {
   const modal = $('#modal'); if (!modal.classList.contains('open')) return
   modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal'); modal.removeAttribute('aria-labelledby'); modal.removeAttribute('aria-label')
   $('#main').removeAttribute('inert'); $('#panel').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert'); document.querySelector('.rail')?.removeAttribute('inert')
@@ -482,10 +484,13 @@ function closeModal(fromHistory = false): void {
   // came FROM Back must not pop again
   if (openCollId && !fromHistory) { try { if (sheetPushed && (history.state as { coll?: string } | null)?.coll === openCollId) history.back(); else if (location.hash === '#coll=' + openCollId) history.replaceState(null, '', location.pathname + location.search) } catch { /* */ } }
   sheetPushed = false
+  if (modalPushed && !fromHistory && !handoff) { modalPushed = false; try { if ((history.state as { modal?: number } | null)?.modal) history.back() } catch { /* */ } }
+  if (fromHistory) modalPushed = false
   modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
 addEventListener('popstate', () => {
   if (drawerPushed && !(history.state as { drawer?: number } | null)?.drawer && app.classList.contains('panel-open') && innerWidth <= 1100) { setPanel(false, false, true); return } // Back closed the drawer
+  if (modalPushed && !(history.state as { modal?: number } | null)?.modal && $('#modal').classList.contains('open') && !openCollId) { closeModal(true); return } // Back closed a sheet
   const m = /^#coll=([a-z]+)$/i.exec(location.hash)
   if (m) { if (openCollId !== m[1].toLowerCase()) openCollection(m[1].toLowerCase(), true) } // forward → the sheet again (the entry already exists: no push)
   else if (openCollId) closeModal(true) // back → the sheet closes

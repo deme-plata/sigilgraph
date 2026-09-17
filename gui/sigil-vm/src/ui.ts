@@ -546,6 +546,7 @@ export function legend(s: Snapshot): string {
     <div class="l">${prov('live')}<span>read from sigil-api on this poll (${live} collections, every strip figure, tokens SIGIL/USDS/ROCKY, drops, sales proofs)</span></div>
     <div class="l">${prov('derived')}<span>a stated calculation over live numbers (block rate, rig change vs. today's first sample, network hashrate window)</span></div>
     <div class="l">${prov('pretend')}<span>illustrative — no chain source yet (${pretend} collection${pretend === 1 ? '' : 's'}, wSIGIL3/SSHARE rows, USD prices, the cart)</span></div>
+    <div class="l"><span class="chip live">measured</span><span class="chip gold">design</span><span class="chip derived">external</span><span>the sentence tags in For you / What's next: a live figure quoted in words · how something will work, not on chain yet · another chain's state, read from nowhere here</span></div>
     <div class="l"><span class="mono">${s.offline ? 'node unreachable — showing shells only' : 'last poll ' + new Date(s.at).toLocaleTimeString()} · window changes sampled in this browser for ${s.sampleAgeMin < 60 ? s.sampleAgeMin + ' min' : (s.sampleAgeMin / 60).toFixed(1) + ' h'} (1h needs ≥24 min, 24h ≥ 9.6 h, 7d ≥ 2.8 d)</span></div>`
 }
 

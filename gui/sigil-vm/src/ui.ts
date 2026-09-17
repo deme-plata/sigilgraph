@@ -430,7 +430,7 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
     : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/v1/rocky" target="_blank" rel="noopener" title="the node's own record, JSON">/v1/rocky ↗</a>`
     : t.symbol === 'USDS' ? `<a class="btn ghost sm" href="/sigil-wallet-tron-embedded.html" target="_blank" rel="noopener">USDS desk (wallet) ↗</a><a class="btn ghost sm" href="/v1/usds/status" target="_blank" rel="noopener" title="the node's own record, JSON">/v1/usds/status ↗</a>`
     : `<a class="btn ghost sm" href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">API ↗</a>`
-  return `<tr class="td-row" id="td-${t.symbol.replace(/[^A-Za-z0-9]/g, '')}"><td colspan="11"><div class="td-wrap"><div class="td-grid">${rows.join('')}</div>${spark}<div class="td-links">${links}</div></div></td></tr>`
+  return `<tr class="td-row" id="td-${t.symbol.replace(/[^A-Za-z0-9]/g, '')}"><td colspan="11"><div class="td-wrap"><div class="td-grid">${rows.join('')}</div>${spark}<div class="td-links">${links}<button class="btn ghost sm" data-share-tok="${esc(t.symbol)}" title="sigil-vm.html#tok=${esc(t.symbol)}">Copy link</button></div></div></td></tr>`
 }
 
 // ── wallet panel ──────────────────────────────────────────────────────────

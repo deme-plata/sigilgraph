@@ -247,6 +247,7 @@ export function forYou(s: Snapshot): string {
       : `${esc(rockyDrop.when)}. Cover policies against K⊕ excursions become buyable.`
     next.push(`<li>${tag(rockyDrop.provenance === 'live' ? 'MEASURED' : 'DESIGN', rockyDrop.provenance === 'live' ? 'live' : 'gold')} <b>ROCKY + GaugePush</b> — ${txt}</li>`)
     if (s.gaugeFresh !== null) next.push(`<li>${tag('MEASURED', 'live')} <b>K⊕ gauge feeds</b> — ${s.gaugeFresh} of ${s.gaugeFeeds} feeds fresh on chain${s.gaugeFresh === 0 ? '; the feeder wallet has not pushed yet' : ''}.</li>`)
+    else next.push(`<li>${tag('MEASURED', 'live')} <b>K⊕ gauge feeds</b> — unread this poll: the gauge route did not answer.</li>`)
   }
   next.push(`<li>${tag('DESIGN', 'gold')} <b>USDS oracle feed</b> — ${s.usds?.price_fresh ? 'fed and fresh' : 'not fed yet'}; until a feeder pushes a price, USDS mints cannot be quoted in dollars.</li>`)
   next.push(`<li>${tag(s.poolsRead ? 'MEASURED' : 'UNREAD', s.poolsRead ? 'live' : 'pretend')} <b>First DEX pool</b> — <span class="mono">/v1/pools</span> ${s.poolsRead ? `holds ${s.pools.length} pool${s.pools.length === 1 ? '' : 's'}` : 'did not answer this poll'}; the swap module below quotes the instant liquidity exists.</li>`)

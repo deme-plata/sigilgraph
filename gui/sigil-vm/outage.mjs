@@ -21,6 +21,7 @@ const FAMS = {
   court: ['#trendingTable', ['1 honour', '1 seat']],
   earth: ['#trendingTable', []],
   rocky: ['#foryou', ['blocks to 19,150,000', '-5']],
+  gauge: ['#foryou', ['live at block 0', 'at block 0']], // the ROCKY drop read 'live at block 0' when /v1/gauge failed (09-17)
   pools: ['#foryou, .qcard.route', ['holds 0 pools', '0 pools on g2', 'No liquidity pool exists']],
   dagknight: ['#trendingTable', []],
   bridge: ['#trendingTable', []],

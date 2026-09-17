@@ -256,8 +256,8 @@ export function collectionCard(c: Collection): string {
 }
 
 export function dropCard(d: Drop): string {
-  const st: Record<Drop['status'], string> = { live: 'chip live', minting: 'chip derived', upcoming: 'chip gold', blocked: 'chip bad' }
-  const lbl: Record<Drop['status'], string> = { live: 'live', minting: 'minting', upcoming: 'upcoming', blocked: 'blocked' }
+  const st: Record<Drop['status'], string> = { live: 'chip live', minting: 'chip derived', upcoming: 'chip gold', blocked: 'chip bad', external: 'chip derived' }
+  const lbl: Record<Drop['status'], string> = { live: 'live', minting: 'minting', upcoming: 'upcoming', blocked: 'blocked', external: 'external' }
   return `<a class="card drop wide" href="${d.link}" target="_blank" rel="noopener">
     <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span>${d.status === 'live' && d.provenance === 'live' ? '' : `<span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span>`}<span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
     <div class="meta">

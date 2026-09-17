@@ -36,7 +36,7 @@ export interface Drop {
   name: string
   glyph: Glyph
   cover: string
-  status: 'live' | 'minting' | 'upcoming' | 'blocked'
+  status: 'live' | 'minting' | 'upcoming' | 'blocked' | 'external' // external: live on another chain, read from nowhere on this page
   when: string          // "live since block 6,400,000" / "in ~2.1 h (81,418 blocks)"
   detail: string
   provenance: Provenance
@@ -444,7 +444,7 @@ function buildDrops(usds: Usds | null, rocky: Rocky | null, gauge: Gauge | null,
   })
   d.push({
     id: 'wsigil3', name: 'wSIGIL3 · Polygon leg', glyph: 'braid', cover: coverSvg('wSIGIL3', 'braid', { symbol: 'POLYGON' }),
-    status: bridge ? (bridge.paused ? 'blocked' : 'live') : 'live', when: 'ERC-20 + Uniswap pool live',
+    status: bridge?.paused ? 'blocked' : 'external', when: 'ERC-20 + Uniswap pool live on Polygon', // 'PRETEND … LIVE' on one card read as a contradiction: the leg is live on Polygon, but nothing here reads it
     detail: 'Token and pool exist on Polygon. Bridge mints wait on the relayer; locks on SIGIL are real.',
     provenance: 'pretend', link: '/bridge-slider.html', progress: null,
   })

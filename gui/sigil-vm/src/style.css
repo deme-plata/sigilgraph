@@ -156,7 +156,7 @@ img { display: block; }
 .search-results .r .n { font-weight: 600; }
 .search-results .r .s { font-size: 11.5px; color: var(--muted); }
 .search-results .h { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted-2); padding: 8px 10px 4px; display: flex; justify-content: space-between; align-items: center; }
-.search-results .h .hclr { font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--muted-2); padding: 2px 6px; border-radius: 6px; } .search-results .h .hclr:hover { color: var(--ink); background: var(--hover); }
+.search-results .h .hclr { font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--muted-2); padding: 7px 8px; margin: -6px -4px; border-radius: 6px; } /* a 24px tap target inside an 18px header */ .search-results .h .hclr:hover { color: var(--ink); background: var(--hover); }
 .navlinks { display: flex; gap: 4px; margin-left: 6px; }
 .navlinks a { padding: 8px 12px; border-radius: 10px; font-weight: 600; color: var(--ink-2); font-size: 14px; }
 .navlinks a:hover, .navlinks a.on { background: rgba(127,127,127,.14); color: var(--ink); }
@@ -281,7 +281,7 @@ img { display: block; }
 .hero .thumbs button:hover { opacity: 1; }
 .hero .dots { position: absolute; left: 40px; top: 28px; display: flex; gap: 6px; }
 .hero .dots button { width: 28px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; display: block; padding: 0; position: relative; }
-.hero .dots button::before { content: ''; position: absolute; inset: -8px 0; } /* 19px tap target on a 3px bar */
+.hero .dots button::before { content: ''; position: absolute; inset: -11px 0; } /* 25px tap target on a 3px bar */
 .hero:hover .dots button.on::after { animation-play-state: paused; }
 .hero .dots button.on::after { content: ""; display: block; height: 100%; width: 100%; background: #fff; animation: fill 7s linear; transform-origin: left; }
 @keyframes fill { from { transform: scaleX(0) } to { transform: scaleX(1) } }

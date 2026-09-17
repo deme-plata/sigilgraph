@@ -199,6 +199,7 @@ img { display: block; }
 
 .chain-wrap { position: relative; }
 .chain-chip .car { font-size: 10px; opacity: .6; margin-left: 2px; }
+.chain-chip #chainHeight { display: inline-block; min-width: 10ch; text-align: right; } /* room for a 10-digit height from the first paint — the '—' → number fill used to push the top-bar buttons 47px left a second after load */
 .chain-menu { position: absolute; top: 46px; right: 0; width: 300px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 14px; padding: 6px; display: none; box-shadow: 0 20px 60px rgba(0,0,0,.6); z-index: 60; }
 .chain-menu.open { display: block; }
 .chain-menu .cm { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; font-size: 13px; }

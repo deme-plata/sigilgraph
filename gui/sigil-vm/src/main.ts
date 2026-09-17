@@ -243,7 +243,7 @@ async function poll(): Promise<void> {
     await loadBalances()
     renderAll()
     // a deep link (#dex, #trending…) scrolled before the live content existed — re-anchor once the page has its real height
-    if (firstPaint && location.hash && !snap.offline) { const target = anchorBox(location.hash); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) }
+    if (firstPaint && location.hash && !snap.offline) { const m = /^#coll=([a-z]+)$/.exec(location.hash); if (m) requestAnimationFrame(() => openCollection(m[1])); else { const target = anchorBox(location.hash); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) } } // #coll=<id> is a shareable sheet
     if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false; $('#bellBtn').setAttribute('aria-label', `Activity — ${fmt.n(snap.head.height - prevHeight, 'new block')} since you looked`) }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')
@@ -348,6 +348,7 @@ document.addEventListener('click', (ev) => {
   if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }
   if (ds.watch) { ev.preventDefault(); ev.stopPropagation(); if (watch.has(ds.watch)) watch.delete(ds.watch); else watch.add(ds.watch); try { localStorage.setItem('sigilvm-watch', JSON.stringify([...watch])) } catch { /* */ } renderTrending(); const on = watch.has(ds.watch); document.querySelectorAll<HTMLElement>(`.cm-foot [data-watch="${ds.watch}"]`).forEach((b) => { b.setAttribute('aria-pressed', on ? 'true' : 'false'); b.textContent = on ? '★ Watching' : '☆ Watch' }); return } // the sheet's button follows without a re-render (its focus stays put)
+  if (ds.share) { ev.preventDefault(); const url = `${location.origin}${location.pathname}#coll=${ds.share}`; navigator.clipboard?.writeText(url).then(() => toast(`Copied link — ${url.replace(location.origin, '')}`)).catch(() => toast('Clipboard blocked.', 'warn')); return }
   if (ds.copy) { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard?.writeText(ds.copy).then(() => toast(`Copied ${ds.copy!.length === 64 ? 'id' : 'hash'} ${ds.copy!.slice(0, 8)}…`)).catch(() => toast('Clipboard blocked.', 'warn')); return }
   if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null
@@ -463,12 +464,13 @@ function openModal(html: string, cls = ''): void {
   const modal = $('#modal'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')
   const h = box.querySelector<HTMLElement>('h2, h3, h4'); if (h) { h.id = 'modalTitle'; modal.setAttribute('aria-labelledby', 'modalTitle'); modal.removeAttribute('aria-label') } else { modal.removeAttribute('aria-labelledby'); modal.setAttribute('aria-label', 'Dialog') } // the dialog is named by its own heading
   $('#main').setAttribute('inert', ''); $('#panel').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.rail')?.setAttribute('inert', '')
-  const first = box.querySelector<HTMLElement>('input, button:not(#modalClose), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
+  const first = box.querySelector<HTMLElement>('input, button:not(#modalClose):not(.share), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
 }
 function closeModal(): void {
   const modal = $('#modal'); if (!modal.classList.contains('open')) return
   modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal'); modal.removeAttribute('aria-labelledby'); modal.removeAttribute('aria-label')
   $('#main').removeAttribute('inert'); $('#panel').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert'); document.querySelector('.rail')?.removeAttribute('inert')
+  if (openCollId && location.hash === '#coll=' + openCollId) { try { history.replaceState(null, '', location.pathname + location.search) } catch { /* */ } } // the sheet's URL leaves with the sheet
   modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
 // focus trap: Tab cycles inside the open modal
@@ -484,7 +486,7 @@ document.addEventListener('keydown', (ev) => {
 // recently opened collections (this browser) feed the empty search's 'Recent' group
 const recent: string[] = []
 try { for (const id of JSON.parse(localStorage.getItem('sigilvm-recent') || '[]')) if (typeof id === 'string' && recent.length < 4) recent.push(id) } catch { /* */ }
-function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
+function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); try { history.replaceState(null, '', '#coll=' + id) } catch { /* */ } const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

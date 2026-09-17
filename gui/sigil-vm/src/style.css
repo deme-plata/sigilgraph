@@ -833,6 +833,12 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 :root[data-theme="light"] .card .img .cta .cta-blurb { color: #e4e4ea; }
 
 :root[data-theme="light"] .hero .chip, :root[data-theme="light"] .card .img .chip, :root[data-theme="light"] .cm-head .chip { background: rgba(0,0,0,.55); color: #fff; border-color: rgba(255,255,255,.28); backdrop-filter: blur(6px); }
+/* light forces white chip text on artwork (contrast); the provenance colour survives in the dot */
+:root[data-theme="light"] :is(.hero, .card .img, .cm-head) .chip.live .d { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+:root[data-theme="light"] :is(.hero, .card .img, .cm-head) .chip.derived .d { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+:root[data-theme="light"] :is(.hero, .card .img, .cm-head) .chip.gold .d { background: var(--gold-b); box-shadow: 0 0 6px var(--gold-b); }
+:root[data-theme="light"] :is(.hero, .card .img, .cm-head) .chip.pretend .d { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+:root[data-theme="light"] :is(.hero, .card .img, .cm-head) .chip.bad .d { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
 :root[data-theme="light"] .ttable .act button.sw { background: var(--grad); color: #fff; }
 :root[data-theme="light"] .hero .stat { background: rgba(0,0,0,.5); }
 

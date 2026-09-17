@@ -243,7 +243,7 @@ async function poll(): Promise<void> {
     await loadBalances()
     renderAll()
     // a deep link (#dex, #trending…) scrolled before the live content existed — re-anchor once the page has its real height
-    if (firstPaint && location.hash && !snap.offline) { const m = /^#coll=([a-z]+)$/i.exec(location.hash); const mt = /^#tok=([A-Za-z0-9]+)$/.exec(location.hash); if (m) requestAnimationFrame(() => openCollection(m[1].toLowerCase())); else if (mt) { const t = snap.tokens.find((x) => x.symbol.toLowerCase() === mt[1].toLowerCase()); if (t) { tokSt.open = t.id; renderTokens(); requestAnimationFrame(() => document.querySelector(`#tokens tr[data-tok="${t.id}"]`)?.scrollIntoView({ behavior: 'instant', block: 'center' })) } } else { const target = anchorBox(location.hash); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) } } // #coll=<id> is a shareable sheet
+    if (firstPaint && location.hash && !snap.offline) { const m = /^#coll=([a-z]+)$/i.exec(location.hash); const mt = /^#tok=([A-Za-z0-9]+)$/.exec(location.hash); if (m) requestAnimationFrame(() => openCollection(m[1].toLowerCase(), true)); else if (mt) { const t = snap.tokens.find((x) => x.symbol.toLowerCase() === mt[1].toLowerCase()); if (t) { tokSt.open = t.id; renderTokens(); requestAnimationFrame(() => document.querySelector(`#tokens tr[data-tok="${t.id}"]`)?.scrollIntoView({ behavior: 'instant', block: 'center' })) } } else { const target = anchorBox(location.hash); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) } } // #coll=<id> is a shareable sheet
     if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false; $('#bellBtn').setAttribute('aria-label', `Activity — ${fmt.n(snap.head.height - prevHeight, 'new block')} since you looked`) }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')
@@ -470,13 +470,21 @@ function openModal(html: string, cls = ''): void {
   $('#main').setAttribute('inert', ''); $('#panel').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.rail')?.setAttribute('inert', '')
   const first = box.querySelector<HTMLElement>('input, button:not(#modalClose):not(.share), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
 }
-function closeModal(): void {
+function closeModal(fromHistory = false): void {
   const modal = $('#modal'); if (!modal.classList.contains('open')) return
   modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal'); modal.removeAttribute('aria-labelledby'); modal.removeAttribute('aria-label')
   $('#main').removeAttribute('inert'); $('#panel').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert'); document.querySelector('.rail')?.removeAttribute('inert')
-  if (openCollId && location.hash === '#coll=' + openCollId) { try { history.replaceState(null, '', location.pathname + location.search) } catch { /* */ } } // the sheet's URL leaves with the sheet
+  // the sheet's URL leaves with the sheet: a user close pops the entry the open pushed (so Back and X agree); a close that
+  // came FROM Back must not pop again
+  if (openCollId && !fromHistory) { try { if (sheetPushed && (history.state as { coll?: string } | null)?.coll === openCollId) history.back(); else if (location.hash === '#coll=' + openCollId) history.replaceState(null, '', location.pathname + location.search) } catch { /* */ } }
+  sheetPushed = false
   modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
+addEventListener('popstate', () => {
+  const m = /^#coll=([a-z]+)$/i.exec(location.hash)
+  if (m) { if (openCollId !== m[1].toLowerCase()) openCollection(m[1].toLowerCase(), true) } // forward → the sheet again (the entry already exists: no push)
+  else if (openCollId) closeModal(true) // back → the sheet closes
+})
 // focus trap: Tab cycles inside the open modal
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Tab') return
@@ -490,7 +498,8 @@ document.addEventListener('keydown', (ev) => {
 // recently opened collections (this browser) feed the empty search's 'Recent' group
 const recent: string[] = []
 try { for (const id of JSON.parse(localStorage.getItem('sigilvm-recent') || '[]')) if (typeof id === 'string' && recent.length < 4) recent.push(id) } catch { /* */ }
-function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); try { history.replaceState(null, '', '#coll=' + id) } catch { /* */ } const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
+let sheetPushed = false // true when opening the sheet pushed a history entry (a click); false for a deep-linked arrival, where Back should leave the page
+function openCollection(id: string, fromUrl = false): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); try { if (fromUrl) { history.replaceState({ coll: id }, '', '#coll=' + id); sheetPushed = false } else if ((history.state as { coll?: string } | null)?.coll !== id) { history.pushState({ coll: id }, '', '#coll=' + id); sheetPushed = true } } catch { /* Back closes the sheet */ } const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

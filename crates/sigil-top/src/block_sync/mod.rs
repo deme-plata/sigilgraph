@@ -664,7 +664,11 @@ impl P2PBlockSync {
 
             rt.block_on(async move {
                 // v0.7.1: Use for_sigil() — preconfigured for port 9501 + SIGIL topics
-                let mut net = flux_p2p::NetworkManager::for_sigil("top");
+                // 2026-09-17: join the LIVE network's topics (`sigil-g2`), not the g0 list
+                // `for_sigil` seeds — gossipsub delivers nothing on a topic we did not join,
+                // silently, which is why "top gossip ingest e2e" was never proven.
+                let mut net = flux_p2p::NetworkManager::for_sigil("top")
+                    .with_gossipsub_topics(sigil_net::ALL_TOPICS.iter().copied());
 
                 if let Err(e) = net.start().await {
                     crate::tlog!("[p2p-sync] start failed: {e}");

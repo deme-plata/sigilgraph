@@ -9,7 +9,7 @@ use sigil_header::{BlockHash, SigilBlockHeaderV0};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-pub(super) fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
     // v0.95 (SPINE hardening): RESTORE the 64 MiB cap. v0.39 cut it to 12 MiB on the
     // assumption "a real chunk is <= ~8 MB" — that assumption is WRONG for SIGIL. Every

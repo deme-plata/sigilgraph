@@ -169,6 +169,10 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
     } else if source == "feed" {
         o.push_str(&format!("  {GREEN}● synced from verified live feed{RESET} {DIM}· no local node required — verify on a potato{RESET}\n"));
     }
+    #[cfg(feature = "producer")]
+    if let Some(line) = crate::producer::status::line() {
+        o.push_str(&format!("  {GOLD}⛏ {line}{RESET}\n"));
+    }
     // keybar footer — real keybindings UI
     o.push_str(&format!("  {GOLD}[M]{RESET}{DIM}ine{RESET}   {GREEN}[F]{RESET}{DIM}ull{RESET}  {GREEN}[V]{RESET}{DIM}erify{RESET}  {CYAN}[Y]{RESET}{DIM}esync{RESET}   {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {CYAN}[T]{RESET}{DIM}stats{RESET}   {DIM}[Q]uit{RESET}\n"));
     o

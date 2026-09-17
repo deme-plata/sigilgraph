@@ -153,6 +153,113 @@ pub fn should_produce() -> bool {
     !matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("0"))
 }
 
+// ── Runtime gate 3 + status (2026-09-17, unified binary) ──────────────────────────────
+//
+// Viktor: "i want a unified binary with sigil top node and sigil node so when users download
+// sigil graph they are actually also real nodes if they have full archive. that way it makes
+// sense to press F for full archive in tui — because afterwards it produces real blocks and
+// rewards etc". So the sync-then-produce bootstrap no longer starts on every launch: it waits
+// until the operator has asked for a FULL node — the persisted sync mode is "full" (the F key,
+// `--sync`), or `SIGIL_TOP_PRODUCE=1` is set explicitly. A light-monitor user (the default)
+// gets no multi-hour replay running behind the dashboard unasked. Gates 1 and 2 above still
+// bind: `SIGIL_TOP_PRODUCER=0` / `SIGIL_TOP_PRODUCE=0` mean "never", whatever F says.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+static FULL_NODE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// The operator asked for a full node (F key / persisted "full" / `SIGIL_TOP_PRODUCE=1`).
+pub fn request_full_node() {
+    FULL_NODE_REQUESTED.store(true, Ordering::Relaxed);
+}
+/// Back to light monitor BEFORE the bootstrap started: nothing to stop, just don't start.
+/// (Once production is running it keeps its synced state — see the F handler's toast.)
+pub fn withdraw_full_node_request() {
+    FULL_NODE_REQUESTED.store(false, Ordering::Relaxed);
+}
+pub fn full_node_requested() -> bool {
+    FULL_NODE_REQUESTED.load(Ordering::Relaxed)
+        || matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("1"))
+}
+
+/// What the producer is doing right now, for the dashboard. Written from the bootstrap
+/// thread (`sync.rs`) and the loop (`run.rs`), read once per frame.
+pub mod status {
+    use super::*;
+
+    pub const IDLE: u8 = 0;      // waiting for F (or produce is off)
+    pub const SYNCING: u8 = 1;   // replaying the chain, height in `replayed`
+    pub const PRODUCING: u8 = 2; // synced; the networked loop is minting + gossiping
+    pub const REFUSED: u8 = 3;   // bootstrap failed — reason in `message()`
+
+    static PHASE: AtomicU8 = AtomicU8::new(IDLE);
+    static REPLAYED: AtomicU64 = AtomicU64::new(0);
+    static REPLAY_TARGET: AtomicU64 = AtomicU64::new(0);
+    static MINTED: AtomicU64 = AtomicU64::new(0);
+    static LAST_MINTED_HEIGHT: AtomicU64 = AtomicU64::new(0);
+    static SETTLED: AtomicU64 = AtomicU64::new(0);
+    static PEERS: AtomicU64 = AtomicU64::new(0);
+    static INGESTED: AtomicU64 = AtomicU64::new(0);
+    static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+    pub fn set_phase(p: u8) { PHASE.store(p, Ordering::Relaxed); }
+    pub fn phase() -> u8 { PHASE.load(Ordering::Relaxed) }
+    pub fn set_replayed(h: u64) { REPLAYED.store(h, Ordering::Relaxed); }
+    pub fn replayed() -> u64 { REPLAYED.load(Ordering::Relaxed) }
+    /// The best tip the light engine / node has told us about — lets the dashboard show a
+    /// fraction while the replay runs. 0 = unknown.
+    pub fn set_replay_target(h: u64) { REPLAY_TARGET.store(h, Ordering::Relaxed); }
+    pub fn replay_target() -> u64 { REPLAY_TARGET.load(Ordering::Relaxed) }
+    pub fn note_minted(height: u64) {
+        MINTED.fetch_add(1, Ordering::Relaxed);
+        LAST_MINTED_HEIGHT.store(height, Ordering::Relaxed);
+    }
+    pub fn minted() -> u64 { MINTED.load(Ordering::Relaxed) }
+    pub fn last_minted_height() -> u64 { LAST_MINTED_HEIGHT.load(Ordering::Relaxed) }
+    pub fn set_settled(h: u64) { SETTLED.store(h, Ordering::Relaxed); }
+    pub fn settled() -> u64 { SETTLED.load(Ordering::Relaxed) }
+    pub fn set_peers(n: u64) { PEERS.store(n, Ordering::Relaxed); }
+    /// Live blocks taken off gossip (the proof the loop is on the network at all).
+    pub fn note_ingested(n: u64) { INGESTED.fetch_add(n, Ordering::Relaxed); }
+    pub fn ingested() -> u64 { INGESTED.load(Ordering::Relaxed) }
+    pub fn peers() -> u64 { PEERS.load(Ordering::Relaxed) }
+    pub fn set_message(m: impl Into<String>) {
+        if let Ok(mut g) = MESSAGE.lock() { *g = m.into(); }
+    }
+    pub fn message() -> String {
+        MESSAGE.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// One line for the dashboard, or `None` when there is nothing to say (light monitor,
+    /// production off). Plain text — the renderer adds colour.
+    pub fn line() -> Option<String> {
+        match phase() {
+            IDLE => None,
+            SYNCING => {
+                let h = replayed();
+                let t = replay_target();
+                Some(if t > h && t > 0 {
+                    format!("full node: replaying chain h={h} of ~{t} ({:.1}%) — produces once at the tip", 100.0 * h as f64 / t as f64)
+                } else {
+                    format!("full node: replaying chain h={h} — produces once at the tip")
+                })
+            }
+            PRODUCING => Some(if minted() == 0 {
+                format!(
+                    "full node: LIVE — settled h={} · gossip in {} · peers {} · mints when a rig solves or a tx is pending",
+                    settled(), ingested(), peers()
+                )
+            } else {
+                format!(
+                    "full node: PRODUCING — minted {} (last h={}) · settled h={} · gossip in {} · peers {}",
+                    minted(), last_minted_height(), settled(), ingested(), peers()
+                )
+            }),
+            _ => Some(format!("full node: refused — {}", message())),
+        }
+    }
+}
+
 /// Serializes tests (here and in `run`) that mutate the process-global
 /// SIGIL_TOP_PRODUCER / SIGIL_TOP_PRODUCE gate vars — cargo's parallel test runner
 /// otherwise lets two race on them (one sets while another reads the gate).
@@ -162,6 +269,39 @@ pub(crate) static PRODUCER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gate 3: nothing starts until the operator asks; the ask can be withdrawn while
+    /// still waiting; `SIGIL_TOP_PRODUCE=1` counts as an ask on its own.
+    #[test]
+    fn full_node_request_gate() {
+        let _g = PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SIGIL_TOP_PRODUCE");
+        withdraw_full_node_request();
+        assert!(!full_node_requested(), "fresh install: light monitor, no replay behind the dashboard");
+        request_full_node();
+        assert!(full_node_requested(), "F pressed → full node requested");
+        withdraw_full_node_request();
+        assert!(!full_node_requested(), "F again before the bootstrap started → withdrawn");
+        std::env::set_var("SIGIL_TOP_PRODUCE", "1");
+        assert!(full_node_requested(), "explicit SIGIL_TOP_PRODUCE=1 is an ask by itself");
+        std::env::remove_var("SIGIL_TOP_PRODUCE");
+    }
+
+    /// The dashboard line says nothing while idle and reports a fraction while syncing.
+    #[test]
+    fn status_line_shapes() {
+        status::set_phase(status::IDLE);
+        assert!(status::line().is_none());
+        status::set_phase(status::SYNCING);
+        status::set_replayed(500);
+        status::set_replay_target(1000);
+        let l = status::line().unwrap();
+        assert!(l.contains("h=500") && l.contains("50.0%"), "{l}");
+        status::set_phase(status::REFUSED);
+        status::set_message("no peers");
+        assert!(status::line().unwrap().contains("no peers"));
+        status::set_phase(status::IDLE);
+    }
 
     #[test]
     fn gates_read_the_real_env_vars() {

@@ -652,6 +652,40 @@ static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLoc
 mod startup_util;
 pub(crate) use startup_util::{boot_trace, persist_sync_mode, read_sync_mode};
 
+/// The [F] → full toast, with the unified-binary consequence spelled out: a full archive
+/// is also a real node — it replays the chain with state and then PRODUCES, with the
+/// coinbase going to this wallet. Builds without the `producer` feature say nothing extra.
+fn full_node_toast(base: &str) -> String {
+    #[cfg(feature = "producer")]
+    {
+        if producer::producer_mode_enabled() && producer::should_produce() {
+            return match producer::status::phase() {
+                producer::status::PRODUCING => format!("{base} ⛏ full node already PRODUCING."),
+                producer::status::SYNCING => format!("{base} ⛏ full node replay continues."),
+                _ => format!("{base} ⛏ FULL NODE: replays the chain with state, then produces real blocks — rewards to this wallet."),
+            };
+        }
+    }
+    base.to_string()
+}
+
+/// The [F] → light toast. If the producer is already running it keeps its synced state
+/// (a multi-hour replay is not thrown away by a keypress); if it was only waiting for F,
+/// the request is withdrawn and nothing starts.
+fn light_monitor_toast() -> String {
+    let base = "◇ LIGHT MONITOR — verifies the live tip (10ms proof), holds nothing new. Press F for full archive.";
+    #[cfg(feature = "producer")]
+    {
+        match producer::status::phase() {
+            producer::status::PRODUCING | producer::status::SYNCING => {
+                return format!("{base} ⛏ full node keeps running (quit to stop).");
+            }
+            _ => producer::withdraw_full_node_request(),
+        }
+    }
+    base.to_string()
+}
+
 fn main() {
     // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a
     // Windows double-click, the breadcrumb + panic land in this file so we can
@@ -1185,7 +1219,7 @@ fn main() {
     // `ProducerLoopHandle`'s `Drop` impl) so it is bound here, before the
     // once/interactive dispatch below, and never re-bound to `_`.
     // v7.5.2 STARTUP FIX (Viktor, "won't start on Windows / loads all blocks from genesis"):
-    // producer mode is DEFAULT-ON, and `maybe_start` → `sync_chain_blocking()` runs a FULL sync
+    // producer mode is DEFAULT-ON, and `maybe_start` runs a FULL sync
     // from genesis ON THE CALLING THREAD before returning. Called synchronously here it froze
     // startup before the TUI ever drew its first frame (reproduced under Wine: the boot trace
     // stopped right after the producer-mode gates line). Move the whole sync-then-produce
@@ -1203,8 +1237,29 @@ fn main() {
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot_bg = slot.clone();
         let _ = std::thread::Builder::new().name("producer-bootstrap".into()).spawn(move || {
+            // 2026-09-17 (Viktor: "press F for full archive … afterwards it produces real
+            // blocks and rewards"): do nothing until the operator asks for a FULL node —
+            // the F key, a persisted "full" mode, or SIGIL_TOP_PRODUCE=1. The gates in
+            // `producer::producer_mode_enabled`/`should_produce` still decide "never".
+            if !(producer::producer_mode_enabled() && producer::should_produce()) {
+                return;
+            }
+            while !producer::full_node_requested() {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            // The coinbase payee. `sigil-node`'s mint pays `SIGIL_PRODUCER_WALLET`, and with
+            // nothing set it pays a `c1c1…` placeholder nobody holds — measured 2026-09-17,
+            // 437 blocks minted to it. A user's full node pays the wallet the TUI already
+            // mines to (`[M]`, `SIGIL_MINE_WALLET`, the chosen-wallet file), unless the
+            // operator pinned a producer wallet explicitly.
+            if std::env::var("SIGIL_PRODUCER_WALLET").map(|v| v.trim().is_empty()).unwrap_or(true) {
+                let w = miner_wallet();
+                std::env::set_var("SIGIL_PRODUCER_WALLET", &w);
+                tlog!("[producer] coinbase payee = this node's mining wallet {}… (set SIGIL_PRODUCER_WALLET to override)", &w[..8.min(w.len())]);
+            }
+            boot_trace("producer-mode: full node requested — sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
+            tlog!("[producer] full node requested (F / persisted full / SIGIL_TOP_PRODUCE=1) — sync-then-produce bootstrap starting");
             if let Some(handle) = producer::run::maybe_start(Duration::from_millis(tick_ms)) {
-                boot_trace("producer-mode: sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
                 if let Ok(mut g) = slot_bg.lock() { *g = Some(handle); }
             }
         });
@@ -2239,7 +2294,16 @@ impl App {
             } else {
                 "⬇ Full sync: connecting to chain mesh…".into()
             };
-                            }
+            #[cfg(feature = "producer")]
+            {
+                // The producer's own replay (full blocks + state, the thing that makes
+                // this a REAL node) runs beside the archive; show it on the same line.
+                if target > 0 { producer::status::set_replay_target(target); }
+                if let Some(line) = producer::status::line() {
+                    self.toast = format!("{} · ⛏ {}", self.toast, line);
+                }
+            }
+        }
         // v0.2.35: carry wallet balance from feed into local state (non-breaking — 0 when absent).
         if self.st.wallet_balance > 0 { self.wallet_balance = self.st.wallet_balance; }
         // Auto-update signal: poll the flux release channel every 5 min so the update
@@ -2569,6 +2633,12 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // restart after an update ("it doesn't resume") until they pressed F again.
     let autostart_full = read_sync_mode().as_deref() == Some("full");
     let autofullsync = std::env::var("SIGIL_AUTOFULLSYNC").is_ok();
+    #[cfg(feature = "producer")]
+    if autostart_full || autofullsync {
+        // The persisted [F] choice survives restarts for the producer too: a full node
+        // stays a full node across an update without pressing F again.
+        producer::request_full_node();
+    }
     // ONE-CHAIN (v7.1.6): the LEDGER header mirror is the default sync — full
     // floor→tip in ~1.4s. The SPINE monitor/backfill (31.5M empty dyno blocks,
     // ~8 blk/s serve valve → a 78-DAY eta) no longer auto-starts: it is opt-in
@@ -2895,7 +2965,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                         app.p2p_sync = Some(p2p);
                                         app.full_sync = true;
                                         persist_sync_mode("full"); // LANE-V: survives update/restart
-                                        app.toast = "⛓ FULL ARCHIVE started — syncing genesis→tip, holding every block (~1GB). F again = light monitor.".into();
+                                        #[cfg(feature = "producer")]
+                                        producer::request_full_node();
+                                        app.toast = full_node_toast("⛓ FULL ARCHIVE started — syncing genesis→tip, holding every block (~1GB). F again = light monitor.");
                                     }
                                     app.toast_sticky = true;
                                 } else if let Some(ref p2p) = app.p2p_sync {
@@ -2903,12 +2975,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                         p2p.set_full_archive();
                                         app.full_sync = true;
                                         persist_sync_mode("full");
-                                        app.toast = "⛓ FULL ARCHIVE — base → genesis, downloading + holding every block (~1GB). Press F for light monitor.".into();
+                                        #[cfg(feature = "producer")]
+                                        producer::request_full_node();
+                                        app.toast = full_node_toast("⛓ FULL ARCHIVE — base → genesis, downloading + holding every block (~1GB). Press F for light monitor.");
                                     } else {
                                         p2p.set_light_monitor();
                                         app.full_sync = false;
                                         persist_sync_mode("light");
-                                        app.toast = "◇ LIGHT MONITOR — verifies the live tip (10ms proof), holds nothing new. Press F for full archive.".into();
+                                        app.toast = light_monitor_toast();
                                     }
                                     app.toast_sticky = false;
                                 }

@@ -57,6 +57,18 @@ pub struct ProducerState {
     pub chain: ChainTip,
     pub braid: Braid,
     pub dag_bodies: HashMap<BlockHash, Block>,
+    /// Mint on every tick (`true`, the node's own idle behaviour and what the offline tests
+    /// exercise) or only when this node has something of its own to commit — a creditable
+    /// rig solve or pending transactions (`false`, the default for a user's full node).
+    ///
+    /// 2026-09-17, measured against live g2: settlement follows ONE selected spine
+    /// (`dag_drain_apply`), side blocks are never applied and pay nothing. A free-running
+    /// second producer at 2 blk/s beside Epsilon's 8 blk/s put 1,714 blocks into the DAG in
+    /// three minutes and 0 of them on the spine — pure gossip noise plus `MissingParents`
+    /// churn on the node. A block that carries real work or real transactions is the only
+    /// kind worth racing for the spine with; an idle node lets the network's idle producer
+    /// run. `SIGIL_TOP_MINT_POLICY=free` restores free-run.
+    pub free_run: bool,
     mint_hash_to_tx_hashes: HashMap<BlockHash, Vec<[u8; 32]>>,
     /// The SAME `sigil_api::AppState` a local mining/money HTTP server (see
     /// `producer::mining_api`) is started with, when one is running — `mining`/`send`/
@@ -108,7 +120,8 @@ impl ProducerState {
         // mirrors `sigil-node`'s own `money_state` snapshot-on-settle pattern exactly.
         let state = Arc::new(RwLock::new(chain.state_snapshot()));
         let api = sigil_api::AppState::new(mempool, state);
-        Self { chain, braid, dag_bodies: HashMap::new(), mint_hash_to_tx_hashes: HashMap::new(), api }
+        let free_run = !matches!(std::env::var("SIGIL_TOP_MINT_POLICY").as_deref().map(str::trim), Ok("work"));
+        Self { chain, braid, dag_bodies: HashMap::new(), mint_hash_to_tx_hashes: HashMap::new(), api, free_run }
     }
 
     /// One producer tick, in the same order `sigil-node`'s real loop runs it:
@@ -169,6 +182,27 @@ impl ProducerState {
         // — this instance shares the SAME `MiningBridge`, so it must make the same
         // decision or a sigil-top producer would silently reintroduce the 93.8%
         // pay-yourself behaviour Option C exists to remove.
+        if !self.free_run && solve.is_none() && txs.is_empty() {
+            // Nothing of ours to commit: settle what gossip brought and mint nothing.
+            let (applied, skipped, failed) = dag_drain_apply(
+                &mut self.braid,
+                &mut self.dag_bodies,
+                &mut self.chain,
+                persist,
+                &self.api.send,
+                &self.api.bridge,
+                &self.api.dex,
+                &self.api.usds,
+                &self.api.usds_bridge,
+                &self.api.shielded,
+                &mut self.mint_hash_to_tx_hashes,
+            );
+            if let Ok(mut w) = self.api.state.write() {
+                *w = self.chain.state_snapshot();
+            }
+            return Ok(TickOutcome { minted_height: 0, applied, skipped, failed, settled_height: self.chain.height(), minted_block_bytes: Vec::new() });
+        }
+
         let share_pool = if solve.is_none() {
             self.api.mining.take_share_pool()
         } else {
@@ -184,10 +218,13 @@ impl ProducerState {
             if r.permanent { self.api.shielded.note_rejection(r.hash, &r.reason); }
         }
         let minted_height = block.header.height;
-        // Same wire shape sigil-node's own TOPIC_BLOCKS publisher uses (plain
-        // serde_json::to_vec — confirmed by reading its actual publish call
-        // site) — a networked caller can hand this straight to `net.publish`.
-        let minted_block_bytes = serde_json::to_vec(&block).unwrap_or_default();
+        // The SAME record codec sigil-node's TOPIC_BLOCKS publisher uses and its receiver
+        // decodes with (`chain_log::decode_record`, sigil-record `0xB5` magic + zstd
+        // MessagePack, since 2026-09-14). Until 2026-09-17 this was `serde_json::to_vec`
+        // — the node's decoder returned `None` on every block a sigil-top minted and
+        // dropped it without a log line, so a synced producer would have forked off
+        // alone. `decode_gossip_block` below reads the same codec back.
+        let minted_block_bytes = sigil_node::chain_log::encode_record(&block).unwrap_or_default();
 
         // Fold our own candidate into the braid exactly like an incoming peer
         // block — `dag_drain_apply` only ever settles from the braid's own
@@ -333,7 +370,37 @@ pub fn spawn_producer_loop(chain: ChainTip, tick_interval: Duration) -> Producer
 /// [`spawn_producer_loop`] below, which this module's earlier version used
 /// exclusively and which stays available for anyone who wants the
 /// network-free, purely-local proof (still used by every test in this file).
+/// One live block off `TOPIC_BLOCKS`, in either shape a peer may send: the sigil-record
+/// codec every node publishes today (the only shape the node itself accepts), or the
+/// pre-09-14 `Z`+zstd / plain JSON frame an old sigil-top might still emit.
+pub(crate) fn decode_gossip_block(data: &[u8]) -> Option<Block> {
+    if let Some(b) = sigil_node::chain_log::decode_record(data) {
+        return Some(b);
+    }
+    let inflated = crate::block_sync::verify::inflate_gossip_frame(data)?;
+    serde_json::from_slice::<Block>(&inflated).ok()
+}
+
+/// Where the loop's chain comes from.
+enum ChainSource {
+    /// Already synced by the caller (tests).
+    Ready(ChainTip),
+    /// Sync over the loop's OWN network, with the gossip subscription open BEFORE the
+    /// replay starts. 2026-09-17: the previous shape synced on one `NetworkManager`
+    /// ("producer-sync"), tore it down, then opened a second one for the loop — every
+    /// block gossiped in between (seconds of dialing at 8–110 blk/s) was never seen, the
+    /// braid could not connect the live tip to the replayed one, and the first minted
+    /// block forked. Subscribing first means the unbounded gossip channel holds those
+    /// blocks until the replay's short reply says "caught up"; duplicates the replay
+    /// already applied are harmless to `ingest_foreign_block`.
+    SyncFirst,
+}
+
 fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoopHandle {
+    spawn_networked_loop_from(ChainSource::Ready(chain), tick_interval)
+}
+
+fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> ProducerLoopHandle {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_bg = stop_flag.clone();
     let thread = std::thread::spawn(move || {
@@ -341,22 +408,54 @@ fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoo
             Ok(rt) => rt,
             Err(e) => {
                 crate::tlog!("[producer] ⚠ tokio runtime build failed: {e} — networked loop cannot start");
+                super::status::set_message(format!("tokio runtime: {e}"));
+                super::status::set_phase(super::status::REFUSED);
                 return;
             }
         };
         rt.block_on(async move {
-            let mut net = flux_p2p::NetworkManager::for_sigil("producer");
+            let mut net = flux_p2p::NetworkManager::for_sigil("producer")
+                .with_gossipsub_topics(sigil_net::ALL_TOPICS.iter().copied()); // g2 topics, not g0
             if let Err(e) = net.start().await {
                 crate::tlog!("[producer] ⚠ network start failed: {e} — networked loop cannot start");
+                super::status::set_message(format!("network start: {e}"));
+                super::status::set_phase(super::status::REFUSED);
                 return;
             }
             crate::tlog!(
-                "[producer] network started on sigil-g0 mesh (ephemeral port, identity \"producer\" — \
-                 independent of the light-client sync engine's \"top\" identity)"
+                "[producer] network started on {} mesh (ephemeral port, identity \"producer\" — \
+                 independent of the light-client sync engine's \"top\" identity)",
+                sigil_net::NETWORK_ID_STR
             );
             let mut block_rx = net.subscribe(sigil_net::TOPIC_BLOCKS);
+            let chain = match source {
+                ChainSource::Ready(c) => c,
+                ChainSource::SyncFirst => match super::sync::sync_chain(&net).await {
+                    Some(c) => {
+                        crate::tlog!("[producer] sync-then-produce bootstrap complete: height={} — starting the networked loop", c.height());
+                        c
+                    }
+                    None => {
+                        crate::tlog!(
+                            "[producer] ⚠ refusing to start — sync-then-produce bootstrap failed \
+                             (see [producer-sync] log lines above for the exact step that failed)"
+                        );
+                        if super::status::message().is_empty() {
+                            super::status::set_message("sync-then-produce bootstrap failed — see ~/.sigil-top.log");
+                        }
+                        super::status::set_phase(super::status::REFUSED);
+                        return;
+                    }
+                },
+            };
             let net = Arc::new(net);
             let mut state = ProducerState::new(chain);
+            // A user's full node: mint only with work or transactions unless told otherwise.
+            state.free_run = matches!(std::env::var("SIGIL_TOP_MINT_POLICY").as_deref().map(str::trim), Ok("free"));
+            crate::tlog!(
+                "[producer] mint policy: {} (SIGIL_TOP_MINT_POLICY=free|work)",
+                if state.free_run { "FREE-RUN — a candidate every tick" } else { "WORK — only with a rig solve or pending transactions" }
+            );
             // Local mining HTTP API — 2026-08-25, operator-directed ("let a miner mine
             // against their OWN locally-running node"). Shares `state.api` by clone
             // (cheap — every field is an Arc), so a share submitted here lands in the
@@ -376,37 +475,65 @@ fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoo
                 crate::tlog!("[producer] realization meter ON — K_R + binding constraint every N ticks");
             }
             crate::tlog!("[producer] networked loop started — publishing candidates to {}", sigil_net::TOPIC_BLOCKS);
+            super::status::set_phase(super::status::PRODUCING);
 
             const INGEST_CAP: u32 = 64; // bounded per tick — mirrors the light client's own gossip-flood discipline
+            let mut last_beat = std::time::Instant::now();
             while !stop_flag_bg.load(Ordering::Relaxed) {
+                if last_beat.elapsed() >= Duration::from_secs(60) {
+                    last_beat = std::time::Instant::now();
+                    crate::tlog!(
+                        "[producer] heartbeat: settled h={} · minted {} (last h={}) · gossip in {} · peers {}",
+                        super::status::settled(), super::status::minted(), super::status::last_minted_height(),
+                        super::status::ingested(), net.peer_count()
+                    );
+                }
                 let mut ingested = 0u32;
                 while ingested < INGEST_CAP {
                     let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
                     ingested += 1;
-                    let Some(inflated) = crate::block_sync::verify::inflate_gossip_frame(&data) else { continue };
-                    match serde_json::from_slice::<Block>(&inflated) {
-                        Ok(b) => state.ingest_foreign_block(b),
-                        Err(_) => continue, // malformed gossip — drop, same as the light client does
+                    match decode_gossip_block(&data) {
+                        Some(b) => state.ingest_foreign_block(b),
+                        None => continue, // malformed gossip — drop, same as the light client does
                     }
                 }
                 // Connection bookkeeping only for now — nothing this loop needs to react to yet
                 // (no peer-scoped rate limiting or reputation tracking at this phase).
+                if ingested > 0 { super::status::note_ingested(ingested as u64); }
                 let _ = net.drain_events();
 
                 let mut noop = |_: &[u8]| {};
+                let debug = std::env::var("SIGIL_TOP_PRODUCER_DEBUG").is_ok();
+                let tip_before = state.braid.selected_tip();
                 match state.tick(&mut noop) {
                     Ok(mut o) => {
+                        if debug {
+                            // Who did we build on? The selected tip BEFORE this tick is the
+                            // block our candidate names as parent.
+                            let (tip_h, tip_prod) = tip_before
+                                .and_then(|h| state.dag_bodies.get(&h).map(|b| (b.header.height, b.header.producer)))
+                                .unwrap_or((0, [0u8; 32]));
+                            crate::tlog!(
+                                "[producer-dbg] minted h={} on parent h={} {} producer={}",
+                                o.minted_height, tip_h,
+                                tip_before.map(|h| hex::encode(&h[..4])).unwrap_or_default(),
+                                hex::encode(&tip_prod[..4])
+                            );
+                        }
                         // `publish` takes the bytes by value; take them out rather
                         // than consuming `o`, so the outcome's cheap scalar fields
                         // stay readable below (the realization meter reads
                         // minted/settled heights and `applied`, never the payload).
                         let minted_bytes = std::mem::take(&mut o.minted_block_bytes);
                         if !minted_bytes.is_empty() {
+                            super::status::note_minted(o.minted_height);
                             if let Err(e) = net.publish(sigil_net::TOPIC_BLOCKS, minted_bytes) {
                                 crate::tlog!("[producer] ⚠ publish h={} failed: {e}", o.minted_height);
                             }
                         }
-                        if o.applied > 0 {
+                        super::status::set_settled(o.settled_height);
+                        super::status::set_peers(net.peer_count() as u64);
+                        if o.applied > 0 && o.minted_height > 0 {
                             crate::tlog!(
                                 "[producer] tick: minted h={} → settled h={} (applied={} skipped={} failed={} peers={})",
                                 o.minted_height, o.settled_height, o.applied, o.skipped, o.failed, net.peer_count()
@@ -449,44 +576,12 @@ pub fn maybe_start(tick_interval: Duration) -> Option<ProducerLoopHandle> {
     if !(super::producer_mode_enabled() && super::should_produce()) {
         return None;
     }
-    let chain = match sync_chain_blocking() {
-        Some(c) => c,
-        None => {
-            crate::tlog!(
-                "[producer] ⚠ refusing to start — sync-then-produce bootstrap failed \
-                 (see [producer-sync] log lines above for the exact step that failed)"
-            );
-            return None;
-        }
-    };
-    Some(spawn_networked_loop(chain, tick_interval))
+    // Sync and produce on ONE network, gossip subscribed before the replay (see
+    // `ChainSource::SyncFirst`). Failure is reported through `status`, never as a chain
+    // that starts producing from behind the tip.
+    Some(spawn_networked_loop_from(ChainSource::SyncFirst, tick_interval))
 }
 
-/// Runs [`super::sync::sync_chain`] to completion on a short-lived tokio runtime,
-/// blocking the calling (startup) thread. This runtime — and the ephemeral
-/// `"producer-sync"` network identity it opens — is fully torn down once sync
-/// finishes; [`spawn_networked_loop`] opens its own independent `"producer"`
-/// identity afterward for the ongoing mint/gossip loop. Two short-lived identities
-/// instead of one shared one is a deliberate simplicity choice: it keeps this
-/// bootstrap step fully independent of (and never able to corrupt) the loop's own
-/// long-running network state.
-fn sync_chain_blocking() -> Option<ChainTip> {
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            crate::tlog!("[producer-sync] ⚠ tokio runtime build failed: {e}");
-            return None;
-        }
-    };
-    rt.block_on(async move {
-        let mut net = flux_p2p::NetworkManager::for_sigil("producer-sync");
-        if let Err(e) = net.start().await {
-            crate::tlog!("[producer-sync] ⚠ network start failed: {e}");
-            return None;
-        }
-        super::sync::sync_chain(&net).await
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -567,7 +662,7 @@ mod tests {
             // property above has to hold under, not just the convenient one.
             let feed = |them: &mut ProducerState, bytes: &[u8]| {
                 if bytes.is_empty() { return; }
-                if let Ok(blk) = serde_json::from_slice::<Block>(bytes) {
+                if let Some(blk) = decode_gossip_block(bytes) {
                     them.ingest_foreign_block(blk);
                 }
             };
@@ -609,6 +704,27 @@ mod tests {
     /// test below, which required its own explicit operator go-ahead). This test proves
     /// the NEW code — the local server plus `tick()`'s mining wiring — end-to-end
     /// without touching Epsilon or the live mesh at all.
+    ///
+    /// (The doc above belongs to `local_mining_api_credits_a_real_solve_into_a_minted_block`,
+    /// two functions down.)
+    ///
+    /// The user-node policy: an idle node mints NOTHING (side blocks pay nothing and only
+    /// add churn), free-run mints every tick, and settlement keeps running either way.
+    #[test]
+    fn work_policy_mints_nothing_while_idle() {
+        let mut idle = ProducerState::new(genesis_chain());
+        idle.free_run = false;
+        for _ in 0..5 {
+            let o = idle.tick(&mut |_| {}).expect("tick");
+            assert_eq!(o.minted_height, 0, "work policy: no solve, no txs → no candidate");
+            assert!(o.minted_block_bytes.is_empty(), "nothing to publish");
+        }
+        let mut free = ProducerState::new(genesis_chain());
+        free.free_run = true;
+        let o = free.tick(&mut |_| {}).expect("tick");
+        assert!(o.minted_height > 0 && !o.minted_block_bytes.is_empty(), "free-run mints every tick");
+    }
+
     #[test]
     fn local_mining_api_credits_a_real_solve_into_a_minted_block() {
         std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
@@ -755,7 +871,7 @@ mod tests {
 
     /// `maybe_start` must SHORT-CIRCUIT to None on either opt-out flag
     /// (`SIGIL_TOP_PRODUCER=0` / `SIGIL_TOP_PRODUCE=0`) BEFORE it reaches
-    /// `sync_chain_blocking` — otherwise a unit test wanders into a real
+    /// the network bootstrap — otherwise a unit test wanders into a real
     /// full-genesis network sync and hangs the whole suite forever. Producer
     /// mode is DEFAULT-ON since 2026-08-27 (the earlier opt-in contract this
     /// test used to assert was flipped), so the default-on path is NOT exercised

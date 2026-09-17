@@ -8788,6 +8788,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-integrity"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "sigil-mail"
 version = "5.1.1"
 dependencies = [

@@ -1,0 +1,23 @@
+[package]
+name = "sigil-integrity"
+version = "0.1.0"
+edition = "2021"
+description = "Watches every SIGIL node and proves they hold the same chain and state at the same height — continuously, with alarms. True decentralization is measured, not asserted."
+
+[[bin]]
+name = "sigil-integrity"
+path = "src/main.rs"
+
+[dependencies]
+# The house daemon client (sigil-earth, sigil-oracle-feeder): blocking, no async runtime for the pollers.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde = { workspace = true }
+serde_json = "1"
+hex = "0.4"
+# Webhook signatures: X-Sigil-Signature: sha256=<HMAC-SHA256 of the raw body> — the same primitives sigil-api signs with.
+hmac = "0.12"
+sha2 = { workspace = true }
+# The receiver + a local /status route — the same stack as sigil-api's /v1/events.
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+anyhow = "1"

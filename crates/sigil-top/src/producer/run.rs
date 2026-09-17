@@ -612,6 +612,9 @@ mod tests {
     /// reach, not a different code path.
     #[test]
     fn ticking_advances_the_settled_chain() {
+        // Serialized with every other test that touches the process env (SIGIL_DAG_FINAL_DEPTH
+        // is read by BraidConfig::from_env on EVERY ProducerState::new) — 1-in-3 flaky before.
+        let _env = crate::producer::PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
         let mut state = ProducerState::new(genesis_chain());
         assert_eq!(state.chain.height(), 1, "starts one past genesis");
@@ -646,6 +649,9 @@ mod tests {
     /// the unification work is NOT safe to point at a real mesh, full stop.
     #[test]
     fn two_producers_weave_and_converge_to_identical_chain() {
+        // Serialized with every other test that touches the process env (SIGIL_DAG_FINAL_DEPTH
+        // is read by BraidConfig::from_env on EVERY ProducerState::new) — 1-in-3 flaky before.
+        let _env = crate::producer::PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
         let mut a = ProducerState::new(genesis_chain());
         let mut b = ProducerState::new(genesis_chain());
@@ -727,6 +733,9 @@ mod tests {
 
     #[test]
     fn local_mining_api_credits_a_real_solve_into_a_minted_block() {
+        // Serialized with every other test that touches the process env (SIGIL_DAG_FINAL_DEPTH
+        // is read by BraidConfig::from_env on EVERY ProducerState::new) — 1-in-3 flaky before.
+        let _env = crate::producer::PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
         // Trivial-but-real difficulty: a genuine nonce search + a genuine (short)
         // sequential VDF, not a rigged always-pass check. Fast enough for a unit test.

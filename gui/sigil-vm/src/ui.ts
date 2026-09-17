@@ -49,7 +49,7 @@ export function shell(): string {
   return `
   <a class="skip" href="#main">Skip to content</a>
   <header class="topbar">
-    <a class="brand" href="/sigil-vm.html"><span class="cube">🔮</span><span>SIGIL <span class="vm">VM</span></span><small>MARKET · DEX</small></a>
+    <a class="brand" href="/sigil-vm.html"><span class="cube">🔮</span><span>SIGIL <span class="vm">VM</span></span><small>MARKET · DEX</small><span class="chip gold wip" title="Work in progress — the page is being built in the open; some market features are not on chain yet">WIP</span></a>
     <div class="search">
       <span class="ico">${I.search}</span>
       <input id="q" type="search" placeholder="Search collections, tokens, rigs, wallets…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="qres" aria-expanded="false" aria-label="Search collections, tokens, rigs, wallets" />
@@ -160,6 +160,7 @@ export function shell(): string {
     <a href="#" id="bnWallet" aria-controls="panel" aria-expanded="false">${I.wallet}<span>Wallet</span></a>
   </nav>
   <button class="totop" id="toTop" aria-label="Back to top" hidden>${I.up}</button>
+  <button class="wipbtn" id="wipBtn" aria-haspopup="dialog" title="Work in progress — what is real, what is still being built"><span class="chip gold"><i class="d"></i>WIP</span><span class="t">under construction</span></button>
   <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
   <div class="toasts" id="toasts" role="status" aria-live="polite" aria-relevant="additions"></div>`
 }

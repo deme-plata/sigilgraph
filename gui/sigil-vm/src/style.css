@@ -735,6 +735,13 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .pv-kv b { color: var(--ink); font-family: var(--mono); font-weight: 600; margin-left: 4px; }
 @media (hover: none) { .preview { display: none !important; } }
 
+.brand .wip { margin-left: 8px; vertical-align: 2px; }
+/* bottom-left corner: the page is under construction, and says so wherever the visitor scrolls */
+.wipbtn { position: fixed; left: calc(var(--rail) + 16px); bottom: 20px; z-index: 40; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line-2); color: var(--ink-2); font-size: 12px; font-weight: 600; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.wipbtn:hover { border-color: var(--gold-b); color: var(--ink); }
+@media (max-width: 1100px) { .wipbtn { left: 16px; } }
+@media (max-width: 760px) { .wipbtn { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); left: 12px; } .wipbtn .t { display: none; } .wipbtn { padding: 5px 6px; } }
+.app.embed .wipbtn { display: none !important; }
 .totop { position: fixed; right: 20px; bottom: 20px; z-index: 40; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--line-2); color: var(--ink); display: grid; place-items: center; box-shadow: 0 10px 30px rgba(0,0,0,.45); animation: rise .2s ease; }
 .totop svg { width: 20px; height: 20px; }
 .totop:hover { border-color: var(--cyan); transform: translateY(-2px); }
@@ -884,7 +891,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
    sections and cards do not split across pages. Theme tokens flip to light regardless of the on-screen choice. */
 @media print {
   :root, :root[data-theme="dark"] { --bg: #ffffff; --bg-2: #ffffff; --surface: #ffffff; --surface-2: #f4f4f7; --surface-3: #e8e8ee; --line: rgba(0,0,0,.14); --line-2: rgba(0,0,0,.24); --ink: #0b0b0e; --ink-2: #2a2a33; --muted: #4a4a58; --muted-2: #5e5e6c; --hover: transparent; --card-shadow: none; --rail: 0px; --top: 0px; --panel: 0px; }
-  .topbar, .rail, .panel, .pscrim, .ticker, .bottomnav, .totop, .toasts, .skip, .cats, .arrows, .viewall, .hero .thumbs, .hero .dots, .card .img .cta, .modal, .preview, .foot-keys, .trending .star, #trendWatch, .trending .chev { display: none !important; }
+  .topbar, .rail, .panel, .pscrim, .ticker, .bottomnav, .totop, .wipbtn, .toasts, .skip, .cats, .arrows, .viewall, .hero .thumbs, .hero .dots, .card .img .cta, .modal, .preview, .foot-keys, .trending .star, #trendWatch, .trending .chev { display: none !important; }
   body { background: #fff; color: #0b0b0e; }
   .main { margin: 0 !important; padding: 0 12mm !important; }
   .app.panel-open .main { margin-right: 0 !important; }

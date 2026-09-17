@@ -37,7 +37,7 @@ function nameWithBadge(name: string, verified: boolean): string {
   if (i < 0) return `<span class="nb">${esc(name)}${ver(verified)}</span>`
   return `${esc(name.slice(0, i))} <span class="nb">${esc(name.slice(i + 1))}${ver(verified)}</span>`
 }
-const ver = (v: boolean) => (v ? '<span class="verified" title="on-chain record family">✓</span>' : '')
+const ver = (v: boolean) => (v ? '<span class="verified" role="img" aria-label="verified: an on-chain record family" title="Verified — a record family the chain itself keeps; not a listing anyone created">✓</span>' : '')
 
 // ── shell ─────────────────────────────────────────────────────────────────
 export function shell(): string {

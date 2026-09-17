@@ -44,6 +44,12 @@ if (app.classList.contains('panel-open')) document.getElementById('panelBtn')?.s
 // in, the page behind goes inert, and closing hands focus back to whoever opened it.
 let panelOpener: HTMLElement | null = null
 let lastNav = 'market' // the section the scroll-spy last lit (declared up here: setPanel runs at boot, before the spy is built)
+// a panel action that lands on the page (Swap, a token row) must first put the drawer away on a phone — the page behind it is
+// inert. Its history entry is REPLACED by the destination (a back() + hash push would race, as the connect sheet did).
+function leaveDrawer(hash = ''): void {
+  if (innerWidth <= 1100 && app.classList.contains('panel-open')) { setPanel(false, false, true); drawerPushed = false; try { history.replaceState(null, '', (hash || location.pathname + location.search)) } catch { /* */ } }
+  else if (hash) { try { history.replaceState(null, '', hash) } catch { location.hash = hash } }
+}
 let drawerPushed = false // the phone drawer is a dialog: opening it pushes a history entry so Back closes it (Android convention)
 function setPanel(open: boolean, persist = true, fromHistory = false): void {
   const was = app.classList.contains('panel-open')
@@ -346,10 +352,10 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; btn.setAttribute('aria-label', 'Activity'); panelTab = 'activity'; setPanel(true, false); renderPanel(); return }
   if (btn.id === 'cartBtn') { toast('The cart lights up when listings exist on SIGIL VM — none do yet.', 'warn'); return }
   if (ds.cmtab) { const box = $('#modalBox'); box.querySelectorAll('.cm-tabs button').forEach((b) => b.classList.toggle('on', b === btn)); box.querySelectorAll<HTMLElement>('.cm-pane').forEach((pn) => { pn.hidden = pn.dataset.pane !== ds.cmtab }); return }
-  if (ds.ptok) { tokSt.open = ds.ptok; renderTokens(); const row = document.querySelector(`#tokens tr[data-tok="${ds.ptok}"]`); (row || $('#tokens')).scrollIntoView({ behavior: 'smooth', block: 'center' }); return }
+  if (ds.ptok) { tokSt.open = ds.ptok; renderTokens(); leaveDrawer(); const row = document.querySelector(`#tokens tr[data-tok="${ds.ptok}"]`); (row || $('#tokens')).scrollIntoView({ behavior: 'smooth', block: 'center' }); return }
   if (ds.ptab) { panelTab = ds.ptab as typeof panelTab; renderPanel(); return }
   if (btn.id === 'pSend' || btn.id === 'pReceive') { window.open('/sigil-wallet-tron-embedded.html', '_blank', 'noopener'); return }
-  if (btn.id === 'pSwap') { location.hash = '#swap'; $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
+  if (btn.id === 'pSwap') { leaveDrawer('#swap'); $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
   if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }
   if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }

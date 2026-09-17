@@ -334,7 +334,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .foryou { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 14px; align-items: start; }
 @media (min-width: 1100px) { .foryou { grid-template-columns: 1fr 1.2fr; align-items: stretch; } }
 .fy-col { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
-.fy-h { font-family: var(--display); font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+.fy-h { font-family: var(--display); font-weight: 700; font-size: 15px; margin: 0 0 8px; }
 .fy-h .muted { font-family: var(--sans); font-weight: 500; font-size: 12.5px; }
 .fy-col p { margin: 0 0 8px; color: var(--ink-2); font-size: 13.5px; }
 .fy-col p b { color: var(--ink); }
@@ -640,7 +640,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .foot-cta { display: flex; gap: 8px; flex-wrap: wrap; }
 .foot-cols { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
 @media (min-width: 720px) { .foot-cols { grid-template-columns: repeat(4, 1fr); } }
-.foot-cols h5 { margin: 0 0 10px; font-size: 13px; color: var(--ink); font-weight: 700; }
+.foot-cols h4 { margin: 0 0 10px; font-size: 13px; color: var(--ink); font-weight: 700; }
 .foot-cols a { display: block; padding: 4px 0; color: var(--muted); }
 .foot-cols a:hover { color: var(--ink); }
 .foot-bottom { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted-2); }

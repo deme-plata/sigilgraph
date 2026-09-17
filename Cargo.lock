@@ -3322,15 +3322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flux-ai"
-version = "0.41.0"
-dependencies = [
- "flux-graph",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "flux-ai-author"
 version = "0.1.0"
 dependencies = [
@@ -3368,17 +3359,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "flux-architect"
-version = "0.41.0"
-dependencies = [
- "flux-ai",
- "flux-graph",
- "flux-optimize",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3444,17 +3424,6 @@ name = "flux-content-api"
 version = "0.1.0"
 dependencies = [
  "flux-stamp",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "flux-cortex"
-version = "0.41.0"
-dependencies = [
- "flux-architect",
- "flux-graph",
- "flux-optimize",
  "serde",
  "serde_json",
 ]
@@ -3615,15 +3584,6 @@ dependencies = [
  "sigil-rpc",
  "sigil-state",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "flux-optimize"
-version = "0.41.0"
-dependencies = [
- "flux-graph",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -9232,12 +9192,9 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "ed25519-dalek",
- "flux-cortex",
  "flux-db",
- "flux-graph",
  "flux-miner",
  "flux-moe",
- "flux-optimize",
  "flux-p2p",
  "flux-realization",
  "flux-rev",

@@ -126,10 +126,6 @@ use ratatui::{
 use sigil_state::StateRoots;
 use sigil_tip_proof::TipProof;
 use sigil_oauth::{AuthRequest, Keypair, WalletAssertion, pkce_pair, verify_sig, wallet_id};
-use flux_cortex::Cortex;
-use flux_cortex::ai_cortex::{AiAgent, AgentCapability, default_agent_registry};
-use flux_graph::WorkspaceGraph;
-use flux_optimize::OptimizationPreset;
 // v0.6.0: P2P mesh, swarm coordination, content-addressed version control
 use flux_p2p::NetworkManager;
 use flux_rev::{Store, snapshot, Genesis};
@@ -1835,8 +1831,6 @@ struct App {
     mined_recent: std::collections::VecDeque<(u64, f64, Instant)>, // (mine-chain height, solve ms, when), newest first
     mine_shares_seen: u64,          // last shares_ok observed → detect freshly mined blocks
     // v0.6.0: Cortex MCP combo integration — AI agent registry + optimization engine
-    cortex: Option<Cortex>,
-    agents: Vec<AiAgent>,
     cortex_loops: u64,
     last_cortex_gain: f64,
     cortex_summary: String,
@@ -1922,8 +1916,6 @@ impl App {
               mined_recent: std::collections::VecDeque::new(),
               mine_shares_seen: 0,
               // v0.6.0: Cortex MCP combo integration
-              cortex: None,
-              agents: default_agent_registry(),
               cortex_loops: 0,
               last_cortex_gain: 0.0,
               cortex_summary: String::new(),
@@ -3166,47 +3158,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 }
                             }
                             // v0.6.0: Cortex MCP combo verbs
-                            KeyCode::Char('c') | KeyCode::Char('C') => {
-                                app.toast = "🧠 Cortex loop running…".into();
-                                app.toast_sticky = true;
-                                app.mcp_combo_tool = "flux_cortex_loop".into();
-                                match run_cortex_loop() {
-                                    Ok(s) => {
-                                        app.cortex_loops += 1;
-                                        app.last_cortex_gain = s.actual_total_gain_pct.unwrap_or(0.0);
-                                        app.cortex_summary = s.summary_text.clone();
-                                        // v0.11.0: publish to the shared snapshot so the explorer's
-                                        // /api/v1/cortex panel reflects the engine live.
-                                        if let Ok(mut cx) = app.cortex_shared.lock() {
-                                            cx.loops = app.cortex_loops;
-                                            cx.last_gain_pct = app.last_cortex_gain;
-                                            cx.summary = app.cortex_summary.clone();
-                                            cx.last_tool = "flux_cortex_loop".into();
-                                        }
-                                        // flux-rev: content-addressed snapshot for p2p sync
-                                        let rev_note = match rev_snapshot(&std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil")) {
-                                            Ok(id) => format!(" rev:{}", &id[..12]),
-                                            Err(_) => String::new(),
-                                        };
-                                        app.mcp_combo_result = format!("✓ Cortex loop #{}: {:.2}% gain{}", app.cortex_loops, app.last_cortex_gain, rev_note);
-                                    }
-                                    Err(e) => {
-                                        app.mcp_combo_result = format!("✗ Cortex: {e}");
-                                    }
-                                }
-                            }
-                            KeyCode::Char('a') | KeyCode::Char('A') => {
-                                app.toast = "🔍 AI audit running…".into();
-                                app.toast_sticky = true;
-                                app.mcp_combo_tool = "flux_sigil_audit".into();
-                                app.mcp_combo_result = format!("✓ Audit scan complete — {} agents available", app.agents.len());
-                            }
-                            KeyCode::Char('h') | KeyCode::Char('H') => {
-                                app.toast = "🩺 AI heal running…".into();
-                                app.toast_sticky = true;
-                                app.mcp_combo_tool = "flux_sigil_heal".into();
-                                app.mcp_combo_result = "✓ Heal scan complete — sigil-top crate is healthy".into();
-                            }
+                            // (2026-09-17: the [C]ortex / [A]udit / [H]eal arms are gone — the last two
+                            // printed hardcoded "✓ … complete" results without running anything.)
                             // v0.7.0: Fleet health check — AIs monitor their node fleet
                             KeyCode::Char('n') | KeyCode::Char('N') => {
                                 app.fleet_last_check = Instant::now();
@@ -3560,32 +3513,6 @@ fn rev_snapshot(ws_root: &std::path::Path) -> Result<String, String> {
 
 
 /// v0.6.0: Cortex loop result for the TUI
-struct CortexLoopResult {
-    actual_total_gain_pct: Option<f64>,
-    summary_text: String,
-}
-
-/// v0.6.0: Run a single Cortex optimization loop against the current workspace.
-fn run_cortex_loop() -> Result<CortexLoopResult, String> {
-    let ws_root = std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil");
-    let ws = flux_graph::resolve_workspace(&ws_root)
-        .map_err(|e| format!("workspace resolution: {e}"))?;
-    let mut cortex = Cortex::new(ws);
-    let result = cortex.run_loop(OptimizationPreset::MaxPerf);
-    let summary = cortex.summary();
-    let summary_text = serde_json::to_string_pretty(&summary).unwrap_or_default();
-    Ok(CortexLoopResult {
-        actual_total_gain_pct: result.actual_total_gain_pct,
-        summary_text,
-    })
-}
-
-// ── Card dashboard v2 — ground-up redesign co-authored with DeepSeek-V4. Block-element
-//    art + colour + accent stripes (▌), NO dingbats — rich even on the legacy Windows
-//    console. Each render_* returns an owned Paragraph<'static>. Integrated + bug-fixed
-//    by Claude (f.area, .areas, manual supply bar, owned spans).
-
-
 fn render_update_splash(frame: u8) -> Paragraph<'static> {
     const FRAMES: [&str; 8] = [
         "    ◆─────────◆",

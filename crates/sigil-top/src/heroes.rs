@@ -218,13 +218,16 @@ pub(crate) fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layou
     f.render_widget(render_supply(app), left_v[3]);
     f.render_widget(crate::kgauge_ui::render_kgauge_card(app), left_v[4]);
 
-    let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
+    // 2026-09-17 (Viktor): the CORTEX MCP card is gone. It showed a hardcoded agent registry
+    // ("top DeepSeek V4 Pro") and ran a workspace optimizer against a path that only exists
+    // on the build box — nothing a node operator can use, and it read as "SIGIL is coded by
+    // DeepSeek". The rows go to the block stream.
+    let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Min(0)])
         .spacing(1)
         .split(right_area);
     f.render_widget(render_security(app), right_v[0]);
     f.render_widget(render_fleet_card(app), right_v[1]);
-    f.render_widget(render_cortex_card(app), right_v[2]);
-    f.render_widget(render_block_stream(app), right_v[3]);
+    f.render_widget(render_block_stream(app), right_v[2]);
 }
 
 /// v0.33.2 BOLD NEON card: rounded obsidian card with a bright neon title chip glowing in

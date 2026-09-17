@@ -86,10 +86,9 @@ sigil-block-store = { path = "../sigil-block-store" }
 sigil-synctune = { path = "../sigil-synctune" }
 sigil-sync = { path = "../sigil-sync" }
 
-# v0.6.0: Cortex MCP combos — Autonomous Continuous Optimization Engine + AI agent registry
-flux-cortex = { path = "../../../flux/crates/flux-cortex" }
-flux-graph = { path = "../../../flux/crates/flux-graph" }
-flux-optimize = { path = "../../../flux/crates/flux-optimize" }
+# (v0.6.0 had the Cortex MCP combos here; removed 2026-09-17, see below)
+# 2026-09-17: flux-cortex / flux-graph / flux-optimize dropped with the CORTEX MCP card —
+# a build-box optimizer has no business in a node operator's binary.
 # 2026-09-06 (operator ask): the AI antivirus. A skill pack is SIGNED, which proves who
 # wrote it — not that what they wrote is safe for a model to obey. flux-moe::antivirus
 # scans every skill body for injection / exfiltration / destruction / credentials /

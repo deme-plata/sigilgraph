@@ -485,80 +485,6 @@ pub(crate) fn render_block_stream(app: &App) -> Paragraph<'static> {
     Paragraph::new(lines).block(card_block(&title, C_VBRIGHT))
 }
 
-pub(crate) fn render_cortex_card(app: &App) -> Paragraph<'static> {
-    let agents_available = app.agents.iter().filter(|a| a.available).count();
-    let agent_count = app.agents.len();
-    let top_name: String = app.agents.iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| "—".to_string());
-    let mcp_combo_tool = app.mcp_combo_tool.clone();
-    let mcp_combo_result = app.mcp_combo_result.clone();
-    let last_cortex_gain = app.last_cortex_gain;
-    let cortex_loops = app.cortex_loops;
-
-    let agent_line = if agent_count == 0 {
-        Line::from(dim("agents  — no registry loaded"))
-    } else {
-        Line::from(vec![
-            dim("agents  "),
-            Span::styled(format!("{}/{}", agents_available, agent_count),
-                Style::default().fg(if agents_available > 0 { C_GREEN } else { C_RED }).add_modifier(Modifier::BOLD)),
-            dim("  top "),
-            Span::styled(top_name, Style::default().fg(C_CYAN)),
-        ])
-    };
-    let combo_line = if mcp_combo_tool.is_empty() {
-        Line::from(vec![
-            dim("combo   "),
-            Span::styled("idle", Style::default().fg(C_DIM)),
-            dim("  [C] execute cortex loop"),
-        ])
-    } else {
-        let running = mcp_combo_result.is_empty();
-        Line::from(vec![
-            dim("combo   "),
-            Span::styled(mcp_combo_tool, Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            dim(if running { "  running…" } else { "  ✓ done" }),
-        ])
-    };
-    let cortex_line = if last_cortex_gain > 0.0 {
-        Line::from(vec![
-            dim("cortex  "),
-            Span::styled(format!("+{:.1}%", last_cortex_gain),
-                Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim(format!("  loops {}", cortex_loops)),
-        ])
-    } else if cortex_loops > 0 {
-        Line::from(vec![
-            dim("cortex  "),
-            Span::styled(format!("no gain  loops {}", cortex_loops),
-                Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("cortex  "),
-            Span::styled("idle  [C] run optimization loop",
-                Style::default().fg(C_DIM)),
-        ])
-    };
-    let mcp_line = if !mcp_combo_result.is_empty() {
-        let preview: String = mcp_combo_result.chars().take(60).collect();
-        Line::from(vec![
-            dim("result  "),
-            Span::styled(preview, Style::default().fg(C_VBRIGHT)),
-        ])
-    } else {
-        Line::from(dim("result  —"))
-    };
-    let lines = vec![
-        agent_line,
-        combo_line,
-        cortex_line,
-        mcp_line,
-    ];
-    Paragraph::new(lines).block(card_block(" ◆ CORTEX MCP", C_NEON_GOLD))
-}
 
 pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
     let toast = if app.toast.is_empty() { String::new() } else { format!(" › {}", app.toast) };
@@ -574,8 +500,6 @@ pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
     kb.extend(keys("[T]", "stats", C_CYAN));
     kb.extend(keys("[B]", "activity", C_CYAN));
     kb.extend(keys("[U]", "pdate", C_VBRIGHT));
-    kb.extend(keys("[C]", "ortex", C_GOLD));
-    kb.extend(keys("[H]", "eal", C_GOLD));
     kb.extend(keys("[N]", "odes", C_CYAN));
     kb.extend(keys("[L]", "ogin", C_VBRIGHT));
     kb.extend(keys("[Q]", "uit", C_RED));

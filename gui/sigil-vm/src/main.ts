@@ -37,18 +37,22 @@ function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAtt
 let theme: 'dark' | 'light' = 'dark'
 try { const saved = localStorage.getItem('sigilvm-theme'); theme = saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') } catch { /* */ }
 applyTheme(theme)
-try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('panel-open') } catch { /* */ }
-if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
+let panelPref: string | null = null; try { panelPref = localStorage.getItem('sigilvm-panel') } catch { /* */ }
+if (panelPref === 'open' || (panelPref === null && innerWidth >= 1600)) app.classList.add('panel-open') // a wide screen opens the panel by default — unless the visitor closed it before (that choice used to be overridden on every load)
 if (app.classList.contains('panel-open')) document.getElementById('panelBtn')?.setAttribute('aria-expanded', 'true')
 // One door for the wallet panel. In drawer mode (≤1100px it overlays the page) it behaves like a dialog: focus moves
 // in, the page behind goes inert, and closing hands focus back to whoever opened it.
 let panelOpener: HTMLElement | null = null
 let lastNav = 'market' // the section the scroll-spy last lit (declared up here: setPanel runs at boot, before the spy is built)
-function setPanel(open: boolean, persist = true): void {
+let drawerPushed = false // the phone drawer is a dialog: opening it pushes a history entry so Back closes it (Android convention)
+function setPanel(open: boolean, persist = true, fromHistory = false): void {
   const was = app.classList.contains('panel-open')
   app.classList.toggle('panel-open', open)
   if (persist) { try { localStorage.setItem('sigilvm-panel', open ? 'open' : 'closed') } catch { /* */ } }
   const drawer = innerWidth <= 1100
+  if (drawer && open && !was && !fromHistory) { try { history.pushState({ drawer: 1 }, ''); drawerPushed = true } catch { /* */ } }
+  if (!open && was && drawerPushed && !fromHistory) { drawerPushed = false; try { if ((history.state as { drawer?: number } | null)?.drawer) history.back() } catch { /* */ } }
+  if (fromHistory) drawerPushed = false
   if (open && !was) {
     panelOpener = document.activeElement as HTMLElement | null
     if (drawer) { $('#main').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.bottomnav')?.removeAttribute('inert'); setTimeout(() => (document.getElementById('panelClose') || document.querySelector<HTMLElement>('.panel button'))?.focus(), 30) }
@@ -481,6 +485,7 @@ function closeModal(fromHistory = false): void {
   modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
 addEventListener('popstate', () => {
+  if (drawerPushed && !(history.state as { drawer?: number } | null)?.drawer && app.classList.contains('panel-open') && innerWidth <= 1100) { setPanel(false, false, true); return } // Back closed the drawer
   const m = /^#coll=([a-z]+)$/i.exec(location.hash)
   if (m) { if (openCollId !== m[1].toLowerCase()) openCollection(m[1].toLowerCase(), true) } // forward → the sheet again (the entry already exists: no push)
   else if (openCollId) closeModal(true) // back → the sheet closes

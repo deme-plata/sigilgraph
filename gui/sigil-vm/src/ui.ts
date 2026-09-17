@@ -173,6 +173,22 @@ export function skeleton(n: number, cls = ''): string {
 }
 
 // ── hero ──────────────────────────────────────────────────────────────────
+// OpenSea's four card figures, said in each record family's own terms (a floor is never a price here)
+const FIGURES: Record<string, string> = {
+  blocks: 'Floor = blue score of the newest block in the recent set · Items = chain height · Owners = distinct producers in the recent set · Volume = blocks in the recent set',
+  rigs: 'Floor = the weakest live rig\'s hashrate · Items = live rigs · Owners = distinct rig wallets · Volume = network hashrate',
+  notes: 'Floor = free leaves this epoch (capacity − notes) · Items = notes in the pool · Owners = wallets with a published viewing key · Volume = SIGIL sealed in the pool',
+  earth: 'Floor = glyphs paid per attestation · Items = attestation rows · Owners = the attester wallet · Volume = the last anchored tx',
+  bench: 'Floor = one seat · Items = seats · Owners = justices · Volume = whether the bench root is chain-verified',
+  honours: 'Floor = one honour · Items = honours conferred · Owners = recipients · Volume = docket entries',
+  treasury: 'Floor = the treasury balance · Items = one vault · Owners = the nation · Volume = the welfare carve in bps',
+  rocky: 'Floor = the cover fee in bps · Items = policies written · Owners = not exposed by /v1/rocky · Volume = ROCKY in the cover pool',
+  bridge: 'Floor = SIGIL in the vault · Items = locks · Owners = not exposed by /v1/bridge/status · Volume = relayer state (open / paused)',
+  coins: 'Floor = no batch yet · Items = batches anchored · Owners = holders of anchored coins · Volume = batches anchored',
+  book: 'Floor = the PDF is free · Items = none on chain · Owners = none on chain · Volume = the manuscript version',
+}
+// one of the four, for a tooltip: 'Floor = …' → the part after '=' 
+function figureMeaning(id: string, i: number): string { const part = (FIGURES[id] || '').split(' · ')[i] || ''; return part.replace(/^[A-Za-z]+ = /, '') }
 export function hero(s: Snapshot, idx: number): string {
   const list = s.featured.length ? s.featured : s.collections
   if (!list.length) return ''
@@ -187,10 +203,10 @@ export function hero(s: Snapshot, idx: number): string {
       ${c.by ? `<div class="by">${esc(c.by)}</div>` : ''}
       <p>${esc(c.blurb)}</p>
       <div class="stats">
-        <div class="stat"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div>
-        <div class="stat"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div>
-        <div class="stat"><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div>
-        <div class="stat"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div>
+        <div class="stat" title="${esc(figureMeaning(c.id, 0))}"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div>
+        <div class="stat" title="${esc(figureMeaning(c.id, 1))}"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div>
+        <div class="stat" title="${esc(figureMeaning(c.id, 2))}"><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div>
+        <div class="stat" title="${esc(figureMeaning(c.id, 3))}"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div>
         ${(() => { const ch = s.changes[c.id]?.['24h'] ?? (c.id === 'rigs' ? c.volumeChange : null); if (ch !== null && ch !== undefined) return `<div class="stat"><div class="k">24h</div><div class="v">${delta(ch)}</div></div>`; if (c.id === 'blocks' && h.blkPerSec) return `<div class="stat"><div class="k">Rate</div><div class="v">${h.blkPerSec.toFixed(1)} blk/s</div></div>`; if (c.id === 'rigs' && h.hashChange !== null) return `<div class="stat"><div class="k">Window</div><div class="v">${delta(h.hashChange)}</div></div>`; return '' })()}
       </div>
       <div class="cta"><button class="btn primary lg" data-coll="${c.id}">View collection</button><a class="btn ghost lg" href="#swap">Swap SIGIL</a></div>
@@ -251,7 +267,7 @@ export function collectionCard(c: Collection): string {
     <div class="meta">
       <div class="name">${nameWithBadge(c.name, c.verified)}</div>
       ${c.by ? `<div class="byline">${esc(c.by)}</div>` : ''}
-      <div class="kv"><div><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div style="text-align:right"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div></div>
+      <div class="kv"><div title="${esc(figureMeaning(c.id, 0))}"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div style="text-align:right" title="${esc(figureMeaning(c.id, 1))}"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div></div>
     </div></a>`
 }
 
@@ -469,20 +485,6 @@ export function panelActivity(s: Snapshot, mine: string | null = null): string {
   return rows.join('') || `<div class="pempty">No activity read yet.</div>`
 }
 
-// OpenSea's four card figures, said in each record family's own terms (a floor is never a price here)
-const FIGURES: Record<string, string> = {
-  blocks: 'Floor = blue score of the newest block in the recent set · Items = chain height · Owners = distinct producers in the recent set · Volume = blocks in the recent set',
-  rigs: 'Floor = the weakest live rig\'s hashrate · Items = live rigs · Owners = distinct rig wallets · Volume = network hashrate',
-  notes: 'Floor = free leaves this epoch (capacity − notes) · Items = notes in the pool · Owners = wallets with a published viewing key · Volume = SIGIL sealed in the pool',
-  earth: 'Floor = glyphs paid per attestation · Items = attestation rows · Owners = the attester wallet · Volume = the last anchored tx',
-  bench: 'Floor = one seat · Items = seats · Owners = justices · Volume = whether the bench root is chain-verified',
-  honours: 'Floor = one honour · Items = honours conferred · Owners = recipients · Volume = docket entries',
-  treasury: 'Floor = the treasury balance · Items = one vault · Owners = the nation · Volume = the welfare carve in bps',
-  rocky: 'Floor = the cover fee in bps · Items = policies written · Owners = not exposed by /v1/rocky · Volume = ROCKY in the cover pool',
-  bridge: 'Floor = SIGIL in the vault · Items = locks · Owners = not exposed by /v1/bridge/status · Volume = relayer state (open / paused)',
-  coins: 'Floor = no batch yet · Items = batches anchored · Owners = holders of anchored coins · Volume = batches anchored',
-  book: 'Floor = the PDF is free · Items = none on chain · Owners = none on chain · Volume = the manuscript version',
-}
 export function collectionModal(c: Collection, s: Snapshot, watched = false, mine: string | null = null): string {
   const items: string[] = []
   // an item that belongs to the connected wallet says so (OpenSea's 'you own this'): a 'yours' chip and a class to lift it

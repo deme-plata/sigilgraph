@@ -168,6 +168,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 static FULL_NODE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// The g2 producer's hybrid ids, in `sigil-node`'s `SIGIL_TRUSTED_PRODUCER_ID_HEX` format
+/// (`hex[@from],…`): the key retired on 2026-09-15 (signed every checkpoint before block
+/// 18,874,368) and the rotated one (from there on). Same list happysrv and node3 carry.
+pub const DEFAULT_TRUSTED_PRODUCER_IDS: &str =
+    "ccb24eab7f4d975d9aac142837bcea8a4f8a559b6497c7fbe83b91118d78bb5b,0512706efc948876251f9c5010106dea11cf3cdc49d9193ce98a4d6e9f222fb4";
+
 /// The operator asked for a full node (F key / persisted "full" / `SIGIL_TOP_PRODUCE=1`).
 pub fn request_full_node() {
     FULL_NODE_REQUESTED.store(true, Ordering::Relaxed);

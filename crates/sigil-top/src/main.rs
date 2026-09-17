@@ -1247,6 +1247,14 @@ fn main() {
             while !producer::full_node_requested() {
                 std::thread::sleep(Duration::from_secs(1));
             }
+            // The hybrid (post-quantum) checkpoint verifier in `ChainTip::apply` needs the
+            // producer's trusted hybrid id or it reports every checkpoint as FAILED
+            // (observe-only, but on the dashboard). A downloaded node trusts the g2
+            // producer's ids by default — the retired 09-15 key for older blocks and the
+            // rotated one — exactly what happysrv and node3 are configured with.
+            if std::env::var("SIGIL_TRUSTED_PRODUCER_ID_HEX").map(|v| v.trim().is_empty()).unwrap_or(true) {
+                std::env::set_var("SIGIL_TRUSTED_PRODUCER_ID_HEX", producer::DEFAULT_TRUSTED_PRODUCER_IDS);
+            }
             // The coinbase payee. `sigil-node`'s mint pays `SIGIL_PRODUCER_WALLET`, and with
             // nothing set it pays a `c1c1…` placeholder nobody holds — measured 2026-09-17,
             // 437 blocks minted to it. A user's full node pays the wallet the TUI already
@@ -2692,6 +2700,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     }
     let mut stdout = std::io::stdout();
     if let Err(e) = execute!(stdout, EnterAlternateScreen) { boot_trace(&format!("EnterAlternateScreen failed (continuing): {e}")); }
+    // 2026-09-17: from here on the TUI owns the terminal, so every `eprintln!` in the
+    // node library this binary embeds (braid config, hybrid checkpoint verdicts, …) goes
+    // to the logfile instead of over the dashboard. Restored on normal exit.
+    if let Ok(logp) = std::env::var("FLUX_DB_LOG") {
+        match platform::redirect_stderr_to(&logp) {
+            Some(r) => { if let Ok(mut g) = STDERR_REDIRECT.lock() { *g = Some(r); } }
+            None => boot_trace("stderr → logfile redirect failed (continuing; stray stderr may paint over the TUI)"),
+        }
+    }
 
     // v0.10.5 "stable uptime": a panic anywhere below would otherwise leave the
     // user's terminal in raw mode + alternate screen = a bricked, unusable shell.
@@ -3503,8 +3520,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
     IN_TUI.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut g) = STDERR_REDIRECT.lock() {
+        if let Some(r) = g.take() { platform::restore_stderr(&r); }
+    }
     res
 }
+
+/// The stderr → logfile redirect installed for the TUI's lifetime (see `platform.rs`).
+static STDERR_REDIRECT: std::sync::Mutex<Option<platform::StderrRedirect>> = std::sync::Mutex::new(None);
 
 
 

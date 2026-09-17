@@ -67,3 +67,89 @@ pub(crate) fn win_has_console() -> bool {
 }
 #[cfg(not(windows))]
 pub(crate) fn win_has_console() -> bool { false }
+
+// ── stderr → logfile while the TUI owns the terminal (2026-09-17) ─────────────────────
+//
+// The unified binary runs sigil-node's own library code (braid config, hybrid checkpoint
+// verdicts, coinbase rejections, …) which reports with `eprintln!`. Under ratatui's
+// alternate screen every such line is painted straight over the dashboard — Viktor's
+// screen on 2026-09-17 had "⚠ hybrid checkpoint at height 19628032 FAILED verification"
+// spliced through the toast and stray digits in the box borders. Per-library quiet flags
+// (`FLUX_DB_QUIET`, `FLUX_DB_LOG`) cannot cover a whole crate tree, so the process-level
+// answer is to point file descriptor 2 at the logfile for the TUI's lifetime. Rust's
+// `eprintln!` writes to fd 2 on every call (no cached handle on either platform), so the
+// redirect takes effect immediately and `restore_stderr` puts the terminal back for the
+// panic hook and for a normal exit.
+pub(crate) struct StderrRedirect {
+    #[cfg(not(windows))]
+    saved: i32,
+    #[cfg(windows)]
+    saved: isize,
+}
+
+#[cfg(not(windows))]
+pub(crate) fn redirect_stderr_to(path: &str) -> Option<StderrRedirect> {
+    use std::os::unix::io::AsRawFd;
+    extern "C" {
+        fn dup(fd: i32) -> i32;
+        fn dup2(src: i32, dst: i32) -> i32;
+    }
+    let f = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+    // SAFETY: plain POSIX fd calls on descriptors this process owns; `f` stays alive until
+    // after dup2 has copied it onto fd 2, after which the original may close.
+    unsafe {
+        let saved = dup(2);
+        if saved < 0 || dup2(f.as_raw_fd(), 2) < 0 {
+            return None;
+        }
+        Some(StderrRedirect { saved })
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn restore_stderr(r: &StderrRedirect) {
+    extern "C" {
+        fn dup2(src: i32, dst: i32) -> i32;
+        fn close(fd: i32) -> i32;
+    }
+    // SAFETY: restores the descriptor `redirect_stderr_to` saved; idempotent.
+    unsafe {
+        if r.saved >= 0 {
+            let _ = dup2(r.saved, 2);
+            let _ = close(r.saved);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn redirect_stderr_to(path: &str) -> Option<StderrRedirect> {
+    use std::os::windows::io::IntoRawHandle;
+    type Handle = isize;
+    extern "system" {
+        fn GetStdHandle(n: u32) -> Handle;
+        fn SetStdHandle(n: u32, h: Handle) -> i32;
+    }
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // (DWORD)-12
+    let f = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+    let h = f.into_raw_handle() as Handle; // leaked on purpose: lives as long as fd 2 points at it
+    // SAFETY: Win32 std-handle table calls on handles this process owns.
+    unsafe {
+        let saved = GetStdHandle(STD_ERROR_HANDLE);
+        if SetStdHandle(STD_ERROR_HANDLE, h) == 0 {
+            return None;
+        }
+        Some(StderrRedirect { saved })
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn restore_stderr(r: &StderrRedirect) {
+    extern "system" {
+        fn SetStdHandle(n: u32, h: isize) -> i32;
+    }
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;
+    // SAFETY: puts back the handle `redirect_stderr_to` saved; idempotent.
+    unsafe {
+        let _ = SetStdHandle(STD_ERROR_HANDLE, r.saved);
+    }
+}

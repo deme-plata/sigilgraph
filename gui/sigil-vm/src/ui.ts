@@ -384,11 +384,11 @@ export function tokenTable(s: Snapshot, st: TokenTableState): string {
     <h3 style="margin-bottom:16px">Available Tokens</h3>
     <div class="tokens-tools"><div class="s">${I.search}<input id="tokQ" placeholder="Search by name, symbol, or token id…" value="${esc(st.q)}"></div>
       <div class="f">${(['all', 'gainers', 'losers'] as const).map((f) => `<button class="${st.filter === f ? 'on' : ''}" data-filter="${f}">${f[0].toUpperCase() + f.slice(1)}</button>`).join('')}</div></div>
-    <div class="ttable"><table aria-label="Available tokens"><thead><tr><th>Token</th>${th('price', 'Price', 'USD price · none of these has an on-chain oracle reading yet')}${th('change1h', '1h')}${th('change24h', '24h')}${th('change7d', '7d')}${th('volume24h', 'Vol')}${th('supply', 'Supply')}${th('liquidity', 'Liq')}${th('holders', 'Holders')}${th('ageBlocks', 'Age')}<th>Actions</th></tr></thead><tbody>
+    <div class="ttable"><table aria-label="Available tokens"><thead><tr><th>Token</th>${th('price', 'Price', 'USD price · none of these has an on-chain oracle reading yet')}${th('change1h', '1h')}${th('change24h', '24h')}${th('change7d', '7d')}${th('volume24h', 'Vol')}${th('supply', 'Supply')}${th('liquidity', 'Liq')}${th('holders', 'Holders', 'wallets with a published viewing key — open holders are not counted by any route')}${th('ageBlocks', 'Age')}<th>Actions</th></tr></thead><tbody>
       ${list.map((t, i) => `<tr data-tok="${t.id}" style="animation-delay:${i * 50}ms"><td><div class="tk"><img src="${t.icon}" alt=""><div><div class="sym"><span class="status-dot ${t.status}" title="${esc(t.statusNote)}"></span>${esc(t.symbol)}${t.tags.map((g) => `<span class="tag ${tagCls(g)}">${esc(g)}</span>`).join('')}</div><div class="nm">${esc(t.name)} · ${esc(t.statusNote)}</div></div></div></td>
         <td>${usd(t.price)}</td><td>${delta(t.change1h)}</td><td>${delta(t.change24h)}</td><td>${delta(t.change7d)}</td><td>${t.volume24h === null ? '<span class="muted">—</span>' : fmt.num(t.volume24h)}</td>
         <td>${t.supply === null ? '<span class="muted">—</span>' : fmt.num(t.supply) + (t.maxSupply ? ` <span class="muted">/ ${fmt.num(t.maxSupply, 0)}</span>` : '')}</td>
-        <td>${t.liquidity === null ? '<span class="muted">—</span>' : fmt.num(t.liquidity)}</td><td>${t.holders === null ? '<span class="muted">—</span>' : fmt.int(t.holders)}</td><td>${t.ageBlocks === null ? '<span class="muted">—</span>' : fmt.num(t.ageBlocks, 1) + ' blk'}</td>
+        <td>${t.liquidity === null ? '<span class="muted">—</span>' : fmt.num(t.liquidity)}</td><td${t.holders !== null ? ` title="${t.holders === null ? '' : fmt.int(t.holders)} wallets with a published viewing key — open (transparent) holders are not counted by any route"` : ''}>${t.holders === null ? '<span class="muted">—</span>' : fmt.int(t.holders) + '<small class="muted"> reg.</small>'}</td><td>${t.ageBlocks === null ? '<span class="muted">—</span>' : fmt.num(t.ageBlocks, 1) + ' blk'}</td>
         <td><div class="act"><button class="sw" data-swap="${t.id}">Swap</button><button data-info="${t.id}" aria-expanded="${st.open === t.id ? 'true' : 'false'}" aria-controls="td-${t.symbol.replace(/[^A-Za-z0-9]/g, '')}">${st.open === t.id ? 'Close' : 'Info'}</button></div></td></tr>${st.open === t.id ? tokenDetailRow(t, s) : ''}`).join('')}
     ${list.length ? '' : `<tr class="empty"><td colspan="11"><div class="tempty">${st.q ? `Nothing matches “${esc(st.q)}”.` : st.filter === 'gainers' ? 'No gainers — there is no on-chain price yet, so nothing has moved. The moment an oracle or a pool publishes one, this fills in.' : 'No losers — there is no on-chain price yet, so nothing has moved.'}</div></td></tr>`}
     </tbody></table></div>
@@ -403,7 +403,7 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
     cell('Decimals', String(t.decimals)),
     cell('Status', `<span class="status-dot ${t.status}"></span>${esc(t.statusNote)}`),
     cell('Supply', t.supply === null ? '—' : fmt.num(t.supply, 4) + (t.maxSupply ? ` / ${fmt.num(t.maxSupply, 0)}` : '')),
-    cell('Holders', t.holders === null ? '—' : fmt.int(t.holders) + ' registered'),
+    cell('Holders', t.holders === null ? '—' : fmt.int(t.holders) + ' registered <span class="muted">(published viewing keys — open holders are not counted by any route)</span>'),
     cell('Liquidity', t.liquidity === null ? 'no pool' : fmt.num(t.liquidity)),
     cell('Provenance', prov(t.provenance)),
   ]

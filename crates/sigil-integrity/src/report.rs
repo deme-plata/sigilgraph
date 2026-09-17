@@ -50,10 +50,15 @@ pub struct Report {
     pub heights_tracked: usize,
     pub verdict: String,
     pub alarms: Vec<Alarm>,
+    /// Per node, the newest 512 `(height, block_hash_hex)` this monitor saw from it — the
+    /// spine hash of its finality certificate for committee nodes, its finalized block hash
+    /// otherwise. A client that holds the chain compares its OWN hash at any of these heights:
+    /// equal hash ⇒ equal header ⇒ equal committed roots, exact at that height, no race.
+    pub spine_hashes: BTreeMap<String, Vec<(u64, String)>>,
     pub caveat: &'static str,
 }
 
-pub const CAVEAT: &str = "Verdicts are drawn only at EQUAL height. A single mismatch is inconclusive (a node's applied height and its live roots can be a block apart under load); a mismatch that persists across ≥3 distinct heights is a fork. `lag_blocks` is that node's applied height against the highest applied height seen; a follower syncing from genesis lags by design.";
+pub const CAVEAT: &str = "Verdicts are drawn only at EQUAL height and only from BLOCK HASHES (exact; a hash commits to the header's state roots). Live roots from /v1/integrity are read racily against the height and are reported as ROOTS-RACE, never as a fork. A hash mismatch that persists across ≥3 distinct heights is a fork. `lag_blocks` is that node's applied height against the highest applied height seen; a follower syncing from genesis lags by design.";
 
 pub struct Tracker {
     pub nodes: BTreeMap<String, NodeStatus>,
@@ -85,16 +90,26 @@ impl Tracker {
                 Verdict::Disagree { against } => {
                     st.disagreements += 1;
                     st.last_disagree = Some(Disagreement { height, what: what.into(), against: against.clone(), ts_ms: now_ms() });
-                    let hs = self.disagree_heights.entry(node.to_string()).or_default();
-                    if !hs.contains(&height) {
-                        hs.insert(0, height);
-                        hs.truncate(16);
-                    }
-                    pending = Some(if hs.len() >= 3 {
-                        ("FORK".to_string(), format!("{what} differs from {} at {} distinct heights (latest {height})", against.join(","), hs.len()))
+                    // 2026-09-17: only a BLOCK-HASH disagreement can call a fork. `/v1/integrity`
+                    // reads its height and its live roots separately, so at 8–110 blk/s the pair
+                    // is routinely a block apart and "roots differ" fired FORK on all three nodes
+                    // while their finalized spines agreed at 180/180 common heights. The hash is
+                    // exact at its height and commits to the roots; roots stay an inconclusive
+                    // side channel (kind ROOTS-RACE) that never counts toward the fork rule.
+                    if what == "roots" {
+                        pending = Some(("ROOTS-RACE".to_string(), format!("live roots at height {height} differ from {} — inconclusive (height/roots read racily); the hash rule decides", against.join(","))));
                     } else {
-                        ("MISMATCH".to_string(), format!("{what} at height {height} differs from {} — inconclusive until it repeats", against.join(",")))
-                    });
+                        let hs = self.disagree_heights.entry(node.to_string()).or_default();
+                        if !hs.contains(&height) {
+                            hs.insert(0, height);
+                            hs.truncate(16);
+                        }
+                        pending = Some(if hs.len() >= 3 {
+                            ("FORK".to_string(), format!("{what} hash differs from {} at {} distinct heights (latest {height})", against.join(","), hs.len()))
+                        } else {
+                            ("MISMATCH".to_string(), format!("{what} hash at height {height} differs from {} — inconclusive until it repeats", against.join(",")))
+                        });
+                    }
                 }
             }
         }
@@ -150,7 +165,15 @@ impl Tracker {
         } else {
             "no equal-height comparison yet".to_string()
         };
-        Report { ts_ms: now_ms(), started_ms: self.started_ms, nodes: self.nodes.clone(), last_common_agreement: lca, heights_tracked: ledger.rows.len(), verdict, alarms: self.alarms.iter().rev().take(30).cloned().collect(), caveat: CAVEAT }
+        let mut spine_hashes: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+        for name in self.nodes.keys() {
+            let v: Vec<(u64, String)> = ledger.rows.iter().rev()
+                .filter_map(|(h, row)| row.spine.get(name).or_else(|| row.block.get(name)).map(|x| (*h, x.clone())))
+                .take(512)
+                .collect();
+            spine_hashes.insert(name.clone(), v);
+        }
+        Report { ts_ms: now_ms(), started_ms: self.started_ms, nodes: self.nodes.clone(), last_common_agreement: lca, heights_tracked: ledger.rows.len(), verdict, alarms: self.alarms.iter().rev().take(30).cloned().collect(), spine_hashes, caveat: CAVEAT }
     }
 }
 

@@ -38,6 +38,7 @@ mod mining_ui;  // LANE-U: mining tab + hero renderers
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
+mod integrity_ui; // ◈ DATA INTEGRITY card — our block hash vs every network node's at equal height
 mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
 mod ai_setup;   // [A]I auto-setup: install/start ollama + pull the model, from a flux-SIGNED manifest
 mod skills;     // flux-signed skill packs (text-only) for flux-moe
@@ -1847,6 +1848,9 @@ struct App {
     // v0.6.5: Real P2P block sync via flux-p2p mesh (Delta + Epsilon)
     p2p_sync: Option<block_sync::P2PBlockSync>,
     p2p_state: block_sync::P2PSyncState,
+    /// The light archive's reader, once the store has opened (shared with the explorer's
+    /// local API). The DATA INTEGRITY card reads our hash at a height from it.
+    block_reader: std::sync::Arc<std::sync::OnceLock<block_store::BlockReader>>,
     p2p_blocks_synced: u64,
     p2p_rate: f64,                            // backfill blocks/sec (10s trailing window = current speed)
     p2p_rate_samples: std::collections::VecDeque<(std::time::Instant, u64)>, // (t, blocks_synced)
@@ -1929,6 +1933,7 @@ impl App {
               // v0.6.5: P2P block sync starts lazy — launched in run_tui after terminal is ready
               p2p_sync: None,
               p2p_state: block_sync::P2PSyncState::default(),
+              block_reader: std::sync::Arc::new(std::sync::OnceLock::new()),
               p2p_blocks_synced: 0,
               p2p_rate: 0.0,
               p2p_rate_samples: std::collections::VecDeque::new(),
@@ -2191,6 +2196,7 @@ impl App {
         // and env have been applied by then). `spawn` is idempotent, so calling it every
         // cycle costs one atomic and cannot produce a second sampling thread.
         crate::kgauge_ui::spawn(crate::kgauge_ui::api_base_of(&api));
+        crate::integrity_ui::spawn(crate::kgauge_ui::api_base_of(&api), self.block_reader.clone());
         let prior_synced = self.synced_height;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -2741,6 +2747,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // scope from there.)
 
     // v0.11.0: local-first explorer API over the verified spine + cortex snapshot.
+    app.block_reader = reader_cell.clone();
     let local_api = std::sync::Arc::new(local_api::LocalApi {
         reader: reader_cell.clone(),
         sync: sync_handle,

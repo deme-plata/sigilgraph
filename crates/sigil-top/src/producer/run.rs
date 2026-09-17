@@ -479,6 +479,9 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
 
             const INGEST_CAP: u32 = 64; // bounded per tick — mirrors the light client's own gossip-flood discipline
             let mut last_beat = std::time::Instant::now();
+            // Start the integrity ring at the replayed tip minus a window, so the card can
+            // compare heights the network already certified.
+            let mut ring_from = state.chain.height().saturating_sub(4096).max(state.chain.window_base());
             while !stop_flag_bg.load(Ordering::Relaxed) {
                 if last_beat.elapsed() >= Duration::from_secs(60) {
                     last_beat = std::time::Instant::now();
@@ -533,6 +536,14 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
                         }
                         super::status::set_settled(o.settled_height);
                         super::status::set_peers(net.peer_count() as u64);
+                        // Feed the DATA INTEGRITY ring with every newly settled block's hash.
+                        // `chain.height()` is the NEXT height, so settled blocks are below it.
+                        for h in ring_from..o.settled_height {
+                            if let Some(b) = state.chain.get(h) {
+                                super::status::push_settled(h, b.hash());
+                            }
+                        }
+                        ring_from = ring_from.max(o.settled_height);
                         if o.applied > 0 && o.minted_height > 0 {
                             crate::tlog!(
                                 "[producer] tick: minted h={} → settled h={} (applied={} skipped={} failed={} peers={})",

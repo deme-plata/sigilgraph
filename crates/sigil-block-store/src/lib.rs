@@ -1474,7 +1474,7 @@ impl BlockReader {
         None
     }
 
-    fn hash_at_height(&self, h: u64) -> Option<String> {
+    pub fn hash_at_height(&self, h: u64) -> Option<String> {
         let hashk = self.db.get(&height_key(h)).ok().flatten()?;
         String::from_utf8(hashk).ok()
     }

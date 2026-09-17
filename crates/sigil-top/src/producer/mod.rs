@@ -207,6 +207,29 @@ pub mod status {
     static PEERS: AtomicU64 = AtomicU64::new(0);
     static INGESTED: AtomicU64 = AtomicU64::new(0);
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    /// The newest settled `(height, block hash)` pairs, for the DATA INTEGRITY card's
+    /// exact-at-height comparison against the network (8,192 ≈ 17 min at 8 blk/s).
+    static SETTLED_RING: std::sync::Mutex<std::collections::VecDeque<(u64, [u8; 32])>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+    const SETTLED_CAP: usize = 8192;
+
+    pub fn push_settled(height: u64, hash: [u8; 32]) {
+        if let Ok(mut g) = SETTLED_RING.lock() {
+            if g.back().map(|(h, _)| *h >= height).unwrap_or(false) { return; }
+            g.push_back((height, hash));
+            while g.len() > SETTLED_CAP { g.pop_front(); }
+        }
+    }
+    /// Our settled block hash at exactly `height`, if we still hold it.
+    pub fn settled_hash_at(height: u64) -> Option<[u8; 32]> {
+        let g = SETTLED_RING.lock().ok()?;
+        let (first, _) = *g.front()?;
+        if height < first { return None; }
+        let idx = (height - first) as usize;
+        g.get(idx).filter(|(h, _)| *h == height).map(|(_, x)| *x)
+    }
+    /// Highest settled height in the ring (0 = nothing yet).
+    pub fn settled_top() -> u64 { SETTLED_RING.lock().ok().and_then(|g| g.back().map(|(h, _)| *h)).unwrap_or(0) }
 
     pub fn set_phase(p: u8) { PHASE.store(p, Ordering::Relaxed); }
     pub fn phase() -> u8 { PHASE.load(Ordering::Relaxed) }

@@ -287,7 +287,12 @@ async fn fetch_chunk_with_retry(
 /// through is not a lesser form of success; it is indistinguishable from "the peer or
 /// the network broke," and `sync_chain`'s caller must refuse to start on it exactly as
 /// it would refuse on a snapshot fetch failure.
-async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Option<u64> {
+///
+/// 2026-09-18: also the mid-run REPAIR the networked loop calls when its settled chain
+/// has frozen behind the gossip tip (`run.rs`, the resync lane) — it is the same
+/// height-addressed catch-up the bootstrap trusts, so a frozen node recovers along the
+/// network's spine instead of waiting for parents that will never be gossiped again.
+pub(super) async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Option<u64> {
     let mut waited = 0u32;
     while net.connected_peers().is_empty() && waited < PEER_WAIT_TRIES {
         tokio::time::sleep(PEER_WAIT_STEP).await;

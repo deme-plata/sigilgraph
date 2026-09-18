@@ -206,6 +206,14 @@ pub mod status {
     static SETTLED: AtomicU64 = AtomicU64::new(0);
     static PEERS: AtomicU64 = AtomicU64::new(0);
     static INGESTED: AtomicU64 = AtomicU64::new(0);
+    /// Highest block height seen on live gossip — the network's tip as this loop knows
+    /// it. `settled` trailing this by more than the finality depth for long is the
+    /// "frozen behind the network" fault the resync lane in `run.rs` repairs.
+    static GOSSIP_TIP: AtomicU64 = AtomicU64::new(0);
+    /// Parked (parent-missing) views in the braid, sampled after each tick.
+    static PARKED: AtomicU64 = AtomicU64::new(0);
+    /// Mid-run tail resyncs performed (each one is a logged `[producer] RESYNC` line).
+    static RESYNCS: AtomicU64 = AtomicU64::new(0);
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     /// The newest settled `(height, block hash)` pairs, for the DATA INTEGRITY card's
     /// exact-at-height comparison against the network (8,192 ≈ 17 min at 8 blk/s).
@@ -252,6 +260,14 @@ pub mod status {
     pub fn note_ingested(n: u64) { INGESTED.fetch_add(n, Ordering::Relaxed); }
     pub fn ingested() -> u64 { INGESTED.load(Ordering::Relaxed) }
     pub fn peers() -> u64 { PEERS.load(Ordering::Relaxed) }
+    pub fn note_gossip_tip(h: u64) { GOSSIP_TIP.fetch_max(h, Ordering::Relaxed); }
+    pub fn gossip_tip() -> u64 { GOSSIP_TIP.load(Ordering::Relaxed) }
+    /// How far the settled chain trails the newest gossiped block (0 when unknown).
+    pub fn lag() -> u64 { gossip_tip().saturating_sub(settled()) }
+    pub fn set_parked(n: u64) { PARKED.store(n, Ordering::Relaxed); }
+    pub fn parked() -> u64 { PARKED.load(Ordering::Relaxed) }
+    pub fn note_resync() { RESYNCS.fetch_add(1, Ordering::Relaxed); }
+    pub fn resyncs() -> u64 { RESYNCS.load(Ordering::Relaxed) }
     pub fn set_message(m: impl Into<String>) {
         if let Ok(mut g) = MESSAGE.lock() { *g = m.into(); }
     }
@@ -273,17 +289,28 @@ pub mod status {
                     format!("full node: replaying chain h={h} — produces once at the tip")
                 })
             }
-            PRODUCING => Some(if minted() == 0 {
-                format!(
-                    "full node: LIVE — settled h={} · gossip in {} · peers {} · mints when a rig solves or a tx is pending",
-                    settled(), ingested(), peers()
-                )
-            } else {
-                format!(
-                    "full node: PRODUCING — minted {} (last h={}) · settled h={} · gossip in {} · peers {}",
-                    minted(), last_minted_height(), settled(), ingested(), peers()
-                )
-            }),
+            PRODUCING => {
+                // The lag is the one number that says whether this node is actually
+                // following the network: ~final_depth (512) is healthy, thousands means
+                // the settled chain is frozen and the resync lane is (or should be) at work.
+                let lag = lag();
+                let behind = if lag > 2048 {
+                    format!(" · ⚠ {lag} BEHIND the network ({} parked, {} resyncs)", parked(), resyncs())
+                } else {
+                    String::new()
+                };
+                Some(if minted() == 0 {
+                    format!(
+                        "full node: LIVE — settled h={} · net h={} · gossip in {} · peers {}{behind} · mints when a rig solves or a tx is pending",
+                        settled(), gossip_tip(), ingested(), peers()
+                    )
+                } else {
+                    format!(
+                        "full node: PRODUCING — minted {} (last h={}) · settled h={} · net h={} · gossip in {} · peers {}{behind}",
+                        minted(), last_minted_height(), settled(), gossip_tip(), ingested(), peers()
+                    )
+                })
+            }
             _ => Some(format!("full node: refused — {}", message())),
         }
     }

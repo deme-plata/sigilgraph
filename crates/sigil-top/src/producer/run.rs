@@ -69,6 +69,14 @@ pub struct ProducerState {
     /// kind worth racing for the spine with; an idle node lets the network's idle producer
     /// run. `SIGIL_TOP_MINT_POLICY=free` restores free-run.
     pub free_run: bool,
+    /// Highest header height taken off gossip so far — the network tip as this loop sees
+    /// it. Compared with `chain.height()` by the resync lane in the networked loop.
+    pub gossip_tip: u64,
+    /// What `braid.insert` said about every gossiped block. Before 2026-09-18 the outcome
+    /// was discarded (`let _ =`), so a node whose braid was parking every block behind one
+    /// parent it would never receive looked, in its own log, exactly like a healthy one:
+    /// "gossip in" climbing, "settled" frozen, no line saying why.
+    pub ingest: IngestStats,
     mint_hash_to_tx_hashes: HashMap<BlockHash, Vec<[u8; 32]>>,
     /// The SAME `sigil_api::AppState` a local mining/money HTTP server (see
     /// `producer::mining_api`) is started with, when one is running — `mining`/`send`/
@@ -79,6 +87,22 @@ pub struct ProducerState {
     /// does. `state` (the published `SigilState` snapshot money-API reads balances from)
     /// is refreshed after every settled tick — see the write in [`Self::tick`].
     pub api: sigil_api::AppState,
+}
+
+/// Running totals of [`sigil_dagknight::InsertOutcome`]s for gossiped blocks.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IngestStats {
+    pub inserted: u64,
+    pub duplicate: u64,
+    /// Parked behind a parent the braid does not hold. A handful is normal (gossip is
+    /// not ordered); a count that only ever grows while `inserted` stands still is the
+    /// frozen-behind-the-network fault.
+    pub missing_parents: u64,
+    pub below_final: u64,
+    pub rejected: u64,
+    /// Merge edges to never-received bodies anchored as trusted history so the block
+    /// could link (see `link_view`). Routine on a mesh with more than one producer.
+    pub merge_parents_anchored: u64,
 }
 
 /// What one `tick()` accomplished — logged by the loop wrapper, asserted on by tests.
@@ -121,7 +145,7 @@ impl ProducerState {
         let state = Arc::new(RwLock::new(chain.state_snapshot()));
         let api = sigil_api::AppState::new(mempool, state);
         let free_run = !matches!(std::env::var("SIGIL_TOP_MINT_POLICY").as_deref().map(str::trim), Ok("work"));
-        Self { chain, braid, dag_bodies: HashMap::new(), mint_hash_to_tx_hashes: HashMap::new(), api, free_run }
+        Self { chain, braid, dag_bodies: HashMap::new(), free_run, gossip_tip: 0, ingest: IngestStats::default(), mint_hash_to_tx_hashes: HashMap::new(), api }
     }
 
     /// One producer tick, in the same order `sigil-node`'s real loop runs it:
@@ -276,8 +300,74 @@ impl ProducerState {
     pub fn ingest_foreign_block(&mut self, block: Block) {
         let view = BlockView::from(&block.header);
         let vh = view.hash;
-        let _ = self.braid.insert(view);
+        self.gossip_tip = self.gossip_tip.max(block.header.height);
+        self.link_view(view);
         dag_store_body(&mut self.dag_bodies, DAG_BODIES_CAP, vh, block);
+    }
+
+    /// Put one header view into the braid the way a FOLLOWER must: a merge edge to a
+    /// body this node never received is anchored as trusted history, not waited for.
+    ///
+    /// 2026-09-18, the freeze on Viktor's own node. `Braid::insert` parks a view until
+    /// EVERY parent is known — the spine parent AND up to four merge parents. Epsilon
+    /// merges side tips into every block it mints (`merge_tips(.., 4)`), and a side tip
+    /// is a block some other sigil-top gossiped once — before this node subscribed, or
+    /// to a mesh neighbour that never relayed it here. Backfill is height-addressed and
+    /// serves the spine only, so such a hash can never be fetched; the first Epsilon
+    /// block naming one parked, every block behind it parked, and the settled chain
+    /// stopped for good. Settled STATE never reads a merge parent (`ChainTip::apply`
+    /// walks `parent_hash` only), which is exactly why `dag_seed_braid` already anchors
+    /// unknown merge edges when it seeds from the local window — this applies the same
+    /// rule live. The SPINE parent is never anchored: an unknown spine parent is a real
+    /// gap, and parking + the resync lane in the networked loop is the right answer.
+    fn link_view(&mut self, view: BlockView) -> sigil_dagknight::InsertOutcome {
+        use sigil_dagknight::InsertOutcome;
+        if view.height > 0 && self.braid.contains(&view.parent) {
+            for mp in &view.merge_parents {
+                if !self.braid.contains(mp) {
+                    self.braid.anchor_trusted(*mp, view.height.saturating_sub(1));
+                    self.ingest.merge_parents_anchored += 1;
+                }
+            }
+        }
+        let out = self.braid.insert(view);
+        match out {
+            InsertOutcome::Inserted { .. } => self.ingest.inserted += 1,
+            InsertOutcome::Duplicate => self.ingest.duplicate += 1,
+            InsertOutcome::MissingParents(_) => self.ingest.missing_parents += 1,
+            InsertOutcome::BelowFinal { .. } => self.ingest.below_final += 1,
+            InsertOutcome::Rejected(_) => self.ingest.rejected += 1,
+        }
+        out
+    }
+
+    /// Rebuild the braid from the settled chain's own window, then re-link every cached
+    /// body above the settled tip (ascending) — the step after a mid-run
+    /// [`super::sync::tail_replay`] has moved `chain` forward underneath a braid that was
+    /// parked behind a parent it never got. The peer's backfill serves its APPLIED chain,
+    /// which trails the blocks it gossips by its finality depth; those already-received
+    /// blocks are what the re-link puts back, so live gossip (still buffered by the loop)
+    /// finds its parent. Returns how many cached bodies linked.
+    pub fn reseed_from_chain(&mut self) -> u64 {
+        use sigil_dagknight::InsertOutcome;
+        self.braid = dag_seed_braid(&self.chain);
+        self.mint_hash_to_tx_hashes.clear();
+        let keep = self.chain.height().saturating_sub(1);
+        self.dag_bodies.retain(|_, b| b.header.height >= keep);
+        let mut views: Vec<BlockView> = self.dag_bodies.values()
+            .filter(|b| b.header.height >= self.chain.height())
+            .map(|b| BlockView::from(&b.header))
+            .collect();
+        views.sort_by_key(|v| v.height);
+        let mut linked = 0u64;
+        for v in views {
+            if matches!(self.link_view(v), InsertOutcome::Inserted { .. }) { linked += 1; }
+        }
+        if let Ok(mut w) = self.api.state.write() {
+            *w = self.chain.state_snapshot();
+        }
+        self.api.mining.publish_tip(self.chain.height(), self.chain.parent_hash());
+        linked
     }
 }
 
@@ -478,17 +568,48 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
             super::status::set_phase(super::status::PRODUCING);
 
             const INGEST_CAP: u32 = 64; // bounded per tick — mirrors the light client's own gossip-flood discipline
+            // ── The resync lane (2026-09-18) ─────────────────────────────────────────
+            // Measured on Viktor's own unified node: settled h=20,468,505 for 16 hours while
+            // "gossip in" climbed past 466,000 — every live block parked in the braid behind
+            // a parent it never received, `let _ = braid.insert(..)` swallowing the reason.
+            // Nothing in this loop could recover: parents are only ever gossiped once, the
+            // body cache (`DAG_BODIES_CAP`) evicts lowest-height first, so eight idle
+            // minutes behind is already unrecoverable, and the local mining API kept
+            // handing the rig the same frozen challenge (every solve after the first:
+            // "duplicate: this (wallet, nonce) already credited at this height").
+            //
+            // Repair = the SAME height-addressed catch-up the bootstrap trusts: when the
+            // settled chain has not moved for `RESYNC_STALL` while the gossip tip sits
+            // more than `RESYNC_LAG_BLOCKS` above it, `tail_replay` the chain to the peers'
+            // tip through `chain.apply`, then reseed the braid from the caught-up chain
+            // and let live gossip (still buffered in `block_rx`) link on top, exactly as
+            // it does after the first bootstrap. Healthy lag is ~final_depth (512); the
+            // threshold is four times that so a node that is merely finalizing never
+            // trips it.
+            const RESYNC_LAG_BLOCKS: u64 = 2048;
+            const RESYNC_STALL: Duration = Duration::from_secs(90);
             let mut last_beat = std::time::Instant::now();
+            let mut last_settled_h = state.chain.height();
+            let mut settled_since = std::time::Instant::now();
+            let mut last_resync_try = std::time::Instant::now();
             // Start the integrity ring at the replayed tip minus a window, so the card can
             // compare heights the network already certified.
             let mut ring_from = state.chain.height().saturating_sub(4096).max(state.chain.window_base());
             while !stop_flag_bg.load(Ordering::Relaxed) {
                 if last_beat.elapsed() >= Duration::from_secs(60) {
                     last_beat = std::time::Instant::now();
+                    let bs = state.braid.stats();
+                    let ig = state.ingest;
+                    super::status::set_parked(bs.pending as u64);
                     crate::tlog!(
-                        "[producer] heartbeat: settled h={} · minted {} (last h={}) · gossip in {} · peers {}",
-                        super::status::settled(), super::status::minted(), super::status::last_minted_height(),
-                        super::status::ingested(), net.peer_count()
+                        "[producer] heartbeat: settled h={} · net h={} (lag {}) · minted {} (last h={}) · gossip in {} · peers {} · \
+                         braid window {} ready {} parked {} tips {} fin {} · ingest ok {} dup {} missing-parents {} below-final {} rejected {} merge-anchored {} · resyncs {}",
+                        super::status::settled(), state.gossip_tip, state.gossip_tip.saturating_sub(super::status::settled()),
+                        super::status::minted(), super::status::last_minted_height(),
+                        super::status::ingested(), net.peer_count(),
+                        bs.window, bs.ready, bs.pending, bs.tips, bs.finalized_height,
+                        ig.inserted, ig.duplicate, ig.missing_parents, ig.below_final, ig.rejected, ig.merge_parents_anchored,
+                        super::status::resyncs()
                     );
                 }
                 let mut ingested = 0u32;
@@ -503,7 +624,53 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
                 // Connection bookkeeping only for now — nothing this loop needs to react to yet
                 // (no peer-scoped rate limiting or reputation tracking at this phase).
                 if ingested > 0 { super::status::note_ingested(ingested as u64); }
+                super::status::note_gossip_tip(state.gossip_tip);
                 let _ = net.drain_events();
+
+                // Resync lane — see the constants above for the measured fault this repairs.
+                {
+                    let settled = state.chain.height();
+                    if settled != last_settled_h {
+                        last_settled_h = settled;
+                        settled_since = std::time::Instant::now();
+                    }
+                    let lag = state.gossip_tip.saturating_sub(settled);
+                    if lag >= RESYNC_LAG_BLOCKS
+                        && settled_since.elapsed() >= RESYNC_STALL
+                        && last_resync_try.elapsed() >= RESYNC_STALL
+                    {
+                        last_resync_try = std::time::Instant::now();
+                        let bs = state.braid.stats();
+                        crate::tlog!(
+                            "[producer] ⚠ RESYNC: settled h={settled} has not moved for {}s while gossip is at h={} (lag {lag}) — \
+                             braid parked {} / window {} · ingest missing-parents {} — tail-replaying from peers",
+                            settled_since.elapsed().as_secs(), state.gossip_tip, bs.pending, bs.window, state.ingest.missing_parents
+                        );
+                        let t0 = std::time::Instant::now();
+                        match super::sync::tail_replay(&net, &mut state.chain).await {
+                            Some(n) => {
+                                let relinked = state.reseed_from_chain();
+                                super::status::note_resync();
+                                super::status::set_settled(state.chain.height());
+                                super::status::set_phase(super::status::PRODUCING);
+                                last_settled_h = state.chain.height();
+                                settled_since = std::time::Instant::now();
+                                ring_from = state.chain.height().saturating_sub(4096).max(state.chain.window_base());
+                                crate::tlog!(
+                                    "[producer] RESYNC done: {n} blocks replayed in {:.1}s → settled h={} — braid reseeded, {relinked} cached blocks re-linked, live gossip links on top",
+                                    t0.elapsed().as_secs_f64(), state.chain.height()
+                                );
+                            }
+                            None => {
+                                super::status::set_phase(super::status::PRODUCING);
+                                crate::tlog!(
+                                    "[producer] ⚠ RESYNC failed after {:.1}s (see [producer-sync] lines above) — still at settled h={}, retrying in {}s",
+                                    t0.elapsed().as_secs_f64(), state.chain.height(), RESYNC_STALL.as_secs()
+                                );
+                            }
+                        }
+                    }
+                }
 
                 let mut noop = |_: &[u8]| {};
                 let debug = std::env::var("SIGIL_TOP_PRODUCER_DEBUG").is_ok();
@@ -621,6 +788,110 @@ mod tests {
     /// the real default, 5 ticks would correctly settle NOTHING — this env var
     /// exercises the same finalization logic at a depth this test can actually
     /// reach, not a different code path.
+    /// The 2026-09-18 freeze, in miniature: producer A runs ahead; B receives A's blocks
+    /// but MISSED one, so every later block parks behind the parent B never got — and B's
+    /// settled chain never moves again no matter how much gossip arrives. The old loop
+    /// discarded the insert outcome and had no way to notice, let alone recover. Now (1)
+    /// `ingest` counts the parked blocks so the heartbeat says why, and (2)
+    /// `reseed_from_chain` after a catch-up of `chain` (here: applying A's settled blocks
+    /// directly, standing in for `tail_replay`) rebuilds the braid so the NEXT gossiped
+    /// block links and settles again.
+    #[test]
+    fn parked_behind_a_missed_parent_is_counted_and_a_reseed_recovers() {
+        let _env = crate::producer::PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
+        let mut a = ProducerState::new(genesis_chain());
+        let mut b = ProducerState::new(genesis_chain());
+        a.free_run = true;
+        b.free_run = false; // a user's node: settles what gossip brings, mints nothing
+
+        // A mints 8 blocks; B sees all but the SECOND one.
+        let mut a_blocks: Vec<Vec<u8>> = Vec::new();
+        let mut a_settled: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..8 {
+            let mut keep = |bytes: &[u8]| a_settled.push(bytes.to_vec());
+            let o = a.tick(&mut keep).expect("A tick");
+            a_blocks.push(o.minted_block_bytes);
+        }
+        for (i, bytes) in a_blocks.iter().enumerate() {
+            if i == 1 { continue; } // the block B never receives
+            let blk = decode_gossip_block(bytes).expect("A's gossip decodes");
+            b.ingest_foreign_block(blk);
+            let _ = b.tick(&mut |_| {});
+        }
+        assert_eq!(b.ingest.inserted, 1, "only the first block linked");
+        assert_eq!(b.ingest.missing_parents, 6, "everything after the gap parked behind the missing parent");
+        assert!(b.chain.height() < a.chain.height(), "B is frozen behind A (B h={} A h={})", b.chain.height(), a.chain.height());
+        assert!(b.gossip_tip > b.chain.height(), "B knows the network is ahead of it");
+
+        // The repair: catch the CHAIN up along A's settled spine (what tail_replay does
+        // over the wire), then reseed the braid from it.
+        for raw in &a_settled {
+            let blk = sigil_node::chain_log::decode_record(raw).expect("settled record decodes");
+            if blk.header.height >= b.chain.height() {
+                b.chain.apply(blk).expect("catch-up apply");
+            }
+        }
+        assert_eq!(b.chain.height(), a.chain.height(), "B's chain now matches A's settled height");
+        let relinked = b.reseed_from_chain();
+        assert!(relinked >= 1, "the blocks B received above A's settled tip re-link after the reseed (got {relinked})");
+
+        // Live gossip links on top again: A mints on, B settles it.
+        let before = b.chain.height();
+        for _ in 0..4 {
+            let o = a.tick(&mut |_| {}).expect("A tick");
+            let blk = decode_gossip_block(&o.minted_block_bytes).expect("decodes");
+            b.ingest_foreign_block(blk);
+            let _ = b.tick(&mut |_| {});
+        }
+        std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
+        assert!(b.chain.height() > before, "B settles again after the reseed (before {} after {})", before, b.chain.height());
+        assert_eq!(b.ingest.missing_parents, 6, "no new block parked after the reseed");
+    }
+
+    /// A follower that never received a side strand still follows the spine: A and C
+    /// produce and merge each other's tips; B only ever sees A's blocks, so every A block
+    /// that names a C tip as a merge parent points at a hash B does not hold. Before
+    /// 2026-09-18 that parked the block (and everything behind it) for good. Now the
+    /// unknown MERGE parent is anchored as trusted history and the block links.
+    #[test]
+    fn unknown_merge_parents_are_anchored_not_waited_for() {
+        let _env = crate::producer::PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
+        let mut a = ProducerState::new(genesis_chain());
+        let mut c = ProducerState::new(genesis_chain());
+        let mut b = ProducerState::new(genesis_chain());
+        a.free_run = true;
+        c.free_run = true;
+        b.free_run = false;
+        let mut merged_any = false;
+        for _ in 0..12 {
+            // A runs at twice C's rate, so C's strand stays BELOW A's selected tip and is
+            // merged as a side tip rather than built on (Epsilon vs a slow second producer).
+            // Headers carry a millisecond timestamp and nothing else distinguishes two idle
+            // producers on this box — a tick in the same ms mints the SAME block.
+            let oa1 = a.tick(&mut |_| {}).expect("A tick");
+            std::thread::sleep(Duration::from_millis(2));
+            let oa2 = a.tick(&mut |_| {}).expect("A tick");
+            std::thread::sleep(Duration::from_millis(2));
+            let oc = c.tick(&mut |_| {}).expect("C tick");
+            let bc = decode_gossip_block(&oc.minted_block_bytes).expect("C decodes");
+            a.ingest_foreign_block(bc);
+            for bytes in [&oa1.minted_block_bytes, &oa2.minted_block_bytes] {
+                let ba = decode_gossip_block(bytes).expect("A decodes");
+                merged_any |= !ba.header.merge_parents.is_empty();
+                c.ingest_foreign_block(ba.clone());
+                b.ingest_foreign_block(ba); // B sees only A's strand
+            }
+            let _ = b.tick(&mut |_| {});
+        }
+        std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
+        assert!(merged_any, "the scenario needs A to merge at least one C tip");
+        assert!(b.ingest.merge_parents_anchored > 0, "B anchored the C tips it never received");
+        assert_eq!(b.ingest.missing_parents, 0, "nothing parked: the spine parent was always known");
+        assert!(b.chain.height() > 1, "B settled A's spine (h={})", b.chain.height());
+    }
+
     #[test]
     fn ticking_advances_the_settled_chain() {
         // Serialized with every other test that touches the process env (SIGIL_DAG_FINAL_DEPTH

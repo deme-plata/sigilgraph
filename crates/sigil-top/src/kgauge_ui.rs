@@ -113,7 +113,7 @@ pub(crate) fn api_base_of(api: &str) -> String {
 
 /// Pull one `f64` out of a flat JSON object without a serde model — the node's shapes drift
 /// between versions and a hard model would turn a new field into a blank card.
-fn num(body: &str, key: &str) -> Option<f64> {
+pub(crate) fn num(body: &str, key: &str) -> Option<f64> {
     let pat = format!("\"{key}\":");
     let i = body.find(&pat)? + pat.len();
     let rest = &body[i..];

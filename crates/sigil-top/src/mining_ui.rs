@@ -46,6 +46,56 @@ mod fmt_glyphs_tests {
 /// [5] Mining — the REAL in-process dual-lane miner. Reads the SAME engine state
 /// (flux_miner::engine::MinerStats) the standalone sigil-miner exe shows, so
 /// sigil-top is node + miner in ONE binary. [m] start/stop · [g] GPU/CPU.
+/// The NETWORK's mining power, from the public node — not from whatever node the rig
+/// happens to submit to.
+///
+/// 2026-09-18: `Stats.net_hps` is whatever `/v1/mining/challenge` on `engine_node_url()`
+/// reports, and that node sums the rates of the rigs reporting TO IT. Against the hub that
+/// is the network. Against this process's own embedded node it is this rig alone — so
+/// Viktor's TUI read "network 290 MH/s · your share 99.4%" while sigilgraph.org showed
+/// 6.5 GH/s and four rigs. Poll the hub for the network figure; keep the local one too.
+mod hub_power {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    static NET_HPS_BITS: AtomicU64 = AtomicU64::new(0); // f64 bits; 0 = never fetched
+    static FETCHED_AT: OnceLock<std::sync::Mutex<Option<Instant>>> = OnceLock::new();
+    static STARTED: OnceLock<()> = OnceLock::new();
+
+    /// Start the poller once (idempotent); `hub` is the public node's origin.
+    pub(super) fn ensure(hub: String) {
+        STARTED.get_or_init(|| {
+            std::thread::Builder::new().name("hub-power".into()).spawn(move || loop {
+                if let Some(v) = fetch(&hub) {
+                    NET_HPS_BITS.store(v.to_bits(), Ordering::Relaxed);
+                    if let Ok(mut g) = FETCHED_AT.get_or_init(|| std::sync::Mutex::new(None)).lock() {
+                        *g = Some(Instant::now());
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(15));
+            }).ok();
+        });
+    }
+
+    fn fetch(hub: &str) -> Option<f64> {
+        let body = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(4))
+            .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION"), " hub-power"))
+            .build().ok()?
+            .get(format!("{hub}/v1/mining/challenge")).send().ok()?.text().ok()?;
+        crate::kgauge_ui::num(&body, "net_hps")
+    }
+
+    /// `(net_hps, seconds since fetched)` — `None` until the first successful poll.
+    pub(super) fn get() -> Option<(f64, u64)> {
+        let bits = NET_HPS_BITS.load(Ordering::Relaxed);
+        if bits == 0 { return None; }
+        let age = FETCHED_AT.get()?.lock().ok()?.map(|t| t.elapsed().as_secs())?;
+        Some((f64::from_bits(bits), age))
+    }
+}
+
 pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = app.mine_stats.lock().unwrap().clone();
     let mining = app.mining;
@@ -153,20 +203,50 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     // "network total" while share still read 100.0%. Now shown uncapped, with an
     // explicit "(ramping)" note above 100% so it reads as "you just started, the
     // server hasn't caught up yet" rather than looking like corrupted data.
-    let your_share_raw = if s.net_hps > 1.0 { s.hashrate / s.net_hps * 100.0 } else { 0.0 };
+    // 2026-09-18: when the rig submits to THIS process's own node, `s.net_hps` is this rig
+    // alone (see `hub_power`). Then the network figure comes from the public node and the
+    // local sum is shown beside it as "your node" — never the one dressed as the other.
+    let hub = crate::kgauge_ui::api_base_of(&app.cfg.api);
+    let engine_url = engine_node_url();
+    let local_node = !engine_url.trim_end_matches('/').eq_ignore_ascii_case(hub.trim_end_matches('/'))
+        && (engine_url.contains("127.0.0.1") || engine_url.contains("localhost"));
+    if local_node { hub_power::ensure(hub.clone()); }
+    let hub_net = if local_node { hub_power::get() } else { None };
+    let net_hps_for_share = match hub_net { Some((h, _)) => h, None => s.net_hps };
+    let your_share_raw = if net_hps_for_share > 1.0 { s.hashrate / net_hps_for_share * 100.0 } else { 0.0 };
     let ramping = your_share_raw > 100.0;
     let your_share_txt = if ramping {
         format!("{your_share_raw:.0}% (ramping — server hasn't caught up to your latest rate yet)")
     } else {
         format!("{your_share_raw:.1}%")
     };
-    f.render_widget(Paragraph::new(Line::from(vec![
-        dim(" ◈ network "), Span::styled(engine::format_hps(s.net_hps), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-        dim(" total power"),
+    let mut netline: Vec<Span<'static>> = Vec::new();
+    if local_node {
+        match hub_net {
+            Some((h, age)) => {
+                netline.push(dim(" ◈ network "));
+                netline.push(Span::styled(engine::format_hps(h), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)));
+                netline.push(dim(if age > 60 { " (hub, stale)" } else { " (hub)" }));
+            }
+            None => {
+                netline.push(dim(" ◈ network "));
+                netline.push(Span::styled("—", Style::default().fg(C_DIM)));
+                netline.push(dim(" (hub not reached yet)"));
+            }
+        }
+        netline.push(dim("   your node "));
+        netline.push(Span::styled(engine::format_hps(s.net_hps), Style::default().fg(C_VBRIGHT)));
+    } else {
+        netline.push(dim(" ◈ network "));
+        netline.push(Span::styled(engine::format_hps(s.net_hps), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)));
+        netline.push(dim(" total power"));
+    }
+    netline.extend([
         dim("   difficulty "), Span::styled(format!("{} bits", s.net_bits), Style::default().fg(C_NEON_GOLD)),
         dim("   block "), Span::styled(format!("{:.1}s", s.net_block_ms / 1000.0), Style::default().fg(C_VBRIGHT)),
         dim("   your share "), Span::styled(your_share_txt, Style::default().fg(if ramping { C_NEON_GOLD } else { C_NEON_GREEN }).add_modifier(Modifier::BOLD)),
-    ])), netrow);
+    ]);
+    f.render_widget(Paragraph::new(Line::from(netline)), netrow);
 
     // ── solve-time sparkline (last solve relative to the session max) ─────────
     let maxv = s.solve_hist.iter().copied().max().unwrap_or(1).max(1);

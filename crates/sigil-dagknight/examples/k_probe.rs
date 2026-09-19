@@ -110,7 +110,7 @@ fn main() {
                     _ => break,
                 }
             }
-            views.push(BlockView { hash, parent, merge_parents, height, producer: producer_id(p) });
+            views.push(BlockView { hash, parent, merge_parents, height, producer: producer_id(p), difficulty: 0 });
             minted.push((p, hash));
         }
         for (origin, hash) in &minted {
@@ -167,6 +167,7 @@ fn main() {
         max_merge_parents: k.max(1),
         ghostdag_k: if use_ghostdag { Some(k as u32) } else { None },
         final_blue_depth,
+        ..BraidConfig::default()
     };
     println!(
         "cfg: final_depth={} max_window={} max_pending={} max_merge_parents={} ghostdag_k={:?} final_blue_depth={:?}",

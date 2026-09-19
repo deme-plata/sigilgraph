@@ -118,6 +118,15 @@ pub struct BraidConfig {
     /// exact adversarial scenario that exposed the original bug. Env
     /// `SIGIL_DAG_FINAL_BLUE_DEPTH` (unset or unparsable = `None`).
     pub final_blue_depth: Option<u64>,
+    /// v2.2 opt-in (2026-09-19): intrinsic quorum finality. `Some(q)` makes
+    /// `computed_final` ALSO finalize any block that already has >= `q` DISTINCT
+    /// producers building above it on the selected spine — Quillon's Bullshark commit
+    /// (finality derived from the DAG structure, no separate finality-vote round to
+    /// stall — the one that froze the certificate for 6 h on 2026-09-15) adapted to this
+    /// GHOSTDAG braid. A **NO-OP on a single-producer braid** (one producer can never
+    /// form a quorum > 1), so the live single-producer chain is byte-identical until
+    /// followers co-produce blocks. Env `SIGIL_DAG_FINAL_QUORUM`; `None` (default) = off.
+    pub final_quorum: Option<usize>,
     /// 2026-08-21 (the "no eviction path for a stuck pending pool" fragility,
     /// found live on both Epsilon and happysrv — see
     /// `computed_final`'s doc comment for the mechanism this closes). When
@@ -172,6 +181,7 @@ impl Default for BraidConfig {
             max_merge_parents: 4,
             ghostdag_k: None,
             final_blue_depth: None,
+            final_quorum: None,
             saturated_self_heal_window: 2_048,
             pending_max_tip_lag: 512,
         }
@@ -198,6 +208,9 @@ impl BraidConfig {
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
             final_blue_depth: std::env::var("SIGIL_DAG_FINAL_BLUE_DEPTH")
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
+            final_quorum: std::env::var("SIGIL_DAG_FINAL_QUORUM")
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
             saturated_self_heal_window: get(

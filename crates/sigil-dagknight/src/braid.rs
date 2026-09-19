@@ -562,17 +562,64 @@ impl Braid {
     /// veto the committee.
     fn computed_final(&self) -> Option<u64> {
         let depth = self.depth_rule_final();
-        match self.certified {
+        let base = match self.certified {
             None => depth,
             Some((h, _)) => {
                 let tip = self.selected_tip()?;
                 let tip_height = self.recs.get(&tip)?.view.height;
                 if h > tip_height {
-                    return depth;
+                    depth
+                } else {
+                    Some(depth.unwrap_or(0).max(h))
                 }
-                Some(depth.unwrap_or(0).max(h))
             }
+        };
+        // Third finality source, gossip-free and opt-in (`SIGIL_DAG_FINAL_QUORUM`):
+        // intrinsic quorum-of-distinct-producers confirmation. On the live SINGLE-producer
+        // braid this is a no-op (no quorum can form), so `base` is returned unchanged; it
+        // only raises the line once >= quorum distinct producers have built on a block,
+        // which needs a multi-producer braid. See `quorum_final`. Kept as a `max` with the
+        // depth+certificate line so it can never LOWER finality — only commit sooner.
+        match self.cfg.final_quorum.and_then(|q| self.quorum_final(q)) {
+            Some(q) => Some(base.unwrap_or(0).max(q)),
+            None => base,
         }
+    }
+
+    /// Intrinsic, gossip-free finality: the highest selected-spine block that already has
+    /// at least `quorum` DISTINCT producers building above it on the spine. This is
+    /// Quillon's Bullshark commit rule — the commit falls out of the DAG structure, with
+    /// no separate finality-vote round to stall — adapted to SIGIL's GHOSTDAG braid.
+    ///
+    /// A single-producer braid can never reach a quorum > 1, so this returns `None` and
+    /// changes nothing on today's live chain; it only bites once followers co-produce
+    /// blocks. The producers of blocks STRICTLY ABOVE a block `B` on the spine are its
+    /// confirmers: once `quorum` distinct ones exist, `B` (and everything below it) is
+    /// final. `quorum <= 1` is rejected — a lone producer must not self-finalize.
+    fn quorum_final(&self, quorum: usize) -> Option<u64> {
+        if quorum <= 1 {
+            return None;
+        }
+        let mut cur = self.selected_tip()?;
+        let mut confirmers: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        loop {
+            let rec = self.recs.get(&cur)?;
+            // `confirmers` holds the producers of every block strictly above `cur` on the
+            // spine walked so far — the blocks that descend from, and so confirm, `cur`.
+            if confirmers.len() >= quorum {
+                return Some(rec.view.height);
+            }
+            confirmers.insert(rec.view.producer);
+            let parent = rec.view.parent;
+            if parent == cur {
+                break; // genesis / self-parent
+            }
+            if !self.recs.contains_key(&parent) {
+                break; // spine runs off the resident window
+            }
+            cur = parent;
+        }
+        None
     }
 
     /// Adopt a committee certificate for `(height, hash)` as this braid's finality
@@ -1259,6 +1306,68 @@ mod tests {
             out.push(v(h(i), h(i - 1), vec![], i as u64, PA));
         }
         out
+    }
+
+    /// A config with intrinsic quorum finality armed.
+    fn cfg_quorum(final_depth: u64, q: usize) -> BraidConfig {
+        BraidConfig { final_depth, final_quorum: Some(q), ..BraidConfig::default() }
+    }
+
+    /// SINGLE producer: quorum finality can never fire (one producer is not a quorum),
+    /// so arming it changes NOTHING — the live single-producer chain is byte-identical.
+    /// `final_depth` is huge here so the depth rule finalizes nothing either; the only
+    /// thing that could move the line is the quorum rule, and it must not.
+    #[test]
+    fn quorum_final_is_a_noop_on_a_single_producer_braid() {
+        let mut armed = Braid::new(cfg_quorum(512, 2));
+        let mut plain = Braid::new(cfg(512));
+        for view in chain_views(20) {
+            assert!(matches!(armed.insert(view.clone()), InsertOutcome::Inserted { .. }));
+            assert!(matches!(plain.insert(view), InsertOutcome::Inserted { .. }));
+        }
+        assert_eq!(armed.finalized_height(), 0, "one producer can never form a quorum");
+        assert_eq!(armed.finalized_height(), plain.finalized_height(), "armed == byte-identical to unarmed on a single-producer braid");
+    }
+
+    /// TWO distinct producers: finality falls out of the DAG with no certificate and no
+    /// vote round — Quillon's Bullshark commit. Producers alternate PA/PB up the spine, so
+    /// the two blocks above height h always come from two distinct producers → every block
+    /// two below the tip is quorum-final. `final_depth` is huge so ONLY the quorum rule can
+    /// move the line, isolating the behaviour under test.
+    #[test]
+    fn two_distinct_producers_finalize_intrinsically_without_a_certificate() {
+        let mut b = Braid::new(cfg_quorum(512, 2));
+        b.insert(genesis()); // h0, PA
+        for i in 1..=6u8 {
+            let producer = if i % 2 == 1 { PB } else { PA };
+            assert!(matches!(b.insert(v(h(i), h(i - 1), vec![], i as u64, producer)), InsertOutcome::Inserted { .. }));
+        }
+        // tip = h6; the two blocks above h4 (h5=PB, h6=PA) are two distinct producers, so
+        // h4 is quorum-final. The tip and tip-1 are NOT yet confirmed by a quorum above them.
+        assert_eq!(b.finalized_height(), 4, "quorum of 2 distinct producers confirms through height 4");
+        // Raising the quorum to 3 with only 2 producers present un-finalizes it again.
+        let mut b3 = Braid::new(cfg_quorum(512, 3));
+        b3.insert(genesis());
+        for i in 1..=6u8 {
+            let producer = if i % 2 == 1 { PB } else { PA };
+            b3.insert(v(h(i), h(i - 1), vec![], i as u64, producer));
+        }
+        assert_eq!(b3.finalized_height(), 0, "quorum 3 cannot be met by 2 producers");
+    }
+
+    /// Quorum only RAISES the line: where the depth rule already finalizes deeper, the
+    /// deeper line wins (it is a `max`, never a replacement).
+    #[test]
+    fn quorum_final_never_lowers_the_depth_line() {
+        // final_depth=2, two producers: depth rule gives tip-2, quorum also gives tip-2 here;
+        // the point is the combined line is never BELOW the depth rule's tip-2.
+        let mut b = Braid::new(cfg_quorum(2, 2));
+        b.insert(genesis());
+        for i in 1..=6u8 {
+            let producer = if i % 2 == 1 { PB } else { PA };
+            b.insert(v(h(i), h(i - 1), vec![], i as u64, producer));
+        }
+        assert!(b.finalized_height() >= 4, "combined line is at least the depth rule's tip-2 = 4 (got {})", b.finalized_height());
     }
 
     #[test]

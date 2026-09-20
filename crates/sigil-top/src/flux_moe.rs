@@ -40,11 +40,87 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Where the user's own ollama listens. Overridable for exotic setups.
+pub(crate) const DEFAULT_OLLAMA: &str = "http://localhost:11434";
+
+/// The host part of a URL, without scheme, userinfo or port. IPv6 literals keep
+/// their brackets (`[::1]:11434` -> `[::1]`).
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if let Some(end) = authority.find(']') {
+        return Some(authority[..=end].to_string()); // IPv6 literal
+    }
+    Some(authority.split(':').next()?.to_string())
+}
+
+/// Is this host on THIS machine? `localhost`, any `127.x.y.z`, or IPv6 `::1`.
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") || h == "::1" || h == "0:0:0:0:0:0:0:1" {
+        return true;
+    }
+    match h.strip_prefix("127.") {
+        Some(rest) => {
+            let parts: Vec<&str> = rest.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|o| o.parse::<u8>().is_ok())
+        }
+        None => false,
+    }
+}
+
+/// Decide the endpoint flux-moe will talk to, and any warning the user must see.
+///
+/// **Why this is not just `env::var().unwrap_or(default)` any more (2026-09-20).**
+/// flux-moe's whole promise is in this module's first paragraph: *"No central
+/// endpoint, no rented GPU, nothing leaves the machine."* A single environment
+/// variable could silently break that promise — point `SIGIL_OLLAMA` at a remote
+/// box and every word of every conversation (including anything the user pastes)
+/// is shipped off-device, with no indication in the UI. That was the ONLY
+/// data-exfiltration surface in the whole AI path (there is no tool execution, no
+/// file write, no DB read, no network listener — audited 2026-09-20).
+///
+/// So a non-loopback endpoint is now REFUSED by default and the on-device default
+/// is used instead. An operator who genuinely wants a remote model sets
+/// `SIGIL_OLLAMA_ALLOW_REMOTE=1` and is warned every launch — an explicit, visible
+/// choice rather than an invisible one. Pure function (config in, decision out) so
+/// it is tested without touching the process-global env this module already warns
+/// about racing — see `list_models_at`'s doc.
+pub(crate) fn resolve_ollama_base(configured: Option<&str>, allow_remote: bool) -> (String, Option<String>) {
+    let raw = match configured.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(r) => r,
+        None => return (DEFAULT_OLLAMA.to_string(), None),
+    };
+    let host = host_of(raw).unwrap_or_default();
+    if is_loopback_host(&host) {
+        return (raw.to_string(), None);
+    }
+    if allow_remote {
+        return (
+            raw.to_string(),
+            Some(format!(
+                "⚠ SIGIL_OLLAMA points at the REMOTE host {host} and SIGIL_OLLAMA_ALLOW_REMOTE=1 is set —                  every word of your AI conversation leaves this machine. Unset it to keep flux-moe on-device."
+            )),
+        );
+    }
+    (
+        DEFAULT_OLLAMA.to_string(),
+        Some(format!(
+            "⚠ SIGIL_OLLAMA points at the REMOTE host {host} — REFUSED, using {DEFAULT_OLLAMA} instead.              flux-moe is on-device by design: nothing leaves your machine.              Set SIGIL_OLLAMA_ALLOW_REMOTE=1 as well if you really intend to send conversations off-box."
+        )),
+    )
+}
+
 pub(crate) fn ollama_base() -> String {
-    std::env::var("SIGIL_OLLAMA")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "http://localhost:11434".to_string())
+    let configured = std::env::var("SIGIL_OLLAMA").ok();
+    let allow_remote = matches!(std::env::var("SIGIL_OLLAMA_ALLOW_REMOTE").as_deref(), Ok("1"));
+    let (base, warning) = resolve_ollama_base(configured.as_deref(), allow_remote);
+    if let Some(w) = warning {
+        // Once per process: this is called on every chat turn and every model poll.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| crate::tlog!("{w}"));
+    }
+    base
 }
 
 fn client_with_timeout(total_secs: u64) -> reqwest::blocking::Client {
@@ -795,6 +871,37 @@ pub(crate) fn pick_model_tiered(
 
 #[cfg(test)]
 mod tests {
+    /// The on-device promise is enforced, not just documented: a REMOTE endpoint is
+    /// refused and the localhost default used instead, unless the operator has also
+    /// opted in explicitly. Pure — never touches the process-global env.
+    #[test]
+    fn a_remote_ollama_endpoint_is_refused_unless_explicitly_allowed() {
+        // Nothing configured -> the on-device default, no warning.
+        assert_eq!(super::resolve_ollama_base(None, false), (super::DEFAULT_OLLAMA.to_string(), None));
+        assert_eq!(super::resolve_ollama_base(Some("  "), false).0, super::DEFAULT_OLLAMA);
+
+        // Loopback in all its spellings -> honoured silently.
+        for ok in ["http://localhost:11434", "http://127.0.0.1:11434", "http://127.1.2.3:1234", "http://[::1]:11434", "https://my.localhost:443"] {
+            let (base, warn) = super::resolve_ollama_base(Some(ok), false);
+            assert_eq!(base, ok, "loopback {ok} must be honoured");
+            assert!(warn.is_none(), "loopback {ok} must not warn");
+        }
+
+        // Remote WITHOUT opt-in -> refused, falls back on-device, warns.
+        let (base, warn) = super::resolve_ollama_base(Some("http://evil.example.com:11434"), false);
+        assert_eq!(base, super::DEFAULT_OLLAMA, "a remote endpoint must not be used");
+        assert!(warn.unwrap().contains("REFUSED"));
+
+        // Remote WITH opt-in -> honoured, but still warns every launch.
+        let (base, warn) = super::resolve_ollama_base(Some("http://gpu.example.com:11434"), true);
+        assert_eq!(base, "http://gpu.example.com:11434");
+        assert!(warn.unwrap().contains("leaves this machine"));
+
+        // Credentials in the URL must not smuggle a remote host past the check.
+        let (base, _) = super::resolve_ollama_base(Some("http://localhost@evil.example.com:11434"), false);
+        assert_eq!(base, super::DEFAULT_OLLAMA, "userinfo must not spoof the host");
+    }
+
     use super::*;
 
     fn gb(n: u64) -> u64 { n * GIB }

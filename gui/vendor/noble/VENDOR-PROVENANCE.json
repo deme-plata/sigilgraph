@@ -1,0 +1,63 @@
+{
+  "what": "Vendored @noble crypto for the SIGIL wallet \u2014 replaces runtime imports from esm.sh",
+  "why": "A third-party CDN served cryptography into the origin that displays recovery phrases. A compromise of that CDN would have backdoored ML-KEM/ML-DSA/HKDF/ChaCha20 for every user, silently.",
+  "vendored_utc": "2026-09-21T05:44:46.381134+00:00",
+  "source": "registry.npmjs.org tarballs, each verified against npm's published sha512 integrity before extraction",
+  "packages": [
+    {
+      "package": "@noble/post-quantum",
+      "version": "0.6.1",
+      "npm_integrity": "sha512-+pormrDZwjRw05U8ADK4JpHejo87+gBd+muRBB/ozztH5yhDLMDF4jHQWN3NQQAsu1zBNPWTG0ZwVI0CR29H0A==",
+      "vendored_as": "vendor/noble/post-quantum/"
+    },
+    {
+      "package": "@noble/hashes",
+      "version": "2.2.0",
+      "npm_integrity": "sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==",
+      "vendored_as": "vendor/noble/hashes/"
+    },
+    {
+      "package": "@noble/curves",
+      "version": "2.2.0",
+      "npm_integrity": "sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==",
+      "vendored_as": "vendor/noble/curves/"
+    },
+    {
+      "package": "@noble/hashes",
+      "version": "1.8.0",
+      "npm_integrity": "sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==",
+      "vendored_as": "vendor/noble/hkdf-1.8.0/"
+    },
+    {
+      "package": "@noble/ciphers",
+      "version": "0.6.0",
+      "npm_integrity": "sha512-mIbq/R9QXk5/cTfESb1OKtyFnk7oc1Om/8onA1158K9/OZUQFDEVy55jVTato+xmp3XX6F6Qh0zz0Nc1AxAlRQ==",
+      "vendored_as": "vendor/noble/ciphers-0.6.0/"
+    }
+  ],
+  "closure": "transitive closure from the 5 entry points sigil-pq.mjs imports; unreachable files (falcon, hybrid, slh-dsa, index) deliberately NOT vendored",
+  "verified": "ML-KEM-1024 encaps/decaps agree; ML-DSA-87 sign/verify; HKDF-SHA256; ChaCha20 roundtrip",
+  "files_sha256": {
+    "ciphers-0.6.0/_arx.js": "825706a60776a32fa5b7c7a042e5dcb7745fab991dbe73919791d6f0ff580640",
+    "ciphers-0.6.0/_assert.js": "a6e384d18b8c9529a3794b9bcc708f3377c818b05ea333f2788d488b55cc8ed9",
+    "ciphers-0.6.0/_poly1305.js": "bd7599583434ba98d942a708fed0f040f231db5f94942c9b23af60b1900621e1",
+    "ciphers-0.6.0/chacha.js": "a6b231e7153583f0e592ec5d135964fd14257ace22691df7d9366c3f91d9e9bb",
+    "ciphers-0.6.0/utils.js": "cb062ce2246db60f035dd72d05b3c42e326c224ad4dd3ea6ae27c21281a3762d",
+    "curves/abstract/fft.js": "b3ad080004e7d6db3839fef60de78ec12847ff508bd6a44c7e58c4658e5202b3",
+    "curves/utils.js": "7478a07d4afee3c906d03dc706f680d18ae2e9c32fbd57abddfefbbf753120b9",
+    "hashes/_u64.js": "766b91a693a798f9d3cde97b25db4a6d0cef66b2ca21153d3d42424d37878870",
+    "hashes/sha3.js": "55b453d0a65c657aa408ec86d4ea8dd8f96740cd68963ea9ef180db4004f878f",
+    "hashes/utils.js": "e2adfc13c846487feff0410bd5508a1d66f5ebadc3188f3a40a6b55449981e2f",
+    "hkdf-1.8.0/_md.js": "cefb1557e7715cb2117c83f82ef3e3175c7e0391c80bd5795b2d4effc45fc582",
+    "hkdf-1.8.0/_u64.js": "e48c0cfc10810439a4807b46db136ce603a3fa09b62584f513ef2f3ca496af54",
+    "hkdf-1.8.0/crypto.js": "9211d026c5d21e60e0126dd6f01150d87da5ba7261b8f468215c1264372ff5a5",
+    "hkdf-1.8.0/hkdf.js": "4bdbfb687cfb409aaffb80a6223fc718bbab79ef083fd6191a6e063d68ddd16a",
+    "hkdf-1.8.0/hmac.js": "a330af1af3fb00ebdbba2f023dd5e023aa367669081cd51c7d172eb499533d0b",
+    "hkdf-1.8.0/sha2.js": "e729088b82e5450bff54c3a0013582aa42e1fe8f58dd31f5967f6ebe34c52299",
+    "hkdf-1.8.0/utils.js": "79ca46f1a72a210dba4bd0ecc46b11dedcda10d8413ef4508e7c030df88ba8a0",
+    "post-quantum/_crystals.js": "c52aa6e3514e345a7873adc05f4ebdc3bcf9fba92f3555f7ed10854a488dff32",
+    "post-quantum/ml-dsa.js": "6d59c438035c6e05b764442a0a3db7d2f598a150ba1fea1ee459c91e66101585",
+    "post-quantum/ml-kem.js": "81db1a916f79ac6a6767db8441f788d1c8ead92dba9e25538b86465b251b2540",
+    "post-quantum/utils.js": "d4bf73f56c164e88957bb298d48b49f5979daf73af211f243e4b396efcda9c50"
+  }
+}

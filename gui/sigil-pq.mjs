@@ -21,11 +21,11 @@
 // Exposes window.SigilPQ = { status, seal, open } + 'sigil-pq-status' events,
 // and shows a small 🔐PQ badge next to the P2P pill when the session is live.
 
-import { ml_kem1024 } from 'https://esm.sh/@noble/post-quantum@0.6.1/ml-kem.js'
-import { ml_dsa87 } from 'https://esm.sh/@noble/post-quantum@0.6.1/ml-dsa.js'
-import { hkdf } from 'https://esm.sh/@noble/hashes@1.8.0/hkdf.js'
-import { sha256 } from 'https://esm.sh/@noble/hashes@1.8.0/sha2.js'
-import { chacha20poly1305 } from 'https://esm.sh/@noble/ciphers@0.6.0/chacha'
+import { ml_kem1024 } from './vendor/noble/post-quantum/ml-kem.js'
+import { ml_dsa87 } from './vendor/noble/post-quantum/ml-dsa.js'
+import { hkdf } from './vendor/noble/hkdf-1.8.0/hkdf.js'
+import { sha256 } from './vendor/noble/hkdf-1.8.0/sha2.js'
+import { chacha20poly1305 } from './vendor/noble/ciphers-0.6.0/chacha.js'
 
 const PQ_PROTOCOL = '/sigil/g0/pq-hybrid/1.0.0'
 const PQ_INFO = 'sigil/g0/pq-hybrid/v1'

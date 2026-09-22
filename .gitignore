@@ -56,3 +56,11 @@ ChatGPT Image*
 *.bak-skel
 *.bak-rc7
 *.bak-fastmine
+
+# swept 2026-09-22
+*.bak-*
+.flux-cache-fresh/
+target-*/
+sigil-top-blocks.db*
+# bare 64-hex blob at repo root — seed-or-key shaped, NEVER commit
+sigil-wallet.txt

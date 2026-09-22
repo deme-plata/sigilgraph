@@ -9064,6 +9064,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 </style>
 <div id="kgChip" title="Kristensen consensus gauge — how hard it currently is for distributed views to become one shared state">
   <span class="kgSig">Κ<sub style="font-size:9px">c</sub></span><span class="kgK" id="kgChipK">—</span>
+  <span id="kgChipKfix" title="K_fix — the repaired Kristensen gauge (persistence in blocks, entropy as a bounded weight); same ladder as K_C" style="font-size:10px;color:#5eead4;opacity:.9">fix —</span>
   <span class="kgReg kg-unknown" id="kgChipReg">measuring</span>
 </div>
 <div id="kgPanel">
@@ -9125,6 +9126,10 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
     if(k==='verify_mismatch'||k==='non_canonical_wallet'||k==='invalid_signature'||k==='bad_proof'||k==='invalid_state'||k==='state_root_mismatch'||k==='conflicting_spend'||k==='wrong_parent'||k==='consensus_rule') return 'semantic';
     return 'unclassified'; }
   function kC(d,tauRatio,hNorm){ var plur=EPS+(1-EPS)*Math.min(1,Math.max(0,hNorm)); return 2*Math.PI*Math.sqrt(Math.max(0,d)*Math.max(0,tauRatio)*plur); }
+  // K_fix (shipped 2026-09-14 after the battle test, sigilgraph.org/downloads/sigil-kparam-battle-2026-09-14.pdf §5):
+  //   2π·√(ΔH_c · τ_d · w_S) — τ_d = (1+min(d,512)/512)/2 with d = persistence in BLOCKS (spine gap + merge + red),
+  //   w_S = 1 − H_norm/4 ∈ [¾,1]. Same ΔH_c and ladder as K_C; no seconds, no ħ, no ε. Speed-invariant; one-key fork = worst case.
+  function kFix(d,persist,hNorm){ var tauD=(1+Math.min(FINAL_DEPTH,Math.max(0,persist))/FINAL_DEPTH)/2, wS=1-Math.min(1,Math.max(0,hNorm))/4; return 2*Math.PI*Math.sqrt(Math.min(1,Math.max(0,d))*tauD*wS); }
   function regimeOf(k){ if(!isFinite(k)) return 'unknown'; if(k>=3) return 'critical'; if(k>=1) return 'elevated'; return 'stable'; }
   // Ω = 1−e^(−peers/n_total), n_total = max(peers+2, 8) — saturates at 0.632, so the labels live inside that range.
   function confidenceOf(om){ return om>=0.55?'high':(om>=0.40?'medium':'low'); }
@@ -9185,10 +9190,13 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       var nTotal=Math.max(peersB+2,8); var omega=1-Math.exp(-peersB/nTotal);
       var seen=Math.min(1,dh+missing+rate(uncl)*W.conf); var dHi=Math.min(1,seen+(1-omega)*(1-seen)); var dLo=dh*omega;
       var K=kC(dh,tauRatio,hNorm), Klo=kC(dLo,tauRatio,hNorm), Khi=kC(dHi,tauRatio,hNorm);
+      // ── K_fix: persistence in blocks, entropy as a bounded weight ──
+      var gapBlk=conv.length?conv.reduce(function(s,h){ return s+Math.abs(h-hLocal); },0)/conv.length:0; var persist=Math.min(FINAL_DEPTH,gapBlk+merging+red);
+      var Kfix=kFix(dh,persist,hNorm), KfixHi=kFix(dHi,persist,hNorm);
       // ── legacy v1 (retained, labelled) ──
       var dhV1=rate(noise+semantic+uncl)+churn; var Kv1=(tauW>0)?(2*Math.PI*Math.sqrt(dhV1*ds)/tauW):0; var KstarV1=2*Math.PI*Math.sqrt(dhV1*tauW*ds);
       var dom=dh>0?'state disagreement (ΔHc)':(ds>0?'proposer plurality (Δs)':'none (quiet chain)');
-      return {K:K,Klo:Klo,Khi:Khi,dh:dh,missing:missing,ch:ch,ds:ds,hNorm:hNorm,nEff:nEff,domShare:domShare,distinct:distinct,
+      return {K:K,Klo:Klo,Khi:Khi,Kfix:Kfix,KfixHi:KfixHi,persist:persist,dh:dh,missing:missing,ch:ch,ds:ds,hNorm:hNorm,nEff:nEff,domShare:domShare,distinct:distinct,
         resBits:resolutionBits(blocks.length),tauFin:tauFin,tauRatio:tauRatio,tauW:tauW,obsBps:obsBps,omega:omega,conf:confidenceOf(omega),
         peers:peersB,churn:churn,rejRate:rate(noise+semantic+uncl),rejSem:rate(semantic),noise:noise,semantic:semantic,uncl:uncl,byKind:byKind,
         Kv1:Kv1,KstarV1:KstarV1,dhV1:dhV1,dom:dom,tip:hB,blocks:blocks.length,windowOnly:windowOnly,svLen:sv.length,phLen:ph.length,syncing:syncing};
@@ -9220,7 +9228,9 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       cell('rejects','by kind',m.semantic+' sem / '+m.noise+' noise',kinds);
     document.getElementById('kgGridConf').innerHTML=
       cell('<i>Ω</i>','observer coverage',fmt(m.omega,3),m.conf+' confidence · 1−e^(−peers/n)')+
-      cell('band','K_C low … high',fmt(m.Klo,2)+' … '+fmt(m.Khi,2),'unmeasured weight '+Math.round(m.missing*100)+'% + unseen network');
+      cell('band','K_C low … high',fmt(m.Klo,2)+' … '+fmt(m.Khi,2),'unmeasured weight '+Math.round(m.missing*100)+'% + unseen network')+
+      cell('K<i>_fix</i>','repair · blocks not seconds',fmt(m.Kfix,3)+' '+regimeOf(m.Kfix),'2π√(ΔH<i>c</i>·τ<i>d</i>·w<i>S</i>) · d '+fmt(m.persist,0)+' blk · high '+fmt(m.KfixHi,2)+' · same ladder as K<i>C</i>');
+    var kfc=document.getElementById('kgChipKfix'); if(kfc){ kfc.textContent='fix '+fmt(m.Kfix,2); kfc.style.color=regimeOf(m.Kfix)==='critical'?'#f87171':regimeOf(m.Kfix)==='elevated'?'#fbbf24':'#5eead4'; }
     document.getElementById('kgProv').innerHTML=
       '<b style="color:#c084fc">Provenance.</b> '+
       '<span class="kgMeas">measured</span>: proposer entropy, DAG merge-parents (tip divergence), red blocks + verify_mismatch (semantic conflicts), block rate → finality time, rejects by kind, peers/churn (diagnostic). '+
@@ -9622,5 +9632,5 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   if(!wire()){ document.addEventListener('DOMContentLoaded', wire); var n=0; var iv=setInterval(function(){ if(wire()||++n>40) clearInterval(iv); },250); }
 })();</script>
 
-<script src="sigil-ble.js?v=1" defer></script><!-- Nearby phone: coins over Web Bluetooth (flux-bluetooth::sigil port) -->
+<script src="sigil-ble.js?v=3" defer></script><!-- Nearby phone: coins over Web Bluetooth (flux-bluetooth::sigil port) -->
 </body></html>

@@ -288,7 +288,8 @@
   function ui() {
     if (document.getElementById('sigil-ble-fab')) return;
     const css = document.createElement('style'); css.textContent = `
-      #sigil-ble-fab{position:fixed;right:18px;bottom:84px;z-index:9998;width:48px;height:48px;border-radius:50%;border:1px solid #2bd4ff66;background:#0b1620;color:#6df3ff;font-size:22px;cursor:pointer;box-shadow:0 0 18px #2bd4ff33}
+      #sigil-ble-fab{position:fixed;right:18px;bottom:160px;z-index:19992;border-radius:999px;border:1px solid #2bd4ff88;background:linear-gradient(135deg,#0b1620,#0f2a3a);color:#6df3ff;font:700 12px/1 'JetBrains Mono',ui-monospace,monospace;letter-spacing:1.5px;padding:11px 15px;cursor:pointer;box-shadow:0 0 18px #2bd4ff33;display:flex;align-items:center;gap:7px;white-space:nowrap}
+      #sigil-ble-fab:hover{box-shadow:0 0 26px #2bd4ff66}
       #sigil-ble-modal{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;background:#000a}
       #sigil-ble-modal .card{width:min(440px,92vw);max-height:88vh;overflow:auto;background:#0b1620;border:1px solid #2bd4ff55;border-radius:14px;padding:18px;color:#cfe9f3;font:14px/1.45 system-ui,sans-serif}
       #sigil-ble-modal h3{margin:0 0 6px;color:#6df3ff;font-size:16px}
@@ -300,7 +301,7 @@
       #sigil-ble-modal .log{font:11px/1.4 ui-monospace,monospace;color:#8fb3c2;max-height:110px;overflow:auto;margin-top:8px;white-space:pre-wrap}
       #sigil-ble-modal .err{color:#ff8a8a}#sigil-ble-modal .ok{color:#00e0c6}`;
     document.head.appendChild(css);
-    const fab = document.createElement('button'); fab.id = 'sigil-ble-fab'; fab.title = 'Nearby phone (Bluetooth)'; fab.textContent = '📶';
+    const fab = document.createElement('button'); fab.id = 'sigil-ble-fab'; fab.title = 'Connect a phone over Bluetooth — Chrome or Edge on a laptop with Bluetooth'; fab.innerHTML = '<span style="font-size:16px">📶</span><span>BLUETOOTH</span>';
     const modal = document.createElement('div'); modal.id = 'sigil-ble-modal';
     modal.innerHTML = '<div class="card"><h3>📶 Nearby phone — coins over Bluetooth</h3><div id="sble-body"></div><div class="log" id="sble-log"></div><div style="margin-top:10px;text-align:right"><button id="sble-close">Close</button></div></div>';
     document.body.appendChild(fab); document.body.appendChild(modal);

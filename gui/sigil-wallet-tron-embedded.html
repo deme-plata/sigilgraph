@@ -9033,7 +9033,8 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   .kg-stable{background:rgba(16,185,129,.18);color:#34d399;border:1px solid rgba(16,185,129,.35)}
   .kg-elevated{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}
   .kg-critical{background:rgba(239,68,68,.18);color:#f87171;border:1px solid rgba(239,68,68,.4)}
-  .kg-unknown{background:rgba(120,130,150,.18);color:#94a3b8;border:1px solid rgba(120,130,150,.35)}
+  .kg-blind{background:rgba(148,163,184,.16);color:#cbd5e1;border:1px dashed rgba(203,213,225,.55)}
+.kg-unknown{background:rgba(120,130,150,.18);color:#94a3b8;border:1px solid rgba(120,130,150,.35)}
   #kgPanel{position:fixed;top:52px;right:12px;z-index:1400;width:380px;max-width:calc(100vw - 24px);
     max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
     background:#12101c;border:1px solid rgba(139,92,246,.4);border-radius:14px;
@@ -9131,12 +9132,54 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   //   w_S = 1 − H_norm/4 ∈ [¾,1]. Same ΔH_c and ladder as K_C; no seconds, no ħ, no ε. Speed-invariant; one-key fork = worst case.
   function kFix(d,persist,hNorm){ var tauD=(1+Math.min(FINAL_DEPTH,Math.max(0,persist))/FINAL_DEPTH)/2, wS=1-Math.min(1,Math.max(0,hNorm))/4; return 2*Math.PI*Math.sqrt(Math.min(1,Math.max(0,d))*tauD*wS); }
   function regimeOf(k){ if(!isFinite(k)) return 'unknown'; if(k>=3) return 'critical'; if(k>=1) return 'elevated'; return 'stable'; }
+
+  /* ── The WITNESS term W (2026-09-22) — absence of conflict is not presence of consensus ──
+     Viktor: "et dødt nervesystem kan også være stille." K here is a LOWER BOUND built from
+     disagreement that was OBSERVED, so K = 0 has two causes and this chip printed the same
+     word for both: many independent nodes agreed, or nobody was there to disagree. W does not
+     measure disagreement — it measures whether a disagreement COULD have been seen. MINIMUM of
+     its senses, never a product: a chain is only as witnessed as its weakest sense, and a
+     minimum names the one that failed. Measured against three real freezes (09-08, 09-15,
+     09-22) in which this chip read 0.00 "stable" throughout. Mirrors
+     fluxc-mcp handlers/sigil_kgauge.rs::witness_of and kgauge.js. */
+  var CERT_FRESH_TAUS=2, CERT_BLIND_TAUS=20, CERT_FRESH_MIN_SECS=120, WITNESS_BLIND_BELOW=0.34;
+  function certFreshness(ageSecs,tauFin){
+    if(ageSecs===null||ageSecs===undefined||!isFinite(ageSecs)) return null;
+    var tau=(isFinite(tauFin)&&tauFin>0)?tauFin:100;
+    var fresh=Math.max(CERT_FRESH_TAUS*tau,CERT_FRESH_MIN_SECS), blind=Math.max(CERT_BLIND_TAUS*tau,fresh*2);
+    if(ageSecs<=fresh) return 1; if(ageSecs>=blind) return 0;
+    return 1-(ageSecs-fresh)/(blind-fresh);
+  }
+  function witnessOf(m){
+    var clock=(m.blocksAdded>0)?1:0, cert=certFreshness(m.certAgeSecs,m.tauFin);
+    var channels=Math.max(0,Math.min(1,1-(m.missing||0)));
+    /* A "solo" gate is the writer attesting to its own chain, not a quorum of witnesses.
+       🪤 certVoters COUNTS SIGNERS, NOT FAILURE DOMAINS — on 2026-09-22 two of three nodes
+       were processes on ONE host, so a single cut removed both. Upper bound only. */
+    var solo=!m.certBft||m.certGate==='solo'||(m.certVoters||0)<=1;
+    var indep=solo?0:Math.max(0,Math.min(1,m.certVoters/Math.max(1,Math.max(m.certCommittee||0,m.certVoters))));
+    var senses=[['clock',clock],['certificate',cert===null?0:cert],['independence',indep],['channels',channels]];
+    var weakest=senses[0][0], w=Infinity;
+    for(var i=0;i<senses.length;i++) if(senses[i][1]<w){ w=senses[i][1]; weakest=senses[i][0]; }
+    var why;
+    if(!clock) why='the clock is stopped — no block was added in the window, so no disagreement could have been observed. K = 0 here means "nothing was seen", not "all agree".';
+    else if(cert===null) why='the node serves no finality certificate — unknown is not health.';
+    else if(cert===0) why='the finality certificate is frozen ('+(m.certAgeSecs/3600).toFixed(1)+' h old'+(m.certLag!=null?', '+m.certLag.toLocaleString()+' blocks behind the tip':'')+') while the tip advances. Blocks are settling on the 512-depth fallback, which is a timeout, not a quorum. K = 0 here is the sound of nobody voting.';
+    else if(solo) why='gate "'+m.certGate+'", bft '+m.certBft+', '+m.certVoters+' signer(s) — a replicated single writer attesting to its own chain. Absence of conflict here is guaranteed by construction.';
+    else why='weakest sense is '+weakest+' at '+w.toFixed(2)+'.';
+    return {w:w,weakest:weakest,blind:w<WITNESS_BLIND_BELOW,clock:clock,cert:cert,indep:indep,channels:channels,why:why};
+  }
+  /* The reflex arc. An OBSERVED disagreement is always reported at its own severity — a low W
+     never suppresses a high K. But a K that would read "stable" on a blind gauge reads "blind",
+     because that is a statement about the instrument, not about the chain. */
+  function regimeWitnessed(k,wit){ var r=regimeOf(k); return (r==='stable'&&wit&&wit.blind)?'blind':r; }
+
   // Ω = 1−e^(−peers/n_total), n_total = max(peers+2, 8) — saturates at 0.632, so the labels live inside that range.
   function confidenceOf(om){ return om>=0.55?'high':(om>=0.40?'medium':'low'); }
   function fmt(x,d){ return (typeof x==='number'&&isFinite(x))?x.toFixed(d===undefined?4:d):'—'; }
   function rejMap(arr){ var m={}; (arr||[]).forEach(function(r){ if(r&&r[0]!=null) m[String(r[0])]=(m[String(r[0])]||0)+((r[1]|0)||0); }); return m; }
   var lastPeers=null;
-  function sample(){ return Promise.all([getJSON('/v1/dagknight/recent'),getJSON('/v1/mining/miners'),getJSON('/v1/network/topology')]); }
+  function sample(){ return Promise.all([getJSON('/v1/dagknight/recent'),getJSON('/v1/mining/miners'),getJSON('/v1/network/topology'),getJSON('/v1/finality/certificate')]); }
   function compute(){
     var t0=Date.now();
     return sample().then(function(a){
@@ -9146,6 +9189,12 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       var recentB=(B[0]&&(B[0].data||B[0]))||{}; var all=(recentB.blocks)||[];
       var minersA=(A[1]&&A[1].data)||{}, minersB=(B[1]&&B[1].data)||{};
       var topoA=(A[2]&&A[2].data)||{}, topoB=(B[2]&&B[2].data)||{};
+      // 2026-09-22: the certificate is the sensor this gauge never had. Absent on an older
+      // node -> every field null, and UNKNOWN must never read as healthy.
+      var certB=(B[3]&&(B[3].certificate||(B[3].data&&B[3].data.certificate)))||null;
+      var certAgeSecs=(certB&&certB.certified_at_ms)?Math.max(0,(Date.now()-certB.certified_at_ms)/1000):null;
+      var certVoters=0;
+      if(certB&&Array.isArray(certB.votes)){ var _ids={}; certB.votes.forEach(function(v){ if(v&&v.validator_id) _ids[v.validator_id]=1; }); certVoters=Object.keys(_ids).length||certB.votes.length; }
       var hA=minersA.height||0, hB=minersB.height||0;
       var inWin=all.filter(function(bk){ return (bk.height||0)>hA; }); var windowOnly=inWin.length>=2; var blocks=windowOnly?inWin:all;
       var nB=blocks.length||1;
@@ -9199,15 +9248,22 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       return {K:K,Klo:Klo,Khi:Khi,Kfix:Kfix,KfixHi:KfixHi,persist:persist,dh:dh,missing:missing,ch:ch,ds:ds,hNorm:hNorm,nEff:nEff,domShare:domShare,distinct:distinct,
         resBits:resolutionBits(blocks.length),tauFin:tauFin,tauRatio:tauRatio,tauW:tauW,obsBps:obsBps,omega:omega,conf:confidenceOf(omega),
         peers:peersB,churn:churn,rejRate:rate(noise+semantic+uncl),rejSem:rate(semantic),noise:noise,semantic:semantic,uncl:uncl,byKind:byKind,
-        Kv1:Kv1,KstarV1:KstarV1,dhV1:dhV1,dom:dom,tip:hB,blocks:blocks.length,windowOnly:windowOnly,svLen:sv.length,phLen:ph.length,syncing:syncing};
+        Kv1:Kv1,KstarV1:KstarV1,dhV1:dhV1,dom:dom,tip:hB,blocks:blocks.length,windowOnly:windowOnly,svLen:sv.length,phLen:ph.length,syncing:syncing,
+        blocksAdded:Math.max(0,hB-hA),certAgeSecs:certAgeSecs,certHeight:certB?certB.height:null,
+        certLag:(certB&&certB.height!=null)?Math.max(0,hB-certB.height):null,certVoters:certVoters,
+        certCommittee:certB?(certB.committee_size||0):0,certBft:certB?!!certB.bft:false,certGate:certB?(certB.gate||'unknown'):'absent'};
     });
   }
   function cell(lab,sub,val,note,na){ return '<div class="kgCell"><div class="kgLab">'+lab+' · '+sub+'</div><div class="kgVal'+(na?' kgNa':'')+'">'+val+'</div><div class="kgSub">'+note+'</div></div>'; }
   function render(m){
     if(!m){ document.getElementById('kgChipReg').textContent='node offline'; document.getElementById('kgChipReg').className='kgReg kg-unknown'; return; }
-    var reg=regimeOf(m.K), col=reg==='critical'?'#f87171':reg==='elevated'?'#fbbf24':'#34d399';
+    var wit=witnessOf(m);
+    var reg=regimeWitnessed(m.K,wit), col=reg==='critical'?'#f87171':reg==='elevated'?'#fbbf24':reg==='blind'?'#cbd5e1':'#34d399';
     document.getElementById('kgChipK').textContent=fmt(m.K,2);
     var cr=document.getElementById('kgChipReg'); cr.textContent=reg; cr.className='kgReg kg-'+reg;
+    cr.title = wit.blind
+      ? ('BLIND — W = '+wit.w.toFixed(2)+' (weakest sense: '+wit.weakest+'). '+wit.why+'\nThis reading is about the instrument, not the chain: K = '+fmt(m.K,2)+' would have printed "'+regimeOf(m.K)+'".')
+      : ('witnessed — W = '+wit.w.toFixed(2)+' (weakest sense: '+wit.weakest+'). A K near zero here is evidence of agreement, not of silence.');
     var bk=document.getElementById('kgBigK'); bk.textContent=fmt(m.K,3); bk.style.color=col;
     document.getElementById('kgStar').textContent='['+fmt(m.Klo,2)+', '+fmt(m.Khi,2)+'] · Ω '+fmt(m.omega,3)+' '+m.conf;
     document.getElementById('kgDHc').textContent='= '+fmt(m.dh,4)+' (lower bound, '+Math.round(m.missing*100)+'% unmeasured)';

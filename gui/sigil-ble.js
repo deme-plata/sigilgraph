@@ -286,11 +286,11 @@
   // ── UI: floating launcher + modal, self-contained ─────────────────────────
   function fmt(glyphs) { if (glyphs == null) return '?'; const s = BigInt(glyphs).toString().padStart(11, '0'); return (s.slice(0, -10) + '.' + s.slice(-10)).replace(/\.?0+$/, '') || '0'; }
   function ui() {
-    if (document.getElementById('sigil-ble-fab')) return;
+    if (document.getElementById('sigil-ble-fab') || document.getElementById('sigil-ble-settings')) return;
     const css = document.createElement('style'); css.textContent = `
       #sigil-ble-fab{position:fixed;right:18px;bottom:160px;z-index:19992;border-radius:999px;border:1px solid #2bd4ff88;background:linear-gradient(135deg,#0b1620,#0f2a3a);color:#6df3ff;font:700 12px/1 'JetBrains Mono',ui-monospace,monospace;letter-spacing:1.5px;padding:11px 15px;cursor:pointer;box-shadow:0 0 18px #2bd4ff33;display:flex;align-items:center;gap:7px;white-space:nowrap}
       #sigil-ble-fab:hover{box-shadow:0 0 26px #2bd4ff66}
-      #sigil-ble-modal{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;background:#000a}
+      #sigil-ble-modal{position:fixed;inset:0;z-index:10002;display:none;align-items:center;justify-content:center;background:#000a}
       #sigil-ble-modal .card{width:min(440px,92vw);max-height:88vh;overflow:auto;background:#0b1620;border:1px solid #2bd4ff55;border-radius:14px;padding:18px;color:#cfe9f3;font:14px/1.45 system-ui,sans-serif}
       #sigil-ble-modal h3{margin:0 0 6px;color:#6df3ff;font-size:16px}
       #sigil-ble-modal .sas{font:700 34px/1 ui-monospace,monospace;letter-spacing:6px;text-align:center;margin:12px 0 6px;color:#fff}
@@ -304,7 +304,26 @@
     const fab = document.createElement('button'); fab.id = 'sigil-ble-fab'; fab.title = 'Connect a phone over Bluetooth — Chrome or Edge on a laptop with Bluetooth'; fab.innerHTML = '<span style="font-size:16px">📶</span><span>BLUETOOTH</span>';
     const modal = document.createElement('div'); modal.id = 'sigil-ble-modal';
     modal.innerHTML = '<div class="card"><h3>📶 Nearby phone — coins over Bluetooth</h3><div id="sble-body"></div><div class="log" id="sble-log"></div><div style="margin-top:10px;text-align:right"><button id="sble-close">Close</button></div></div>';
-    document.body.appendChild(fab); document.body.appendChild(modal);
+    document.body.appendChild(modal);
+    // Home = Settings. The launcher lives inside the wallet's settings modal (operator, 2026-09-22:
+    // "hide the bluetooth button inside settings"); the floating pill is only the fallback for a
+    // copy of the wallet that has no #settings-modal.
+    const settingsBody = document.querySelector('#settings-modal > div > div:nth-child(2)');
+    if (settingsBody) {
+      fab.id = 'sigil-ble-settings'; fab.removeAttribute('style');
+      fab.style.cssText = "display:block;width:100%;text-align:center;background:rgba(43,212,255,.08);border:1px solid rgba(43,212,255,.38);color:#6df3ff;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron',system-ui,sans-serif;font-size:12px;letter-spacing:1px";
+      fab.innerHTML = '📶 BLUETOOTH — CONNECT A PHONE';
+      const hint = document.createElement('div');
+      hint.style.cssText = "font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#5a93a8;line-height:1.5";
+      hint.textContent = navigator.bluetooth
+        ? 'receive a SIGIL coin from a phone over Bluetooth — phone: More → Nearby → Be visible; then connect from here and compare the six digits'
+        : 'this browser has no Web Bluetooth — Chrome or Edge on a laptop with Bluetooth can do this; Firefox and Safari cannot';
+      const logout = [...settingsBody.querySelectorAll('button')].find((b) => /LOG OUT/i.test(b.textContent));
+      if (logout) { settingsBody.insertBefore(fab, logout); settingsBody.insertBefore(hint, logout); }
+      else { settingsBody.appendChild(fab); settingsBody.appendChild(hint); }
+    } else {
+      document.body.appendChild(fab);
+    }
     const body = modal.querySelector('#sble-body'), logEl = modal.querySelector('#sble-log');
     const log = (m, cls) => { const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = m; logEl.appendChild(d); logEl.scrollTop = 1e9; };
     let link = null, state = { peer: null, sas: null, request: null };
@@ -366,7 +385,7 @@
         }, (m) => log(m));
       } catch (e) { log('✗ ' + (e && e.message || e), 'err'); }
     }
-    fab.addEventListener('click', () => { modal.style.display = 'flex'; render(); });
+    fab.addEventListener('click', () => { const s = document.getElementById('settings-modal'); if (s) s.style.display = 'none'; modal.style.display = 'flex'; render(); });
     modal.querySelector('#sble-close').addEventListener('click', () => { modal.style.display = 'none'; });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ui); else ui();

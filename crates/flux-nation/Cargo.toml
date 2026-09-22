@@ -11,6 +11,9 @@ serde_json = { workspace = true }
 blake3     = { workspace = true }
 thiserror  = { workspace = true }
 sigil-state = { path = "../sigil-state" }
-sigil-rpc   = { path = "../sigil-rpc" }
+# sigil-rpc retired + deleted 2026-09-22; its `nation` module (the only piece
+# anything still used) now lives here as src/nation.rs, which needs sigil-bank
+# (BORGER_REGISTRY) alongside the sigil-state this crate already had.
+sigil-bank  = { path = "../sigil-bank" }
 # REAL post-quantum consent signing (MitID-style, per-action) — the citizen's key.
 flux-sqisign = { workspace = true }

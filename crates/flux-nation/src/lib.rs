@@ -3,7 +3,7 @@
 //! Not a demo (fake data) and not a bare stub — a **working prototype**: every
 //! citizen action is gated by a **real post-quantum MitID-style consent
 //! signature** ([`flux_sqisign`], SQIsign Level-5), then executed through the
-//! real, tested [`sigil_rpc::nation`] state primitives (attest / pay-utility /
+//! real, tested [`crate::nation`] state primitives (attest / pay-utility /
 //! e-Boks) which commit into the chain's `contract_state_root` — so a flux
 //! lightweight node can verify each action client-side, no server trusted.
 //!
@@ -14,7 +14,8 @@
 //! + NSIS registration exists. Crypto, consent, state + conservation are REAL;
 //! the broker handshake is the one thing waiting on Denmark.
 
-use sigil_rpc::nation::{self, NationError, BORGER_AUTHORITY};
+pub mod nation;
+use nation::{NationError, BORGER_AUTHORITY};
 use sigil_state::{SigilState, WalletId, NATIVE};
 
 /// Which gov data source backs the citizen-data tools.

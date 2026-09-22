@@ -3482,17 +3482,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flux-history"
-version = "0.41.0"
-dependencies = [
- "blake3",
- "flux-db",
- "flux-search",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "flux-i18n"
 version = "0.1.0"
 dependencies = [
@@ -3581,7 +3570,7 @@ dependencies = [
  "flux-sqisign",
  "serde",
  "serde_json",
- "sigil-rpc",
+ "sigil-bank",
  "sigil-state",
  "thiserror 1.0.69",
 ]
@@ -9016,31 +9005,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq",
-]
-
-[[package]]
-name = "sigil-rpc"
-version = "5.1.1"
-dependencies = [
- "bincode 1.3.3",
- "blake3",
- "flux-db",
- "flux-history",
- "flux-miner",
- "flux-vdf",
- "hex",
- "serde",
- "serde_json",
- "sigil-bank",
- "sigil-dex",
- "sigil-emission",
- "sigil-header",
- "sigil-oauth",
- "sigil-state",
- "sigil-tip-proof",
- "sigil-tx",
- "sigil-university",
- "thiserror 1.0.69",
 ]
 
 [[package]]

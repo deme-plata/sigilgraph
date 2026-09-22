@@ -1,0 +1,13 @@
+[Unit]
+Description=SIGIL node TLS front (socat :8443 → 127.0.0.1:8099) reusing quillon.xyz cert
+After=network.target sigil-rpcd.service
+Wants=sigil-rpcd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat OPENSSL-LISTEN:8843,reuseaddr,fork,cert=/etc/letsencrypt/live/quillon.xyz/fullchain.pem,key=/etc/letsencrypt/live/quillon.xyz/privkey.pem,verify=0 TCP:127.0.0.1:8099
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=SIGIL RPC node (wallet /api/v1 + /mine + /swap) on 0.0.0.0:8099
+After=network.target
+
+[Service]
+Type=simple
+Environment=SIGIL_RPC_ADDR=0.0.0.0:8099
+Environment=SIGIL_STATUS_OUT=/home/orobit/q-narwhalknight/dist-fluxapp/sigil-mine-status.json
+# 2026-06-12 (fable): switched debug→release build — debug binary consumed >1 week CPU since Jun 11 + fed the bridge-backlog memory spiral
+ExecStart=/home/storage/deepseek-codewhale/sigil/target/release/sigil-rpcd
+ExecStartPost=-/home/orobit/sigil-data/sigil-rpcd-refund.sh
+# Restart=always removed 2026-09-22 (operator): rpcd is retired. Restart=always turned
+# every OOM-kill into a relaunch — 1,288 restarts, 3 OOM kills today alone, ~18 min CPU
+# per life. The loop, not a person, is why this "permanently retired" service kept
+# reappearing on 08-17, 08-31 and 09-22.
+Restart=no
+RestartSec=2
+StandardOutput=append:/home/orobit/sigil-data/sigil-rpcd.log
+StandardError=append:/home/orobit/sigil-data/sigil-rpcd.log
+
+[Install]
+WantedBy=multi-user.target

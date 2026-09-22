@@ -89,6 +89,53 @@ pub enum ProofError {
     TxHashMismatch,
     #[error("Merkle branch does not reach the deposit block's merkle root")]
     MerkleMismatch,
+    #[error("no SIGIL deposit memo (magic ‖ amount ‖ recipient) found in tx_bytes")]
+    NoDepositMemo,
+    #[error("deposit memo amount is zero")]
+    ZeroDeposit,
+    #[error("header {0} target is easier than the required difficulty floor")]
+    DifficultyTooLow(usize),
+}
+
+/// Magic prefix marking the SIGIL deposit memo embedded in the source-chain tx
+/// (the OP_RETURN-style payload a relayer must include). Bump the version digit
+/// on any layout change.
+pub const DEPOSIT_MAGIC: &[u8; 6] = b"SIGIL1";
+
+/// The deposit's wrapped amount + SIGIL recipient, parsed FROM the proven tx
+/// bytes. Because this lives inside `tx_bytes` — the bytes that hash to
+/// `tx_hash`, which the SPV proof proves was included and buried under PoW —
+/// the amount and recipient are cryptographically BOUND to the proven deposit.
+/// This is the fix for the free-mint hole (audit C9): a relayer could prove any
+/// tiny tx then `process_deposit(amount=21M, recipient=attacker)` because amount
+/// and recipient used to be independent caller args.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepositIntent {
+    /// Wrapped units to mint (must equal the source-chain locked value).
+    pub amount: u128,
+    /// 32-byte SIGIL recipient wallet.
+    pub recipient: [u8; 32],
+}
+
+/// Scan `tx_bytes` for the deposit memo `DEPOSIT_MAGIC ‖ amount:u128-LE(16) ‖
+/// recipient:32` and parse out the bound `(amount, recipient)`.
+pub fn parse_deposit_intent(tx_bytes: &[u8]) -> Result<DepositIntent, ProofError> {
+    let pos = tx_bytes
+        .windows(DEPOSIT_MAGIC.len())
+        .position(|w| w == DEPOSIT_MAGIC)
+        .ok_or(ProofError::NoDepositMemo)?;
+    let start = pos + DEPOSIT_MAGIC.len();
+    let end = start + 16 + 32;
+    if tx_bytes.len() < end {
+        return Err(ProofError::NoDepositMemo);
+    }
+    let amount = u128::from_le_bytes(tx_bytes[start..start + 16].try_into().unwrap());
+    if amount == 0 {
+        return Err(ProofError::ZeroDeposit);
+    }
+    let mut recipient = [0u8; 32];
+    recipient.copy_from_slice(&tx_bytes[start + 16..end]);
+    Ok(DepositIntent { amount, recipient })
 }
 
 /// A self-verifying source-chain deposit proof with the burying PoW chain.
@@ -111,6 +158,27 @@ impl SpvProof {
     /// The deposit block's hash (dsha256 of headers[0]).
     pub fn block_hash(&self) -> Option<[u8; 32]> {
         self.headers.first().map(|h| dsha256(h))
+    }
+
+    /// Parse the `(amount, recipient)` the source-chain tx committed to (the
+    /// SIGIL deposit memo). Bound to the proven tx — see [`DepositIntent`].
+    pub fn deposit_intent(&self) -> Result<DepositIntent, ProofError> {
+        parse_deposit_intent(&self.tx_bytes)
+    }
+
+    /// Reject a proof whose headers were mined under a target EASIER than
+    /// `max_target` (the per-chain proof-of-work floor / `powLimit`). Without
+    /// this, an attacker mines a few regtest-difficulty headers in microseconds
+    /// and clears `verify()` (audit H7: SPV difficulty was self-declared). A
+    /// header's target (from its own `nBits`) must be ≤ `max_target` to count.
+    pub fn verify_difficulty_floor(&self, max_target: &[u8; 32]) -> Result<(), ProofError> {
+        for (i, h) in self.headers.iter().enumerate() {
+            let nbits = u32::from_le_bytes(h[72..76].try_into().unwrap());
+            if target_from_nbits(nbits) > *max_target {
+                return Err(ProofError::DifficultyTooLow(i));
+            }
+        }
+        Ok(())
     }
 
     /// Verify the whole chain: PoW on every header, prev_block linkage,

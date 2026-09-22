@@ -858,24 +858,61 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
                 });
             }
 
-            // Sender side
-            let new_from_native = from_native - need_native;
-            out.mutations.push(StateMutation::SetBalance {
-                wallet: *from, token: NATIVE, amount: new_from_native,
-            });
-            if token != &NATIVE {
-                let new_from_token = from_token - amount;
+            // Compute per-slot final balances FIRST, then emit one SetBalance
+            // per UNIQUE (wallet, token) slot. This is aliasing-safe: a
+            // self-transfer (from == to) must NOT mint. With naive
+            // debit-then-credit, the recipient credit (which reads pre-state)
+            // overwrites the sender debit on the same slot via last-writer-win,
+            // leaving balance = from + amount — minting `amount` for free. The
+            // LpDeposit/LpWithdraw handlers already guard this same class; Send
+            // must too.
+            let self_send = from == to;
+            if token == &NATIVE {
+                if self_send {
+                    // Single (from, NATIVE) slot: amount cancels, net is −fee.
+                    let final_native = from_native
+                        .checked_sub(*fee)
+                        .ok_or(TxApplyError::InsufficientBalance { have: from_native, need: *fee })?;
+                    out.mutations.push(StateMutation::SetBalance {
+                        wallet: *from, token: NATIVE, amount: final_native,
+                    });
+                } else {
+                    let new_from_native = from_native - need_native;
+                    let to_native = state.balance_of(to, &NATIVE);
+                    let new_to_native = to_native
+                        .checked_add(*amount)
+                        .ok_or(TxApplyError::Overflow)?;
+                    out.mutations.push(StateMutation::SetBalance {
+                        wallet: *from, token: NATIVE, amount: new_from_native,
+                    });
+                    out.mutations.push(StateMutation::SetBalance {
+                        wallet: *to, token: NATIVE, amount: new_to_native,
+                    });
+                }
+            } else {
+                // Non-native: fee debits NATIVE; `amount` moves in `token`.
+                let new_from_native = from_native
+                    .checked_sub(*fee)
+                    .ok_or(TxApplyError::InsufficientBalance { have: from_native, need: *fee })?;
                 out.mutations.push(StateMutation::SetBalance {
-                    wallet: *from, token: *token, amount: new_from_token,
+                    wallet: *from, token: NATIVE, amount: new_from_native,
                 });
+                if self_send {
+                    // (from, token) slot: −amount +amount nets to zero. Emit
+                    // nothing for it so the pre-state value is preserved
+                    // (balance-sufficiency was checked above).
+                } else {
+                    let new_from_token = from_token - amount;
+                    let to_bal = state.balance_of(to, token);
+                    let new_to = to_bal.checked_add(*amount).ok_or(TxApplyError::Overflow)?;
+                    out.mutations.push(StateMutation::SetBalance {
+                        wallet: *from, token: *token, amount: new_from_token,
+                    });
+                    out.mutations.push(StateMutation::SetBalance {
+                        wallet: *to, token: *token, amount: new_to,
+                    });
+                }
             }
-
-            // Recipient side
-            let to_bal = state.balance_of(to, token);
-            let new_to = to_bal.checked_add(*amount).ok_or(TxApplyError::Overflow)?;
-            out.mutations.push(StateMutation::SetBalance {
-                wallet: *to, token: *token, amount: new_to,
-            });
 
             // Events: Send on sender side, Receive on recipient side.
             let send_evt = SigilEvent::Send {
@@ -1418,6 +1455,57 @@ mod tests {
         assert_eq!(s.balance_of(&alice, &NATIVE), 1_000 - 100 - 1);
         assert_eq!(s.balance_of(&bob,   &NATIVE), 100);
         assert_ne!(s.roots().wallet_state_root, pre);
+    }
+
+    #[test]
+    fn self_send_native_does_not_mint() {
+        // Regression: a Send with from == to (native) must net to −fee, NOT
+        // mint `amount`. Pre-fix, the recipient credit overwrote the sender
+        // debit on the same slot → balance = start + amount (free money).
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        fund(&mut s, alice, 1_000);
+        let supply_before = s.native_supply();
+
+        let signed = dummy_signed(SigilTx::Send {
+            from: alice, to: alice, amount: 500, token: NATIVE, fee: 1,
+        });
+        let result = apply_tx(&s, &signed).unwrap();
+        let transition = batch_into_transition([result], 1);
+        commit_state_transition(&mut s, &transition, 1).unwrap();
+
+        // Only the fee left the wallet; `amount` cancelled against itself. The
+        // mint bug would have produced 1_500 here (start + amount). The fee is
+        // burned (debited, credited to no one) — same as a normal Send — so the
+        // supply DROPS by the fee, and crucially never GROWS.
+        assert_eq!(s.balance_of(&alice, &NATIVE), 1_000 - 1, "self-send must only cost the fee, not mint `amount`");
+        assert_eq!(s.native_supply(), supply_before - 1, "self-send burns the fee and mints nothing");
+        assert!(s.native_supply() <= supply_before, "native supply must never grow on a self-send");
+    }
+
+    #[test]
+    fn self_send_token_does_not_mint() {
+        // Same, for a non-native token: token slot nets to zero, fee debits NATIVE.
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        let tok: TokenId = [7u8; 32];
+        fund(&mut s, alice, 1_000); // native for the fee
+        // seed a token balance
+        let seed = StateTransition {
+            at_height: 0,
+            mutations: vec![StateMutation::SetBalance { wallet: alice, token: tok, amount: 800 }],
+        };
+        commit_state_transition(&mut s, &seed, 0).unwrap();
+
+        let signed = dummy_signed(SigilTx::Send {
+            from: alice, to: alice, amount: 300, token: tok, fee: 2,
+        });
+        let result = apply_tx(&s, &signed).unwrap();
+        let transition = batch_into_transition([result], 1);
+        commit_state_transition(&mut s, &transition, 1).unwrap();
+
+        assert_eq!(s.balance_of(&alice, &tok), 800, "token self-send must leave token balance unchanged");
+        assert_eq!(s.balance_of(&alice, &NATIVE), 1_000 - 2, "only the native fee is spent");
     }
 
     #[test]

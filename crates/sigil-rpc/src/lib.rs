@@ -46,6 +46,9 @@ pub enum RpcError {
 /// Verified-user onboarding + the earning gate (verified earns / unverified → dev-fee).
 pub mod onboard;
 
+/// Per-request wallet-signature authorization for the mutating RPC routes.
+pub mod auth;
+
 /// Result of a light-verifier credit batch.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct LightCreditResult {
@@ -218,22 +221,39 @@ pub fn credit_share(
     miner: WalletId,
     reward: u128,
 ) -> Result<u128, RpcError> {
+    // 5% dev fee on coinbase: the master wallet (sigil-bank MASTER_MINING_FEE_BPS,
+    // 500 bps) takes its cut, the miner gets the remainder. If no master is set
+    // (pre-genesis / tests) the miner gets the full reward — same "no bank" path
+    // as sigil-bank's split helper. Total minted = miner_credit + master_credit =
+    // reward, so the 21M MAX_SUPPLY cap behaves exactly as before.
+    let master = state.master_wallet();
+    let split = sigil_bank::split_mining_reward(reward, master).map_err(|_| RpcError::Overflow)?;
+    let (miner_credit, master_credit) = match master {
+        Some(m) if m != miner && split.master_share > 0 => (reward - split.master_share, split.master_share),
+        _ => (reward, 0),
+    };
+
     let new_balance = state
         .balance_of(&miner, &NATIVE)
-        .checked_add(reward)
+        .checked_add(miner_credit)
         .ok_or(RpcError::Overflow)?;
 
-    let transition = StateTransition {
-        at_height: height,
-        mutations: vec![StateMutation::SetBalance {
-            wallet: miner,
-            token: NATIVE,
-            amount: new_balance,
-        }],
-    };
+    let mut mutations = vec![StateMutation::SetBalance {
+        wallet: miner,
+        token: NATIVE,
+        amount: new_balance,
+    }];
+    if let (Some(m), true) = (master, master_credit > 0) {
+        let master_new = state
+            .balance_of(&m, &NATIVE)
+            .checked_add(master_credit)
+            .ok_or(RpcError::Overflow)?;
+        mutations.push(StateMutation::SetBalance { wallet: m, token: NATIVE, amount: master_new });
+    }
+
     // If this reward would push total native supply past MAX_SUPPLY, the
-    // chokepoint returns Err here and the miner is NOT credited.
-    commit_state_transition(state, &transition, height)?;
+    // chokepoint returns Err here and NOTHING is credited.
+    commit_state_transition(state, &StateTransition { at_height: height, mutations }, height)?;
     Ok(new_balance)
 }
 
@@ -436,8 +456,26 @@ mod tests {
         // master credited the fee, trader gets output minus the fee
         assert_eq!(s.balance_of(&MASTER, &TOKEN_B), r.protocol_fee, "master credited");
         assert_eq!(s.balance_of(&TRADER, &TOKEN_B), r.amount_out, "trader gets net output");
-        // 0.05% (5 bps) of the gross output
+        // 0.3% (30 bps) of the gross output
         let gross = r.amount_out + r.protocol_fee;
-        assert_eq!(r.protocol_fee, gross * 5 / 10_000);
+        assert_eq!(r.protocol_fee, gross * 30 / 10_000);
+    }
+
+    #[test]
+    fn mining_coinbase_pays_5pct_dev_fee_to_master() {
+        let mut s = SigilState::new();
+        commit_state_transition(
+            &mut s,
+            &StateTransition { at_height: 0, mutations: vec![StateMutation::SetMasterWallet { wallet: MASTER }] },
+            0,
+        )
+        .unwrap();
+        // reward 1000 → miner 950 (95%), master dev wallet 50 (5%).
+        let miner_bal = credit_share(&mut s, 1, MINER, 1000).unwrap();
+        assert_eq!(miner_bal, 950, "miner keeps 95%");
+        assert_eq!(s.balance_of(&MINER, &NATIVE), 950);
+        assert_eq!(s.balance_of(&MASTER, &NATIVE), 50, "master dev fee = 5%");
+        // miner_credit + master_credit == reward → no inflation beyond the coinbase.
+        assert_eq!(s.balance_of(&MINER, &NATIVE) + s.balance_of(&MASTER, &NATIVE), 1000);
     }
 }

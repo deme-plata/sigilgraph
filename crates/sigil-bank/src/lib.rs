@@ -55,19 +55,22 @@ pub const MASTER_MINING_FEE_BPS: u128 = 500;
 /// health). Locked at genesis; a consensus upgrade can lift it.
 pub const OPERATOR_NODE_FEE_BPS: u128 = 10;
 
-/// Per-swap protocol fee on the *output* side, in basis points. **5 bps =
-/// 0.05%**. Sized to be small relative to the LP fee (30 bps default → 1/6 of
-/// the LP take, like Uniswap V2's optional protocol fee). LPs still earn the
-/// 30 bps swap fee that compounds into reserves; the bank only takes a sliver
-/// of what the user *receives*, not what they pay.
-///
-/// Why this sizing:
-/// - Too low (1 bps) → not worth the per-block bookkeeping
-/// - Too high (50 bps) → user-visible price impact, hurts adoption
-/// - 5 bps is roughly the smallest fee that's economically meaningful at
-///   typical SIGIL swap sizes, and stays under the noise floor of normal
-///   AMM slippage so traders won't optimize around it
-pub const MASTER_SWAP_FEE_BPS: u128 = 5;
+/// Per-swap protocol fee on the *output* side, in basis points. **30 bps =
+/// 0.30%** — the master dev-fee take on every DEX swap, routed to
+/// [`DEV_MASTER_WALLET`]. This is taken from what the user *receives*, on top
+/// of the LP fee (30 bps default) that compounds into the pool reserves — so a
+/// swap pays 0.3% to LPs (pool) and 0.3% to the dev account.
+pub const MASTER_SWAP_FEE_BPS: u128 = 30;
+
+/// Master dev-fee wallet (Viktor) — SIGIL address
+/// `095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8`.
+/// Receives [`MASTER_MINING_FEE_BPS`] (5%) of every mining coinbase and
+/// [`MASTER_SWAP_FEE_BPS`] (0.3%) of every DEX swap output. Baked into block 0
+/// via `SetMasterWallet`; immutable for the chain's lifetime once committed.
+pub const DEV_MASTER_WALLET: WalletId = [
+    0x09, 0x5b, 0x0e, 0x1f, 0x7f, 0x5b, 0xb2, 0x58, 0xfb, 0x11, 0x42, 0x7c, 0x4a, 0xc0, 0x36, 0xe3,
+    0xd9, 0xe4, 0xf1, 0x0f, 0xa3, 0x9d, 0x7f, 0x28, 0x2a, 0xa4, 0x28, 0x62, 0xdc, 0x2b, 0x3d, 0xd8,
+];
 
 /// Errors from the split helpers — vanishingly rare on u128 amounts in
 /// realistic ranges but caught explicitly because Phase 0 uses native u128
@@ -220,10 +223,10 @@ mod tests {
     // ── Swap split ──────────────────────────────────────────────────────────
 
     #[test]
-    fn swap_split_10_000_at_5_bps_is_5_9995() {
+    fn swap_split_10_000_at_30_bps_is_30_9970() {
         let s = split_swap_output(10_000, MASTER).unwrap();
-        assert_eq!(s.master_share, 5);
-        assert_eq!(s.user_share, 9_995);
+        assert_eq!(s.master_share, 30);
+        assert_eq!(s.user_share, 9_970);
     }
 
     #[test]
@@ -235,12 +238,12 @@ mod tests {
 
     #[test]
     fn swap_split_below_1bps_threshold_zero_master() {
-        // 1_999 * 5 / 10_000 = 0.9995 → floor = 0. User keeps everything;
-        // the bank only takes its slice on swaps that clear the threshold.
+        // 99 * 30 / 10_000 = 0.297 → floor = 0. User keeps everything; the dev
+        // fee only bites once the output clears ~1 unit at 0.3%.
         // This is intended: tiny swaps stay frictionless.
-        let s = split_swap_output(1_999, MASTER).unwrap();
+        let s = split_swap_output(99, MASTER).unwrap();
         assert_eq!(s.master_share, 0);
-        assert_eq!(s.user_share, 1_999);
+        assert_eq!(s.user_share, 99);
     }
 
     #[test]
@@ -274,12 +277,12 @@ mod tests {
 
     #[test]
     fn rate_constants_match_user_directive() {
-        // Locked from Viktor's directive 2026-05-29: "5% fee on mining and
-        // some on dex swaps". This test exists so any future change to the
-        // constants requires an explicit decision — the test name shows up
-        // in CI logs as "the rate-constant audit" which prompts a review.
+        // Viktor's directive 2026-06-09: "5% of all mining coinbase and 0.3%
+        // fee on dex" → master dev wallet 095b0e1f…3dd8. This test exists so any
+        // future change to the constants requires an explicit decision — the test
+        // name shows up in CI logs as "the rate-constant audit" which prompts a review.
         assert_eq!(MASTER_MINING_FEE_BPS, 500);
-        assert_eq!(MASTER_SWAP_FEE_BPS, 5);
+        assert_eq!(MASTER_SWAP_FEE_BPS, 30);
         assert_eq!(BPS_DENOMINATOR, 10_000);
     }
 }

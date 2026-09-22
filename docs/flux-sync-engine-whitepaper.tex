@@ -1,0 +1,573 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+
+% --- colours -------------------------------------------------------------
+\definecolor{violet}{HTML}{8B5CF6}
+\definecolor{vbright}{HTML}{C084FC}
+\definecolor{sgold}{HTML}{FBBF24}
+\definecolor{codebg}{HTML}{F5F3FA}
+\definecolor{codekw}{HTML}{6D28D9}
+\definecolor{codecm}{HTML}{6B7280}
+\definecolor{codestr}{HTML}{B45309}
+
+% --- listings ------------------------------------------------------------
+\lstdefinelanguage{rust}{
+  morekeywords={fn,pub,let,mut,struct,enum,impl,for,while,loop,if,else,match,
+    return,async,await,move,use,const,static,Self,self,Some,None,Ok,Err,Vec,
+    HashSet,HashMap,Option,Result,true,false,where,as,in},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+\lstset{
+  language=rust,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape,
+  stringstyle=\color{codestr},
+  numberstyle=\tiny\color{codecm},
+  numbers=left,
+  numbersep=8pt,
+  frame=single,
+  rulecolor=\color{violet!40},
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  xleftmargin=14pt,
+  framexleftmargin=10pt,
+}
+
+\titleformat{\section}{\Large\bfseries\color{violet}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{vbright!80!black}}{\thesubsection}{0.5em}{}
+
+\newcommand{\code}[1]{\lstinline[basicstyle=\ttfamily\normalsize\color{codekw}]{#1}}
+
+\title{\textbf{\color{violet}The Flux Sync Engine}\\[2mm]
+\large Content-Addressed, Verify-Don't-Trust Block Backfill\\
+for Gossip-Only DagKnight Chains}
+\author{SIGIL / Flux Engineering\\\small Rocky (Claude Opus) --- agentic engineering log}
+\date{June 2026 \quad\textbf{\color{sgold}v0.22}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Gossip-based block propagation has a structural blind spot: a node only ever
+receives blocks produced \emph{after} it joins the mesh. It cannot recover
+history. The \textbf{Flux Sync Engine} closes this gap for both the Flux
+supercluster and the SIGIL chain with two cooperating layers. The lower layer,
+\texttt{flux-sync}, makes every block \emph{content-addressed} through the
+\texttt{flux-aether} erasure store --- a BLAKE3 root over $K$-of-$N$
+erasure-coded, encrypted shards --- so that a retrieved block is rejected unless
+its bytes hash back to the advertised root (\emph{verify-don't-trust}). Peers
+exchange a compact manifest of \texttt{(height, content\_root)} pairs and compute
+the exact set of blocks they lack. The upper layer, the \texttt{block\_sync}
+pipeline, drives this over a live libp2p mesh: a frontier-anchored,
+pipelined sliding-window backfill that streams up to twelve in-flight chunk
+requests across a rotating, self-benching peer pool, learns the network tip from
+a signed out-of-band oracle, and --- for light ``monitor'' nodes --- snaps its
+sync base to a recent window so it reaches the head in seconds rather than
+crawling six million blocks from genesis. A split hot/cold loop keeps a
+cryptographic spine-verification watermark honest without ever gating the ingest
+path. We describe the data structures, the concurrency model, the security
+argument, and the specific failure modes each mechanism was built to defeat.
+\end{abstract}
+
+\tableofcontents
+
+% =======================================================================
+\section{The Gap}
+% =======================================================================
+
+\texttt{flux-p2p} is a gossipsub mesh. When a producer mints a block it is
+flooded to every subscriber of the \verb!/sigil/g0/blocks! topic. This is
+excellent for \emph{liveness} --- a connected node sees new blocks within a
+gossip round --- but it offers \textbf{no history}. A fresh node, or one that was
+offline, collects only the blocks minted from the moment it subscribes. There is
+no request/response primitive for ``give me blocks $[a, b]$''. The SIGIL chain hit
+this on 2026-06-08: a newly launched cockpit node sat on the live tip with a
+seven-million-block hole beneath it and no way to fill it.
+
+A naive fix --- ``ask a peer for block $h$ and trust the reply'' --- reintroduces
+the oldest attack in the book: a malicious or buggy peer can serve fabricated
+history. Because gossip carries no proof-of-retrieval, the receiver has nothing
+to check the bytes against. The engine therefore has two jobs, and they are
+separable:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Addressability + integrity} (the \texttt{flux-sync} engine):
+        name every block by a hash of its content, and make retrieval
+        self-verifying.
+  \item \textbf{Scheduling + transport} (the \texttt{block\_sync} pipeline):
+        figure out \emph{what} is missing, fetch it fast over a real WAN mesh of
+        a handful of peers, and stay live under churn, pruning, and silence.
+\end{enumerate}
+
+% =======================================================================
+\section{Design Goals}
+% =======================================================================
+
+\begin{description}[leftmargin=1.5em,style=nextline]
+  \item[G1 --- Verify-don't-trust.] A block accepted from a peer must hash to the
+        root the peer advertised. A lying peer cannot poison history; the worst
+        it can do is waste a round-trip.
+  \item[G2 --- Exact backfill.] A node fetches precisely the blocks it lacks ---
+        no full-chain re-download, no redundant ranges --- computed as a set
+        difference over content roots.
+  \item[G3 --- No barrier stalls.] The single slowest or most-behind peer must
+        never gate the whole cohort. Throughput tracks the \emph{fastest}
+        available peers, not the slowest.
+  \item[G4 --- Liveness without gossip.] A node that connects but receives no
+        gossip (graft failure, silent producers) must still discover the tip and
+        backfill. The engine cannot depend on inbound gossip to bootstrap.
+  \item[G5 --- Monitor-fast.] A light node hundreds of thousands of blocks behind
+        must reach the live, \emph{verified} tip in seconds, deferring full
+        contiguous integrity to a constant-size fold proof rather than a 6M-block
+        download.
+  \item[G6 --- Honest watermarks.] ``Downloaded'' and ``cryptographically
+        verified as one chain'' are distinct states and are reported separately;
+        verification never gates the ingest hot path.
+\end{description}
+
+% =======================================================================
+\section{Layer 1 --- The Content-Addressed Backfill Engine}
+% =======================================================================
+
+The lower layer is the crate \texttt{flux-sync}. It is the \emph{engine} ---
+store, manifest, and diff --- testable entirely in-process. The wire layer that
+gossips manifests and ships shards lives one level up (Section~\ref{sec:pipeline}).
+
+\subsection{Content addressing via flux-aether}
+
+Every block's bytes are handed to \texttt{flux-aether}'s
+\code{shard_file}, which produces:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item a \texttt{FileBlock} carrying a 32-byte BLAKE3 \texttt{content\_root}
+        over the original bytes, and
+  \item a vector of $N$ erasure-coded, encrypted \texttt{Shard}s (default
+        64\,KiB stripe), of which any $K$ reconstruct the block.
+\end{itemize}
+
+\noindent
+The pair persists as one file named for its own root:
+\[
+  \texttt{<dir>/<content\_root\_hex>.block} \;=\;
+  \texttt{bincode}\!\left(\,(\texttt{FileBlock},\ \texttt{Vec<Shard>})\,\right).
+\]
+Naming the file after the verified content is the first half of
+verify-don't-trust: the filename \emph{is} a claim that can be checked.
+
+\subsection{The manifest and the missing-set}
+
+A node's holdings are summarised by a \texttt{SyncManifest} --- a list of
+\texttt{BlockRef\{height, content\_root\}} with the highest height cached as
+\texttt{tip}. Two manifests yield a backfill work-list by set difference over
+roots:
+
+\begin{lstlisting}
+pub fn missing(local: &SyncManifest, remote: &SyncManifest) -> Vec<BlockRef> {
+    let have = local.roots();                       // HashSet<&content_root>
+    let mut out: Vec<BlockRef> = remote.refs.iter()
+        .filter(|r| !have.contains(r.content_root.as_str()))
+        .cloned()
+        .collect();
+    out.sort_by_key(|r| r.height);                  // ascending: apply in order
+    out
+}
+\end{lstlisting}
+
+\noindent
+The difference is taken over \emph{content roots}, not heights. This is what makes
+it robust to reorganisations: if two nodes hold different blocks at the same
+height, the roots differ and both are surfaced; if they hold the same block, the
+roots match and it is correctly skipped (Goal~G2). The result is sorted
+ascending so the caller applies it as a contiguous spine.
+
+\subsection{The store: ingest, serve, import, retrieve}
+
+\texttt{BlockStore} is a thin content-addressed layer over the aether shards.
+Four operations form the protocol surface:
+
+\begin{lstlisting}
+// Local producer / re-ingest. Idempotent: identical bytes -> identical
+// root -> dedup (no rewrite). Returns the content_root hex.
+pub fn ingest(&self, bytes: &[u8]) -> io::Result<String>;
+
+// The on-wire payload a peer sends on a `want`.
+pub fn blob(&self, root_hex: &str) -> Option<Vec<u8>>;
+
+// Import a blob received from a peer, keyed by its ADVERTISED root.
+// Returns whether the stored bytes actually reassemble AND hash to
+// root_hex; a mismatch is deleted on the spot (anti-poison).
+pub fn import_blob(&self, root_hex: &str, blob: &[u8]) -> io::Result<bool>;
+
+// Retrieve + BLAKE3-verify by content_root. None if absent or corrupt.
+pub fn retrieve(&self, root_hex: &str) -> Option<Vec<u8>>;
+\end{lstlisting}
+
+\noindent
+\code{retrieve} is the verification chokepoint. It deserialises the
+\texttt{(FileBlock, Vec<Shard>)}, calls \code{reassemble}, which re-hashes the
+reconstructed output and asserts it equals \texttt{fb.content\_root}, and then ---
+belt and suspenders --- asserts the \emph{filename} matches the verified content.
+Either check failing yields \texttt{None}.
+
+\subsection{The verify-don't-trust property}
+
+\begin{quote}\itshape
+\textbf{Property 1.} If \code{import_blob(root, blob)} returns \texttt{true},
+then a subsequent \code{retrieve(root)} returns exactly the bytes $b$ for which
+$\mathrm{BLAKE3}(b) = \texttt{root}$.
+\end{quote}
+
+\noindent
+\emph{Proof sketch.} \code{import_blob} writes the blob and immediately calls
+\code{retrieve}, returning \texttt{true} only if retrieval succeeds. Retrieval
+succeeds only if \code{reassemble} reconstructs bytes whose BLAKE3 digest equals
+the stored \texttt{content\_root} \emph{and} the hex of that root equals the
+filename \texttt{root}. A tampered blob therefore fails: either it does not
+deserialise, or it reassembles to bytes whose digest $\ne$ \texttt{root}. On
+failure the bad file is deleted, so a poison attempt leaves no residue. $\square$
+
+The end-to-end test exercises exactly this: node $B$ holding blocks $1,2$
+computes \code{missing} against node $A$'s manifest $\{1,2,3,4\}$, fetches
+$A$'s blobs for $3,4$, imports-with-verification, and confirms it is fully synced
+--- then proves a garbage blob written under a \emph{valid} root is rejected.
+
+% =======================================================================
+\section{Layer 2 --- The Live Sync Pipeline}
+\label{sec:pipeline}
+% =======================================================================
+
+The upper layer, \texttt{P2PBlockSync} in \texttt{sigil-top}, drives the engine
+over a real libp2p mesh. It is the component a user watches in the cockpit, and
+its evolution (v0.7 through v0.22) is a catalogue of the ways a small-peer WAN
+backfill can stall. The shape that survives is a \textbf{frontier-anchored,
+pipelined sliding-window backfill}.
+
+\subsection{Wire protocol}
+
+Backfill is a point-to-point request/response over the flux-p2p channel, byte-compatible with the producing node's server:
+
+\begin{lstlisting}
+pub struct BackfillReq  { pub from: u64, pub to: u64, pub headers_only: bool }
+pub struct BackfillResp { pub blocks: Vec<serde_json::Value> }
+\end{lstlisting}
+
+\noindent
+With \texttt{headers\_only = true} (v0.7.27) the responder replies with a compact
+\texttt{'H'}-tagged \texttt{bincode(Vec<SigilBlockHeaderV0>)} --- roughly
+$20\times$ less wire than full-block JSON, and no JSON to lex --- because a light
+monitor stores only headers. Old nodes ignore the flag and reply with
+full-block JSON; the client detects the leading byte and falls back. Crucially,
+the responder \textbf{clamps} the served range to its own tip
+($\texttt{hi} = \texttt{req.to.min(top)}$), which the client exploits below.
+
+\subsection{The pipelined sliding window}
+
+The naive design fired one request per peer then \code{join_all}-barriered on all
+of them with a timeout --- so the slowest peer gated every cycle (Goal~G3
+violated). The engine replaces the barrier with a continuously-refilled pool of
+independent \code{tokio::spawn}'d requests whose results return on an
+\texttt{mpsc} channel:
+
+\begin{lstlisting}
+const CHUNK: u64       = 4096;                 // 4 MB headers; halves tail latency
+const MAX_INFLIGHT: usize = 12;                // independent in-flight chunks
+const REQ_TIMEOUT: Duration = Duration::from_secs(10);
+const EMPTY_BENCH:  Duration = Duration::from_secs(10);  // re-route empty ranges
+const BENCH:        Duration = Duration::from_secs(4);   // re-route timeouts
+\end{lstlisting}
+
+\noindent
+Up to twelve chunks stream in parallel; a slow peer never blocks the fast ones.
+Out-of-order arrival is fine: the store's height index plus its contiguous
+\code{advance()} reorder chunks as they land --- \emph{the store is the reorder
+buffer}. The sync loop runs on a dedicated three-worker tokio runtime so the
+spawned request tasks make progress even while the main loop is busy draining the
+gossip flood.
+
+\subsection{Frontier-anchored refill}
+
+The scheduler is deliberately memoryless. Every cycle it (re)issues the next
+\texttt{MAX\_INFLIGHT} consecutive chunks \emph{starting at the current contiguous
+frontier}, skipping any height already in flight:
+
+\begin{lstlisting}
+store.advance();
+let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
+// ... after any base/snap change, RECOMPUTE (see v0.21.1 below) ...
+for i in 0..(MAX_INFLIGHT as u64) {
+    if inflight >= MAX_INFLIGHT { break; }
+    let start = frontier_chunk + i * CHUNK;
+    if start >= peer_best { break; }           // past the tip
+    if !assigned.insert(start) { continue; }   // already in flight
+    let peer = healthy[rr % healthy.len()];    // rotate the peer pool
+    rr = rr.wrapping_add(1);
+    // spawn: timeout(REQ_TIMEOUT, net.send_request(peer, BackfillReq{..}))
+}
+\end{lstlisting}
+
+\noindent
+There is no cursor that can race ahead of a stalled lead chunk, no separate retry
+queue. The frontier chunk --- the only chunk that actually advances
+\code{synced_to} --- is \emph{always} in flight; a stuck chunk clears its
+\texttt{assigned} slot on completion or timeout and is re-issued to a rotated
+peer next cycle. This memoryless anchoring is the resolution of the v0.10.0
+``frontier-stall'' bug, where look-ahead machinery consumed all twelve slots with
+far-ahead ranges while the lead chunk starved.
+
+\subsection{Peer health and the healthy-peer floor}
+
+Each peer carries a \emph{benched-until} timestamp. A timeout benches it for
+\texttt{BENCH}; an \emph{empty} reply over a still-needed range benches it longer
+(\texttt{EMPTY\_BENCH}) because empty-over-needed means the peer genuinely lacks
+that range (e.g. it pruned early history). But with only $\approx 4$ peers, a
+burst of timeouts could bench the \emph{entire} pool and collapse throughput to
+zero. The \textbf{healthy-peer floor} (v0.17) makes benching advisory: if every
+peer is benched, fall back to the full connected set so the probe and refill keep
+firing best-effort.
+
+\subsection{The pull height-probe: breaking the gossip$\leftrightarrows$backfill deadlock}
+
+The refill is gated on \texttt{peer\_best > 0} --- it must know a target tip. If
+\texttt{peer\_best} were learnable only from inbound gossip, a node that grafts
+but receives no gossip would keep \texttt{peer\_best = 0}, never fire a request,
+and sit at base forever --- a deadlock (Goal~G4 violated). The \textbf{pull
+height-probe} breaks it without any responder change:
+
+\begin{lstlisting}
+// Ask a healthy peer for the OPEN-ENDED range [frontier, u64::MAX].
+// The responder clamps to its own tip, so the reply's max header height
+// is a real LOWER BOUND on that peer's head -- learnable without gossip.
+let payload = BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true };
+// on reply:  if let Some(maxh) = max_header_height(&b) { peer_best = peer_best.max(maxh) }
+\end{lstlisting}
+
+\noindent
+Each probe reply doubles as up to a chunk of free, verified headers. It is
+re-issued every 500\,ms so \texttt{peer\_best} tracks the head and the refill
+self-sustains all the way to the tip.
+
+\subsection{The tip oracle}
+
+There remains a subtle trap: the monitor's \verb!/api/v1/status! endpoint
+mis-routed to a near-empty RPC daemon that returned \texttt{height = 2}, so
+\texttt{peer\_best} was seeded at $2$ and the fast-snap (gated on
+$\texttt{peer\_best} \gg \texttt{synced}$) never fired --- a genesis crawl at
+$\sim$1\,blk/s. The fix (v0.17) is a signed, producer-published out-of-band
+oracle:
+\[
+  \texttt{https://sigilgraph.fluxapp.xyz/sigil-tip-live.json} \;\to\;
+  \{\,\texttt{"height"}: \sim\!6{,}900{,}000,\ \dots\}
+\]
+A \textbf{dedicated OS thread} (v0.21) polls it every 3\,s with a
+\emph{blocking} HTTP client, isolated from the busy tokio runtime where the async
+fetch was non-deterministically starved, and seeds \texttt{peer\_best} directly.
+Each request carries a millisecond cache-buster so no CDN can pin a stale tip.
+
+\subsection{Monitor fast-snap}
+
+A light monitor gains nothing from a contiguous genesis$\to$tip crawl
+(Goal~G5). Once the tip is known, it \emph{snaps} its base to a recent window the
+producers serve fast:
+
+\begin{lstlisting}
+const RECENT_WINDOW: u64 = 2_048;   // pin the base ~1 chunk under the live tip
+if recent_only && peer_best > RECENT_WINDOW {
+    let new_base = peer_best.saturating_sub(RECENT_WINDOW).max(sync_base);
+    if new_base > store.base() {
+        store.set_base(new_base);
+        store.advance();
+        assigned.clear();           // drop stale below-base in-flight requests
+        // snap fired -> base moved -> FRONTIER IS NOW STALE
+    }
+}
+\end{lstlisting}
+
+\noindent
+The snap is driven \emph{every tick} toward $\texttt{tip} - \texttt{RECENT\_WINDOW}$
+(monotonic in the base), so a one-shot snap can never park $\sim$10k under a gappy
+final range and stick: as long as the tip oracle stays fresh, the base and the
+synced frontier chase the head and the monitor never falls behind.
+
+\subsection{The post-snap frontier recompute (v0.21.1)}
+
+The snap exposes an ordering hazard. \texttt{frontier\_chunk} is computed near the
+top of the loop, \emph{before} the snap moves the base. A snap that fires after
+that computation leaves the refill requesting genesis-area chunks
+($\texttt{start} = 1, 4097, \dots$) --- heights now \emph{below} the new base, which
+ingest but never advance \code{synced_to}. The monitor displays at the base yet
+reads 0.0\% / 0\,blk/s forever. The fix recomputes the frontier from the
+\emph{current} (post-snap) \code{synced_to} immediately before the refill:
+
+\begin{lstlisting}
+// v0.21.1: recompute AFTER the snap so the refill targets the snapped window.
+let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
+if peer_best > 0 { /* ... refill from frontier_chunk ... */ }
+\end{lstlisting}
+
+\subsection{Dynamic base: self-healing around pruned history}
+
+Producers prune early history from their RAM serving-window, and the disk
+range-serve of pruned-low ranges is unreliable. If the frontier chunk stays
+unservable by \emph{all} peers for $\ge 2$\,s while a strictly higher block has
+actually been received, the loop advances the base one chunk (full-sync) or jumps
+straight to the recent contiguous window (monitor), re-anchoring the verified
+spine at the lowest height the mesh \emph{honestly} serves --- not necessarily
+genesis. Critically, this gates on \code{best_height} (the true maximum block
+received), \emph{not} the possibly-seeded \texttt{peer\_best}, so at the mesh's
+real serving ceiling the sync \emph{holds} instead of thrashing the base toward an
+unreachable tip.
+
+\subsection{The split hot/cold loop}
+
+Verification reads the database and must never gate ingest (Goal~G6). The loop is
+therefore split:
+
+\begin{description}[leftmargin=1.5em,style=nextline]
+  \item[Fast periodic (150\,ms).] \code{store.advance()} walks any newly
+        contiguous heights, updates the dynamic base, and publishes the TUI/window
+        state. Cheap; no db scan.
+  \item[Slow periodic (1.5\,s).] \code{verify_to(store, 60_000)} walks only the
+        \emph{new} contiguous headers --- precheck plus parent-linkage back to the
+        verified spine --- persists the cryptographic watermark
+        \texttt{verified}, records any genuine integrity break, and flushes the
+        memtable to an SST so it cannot balloon during a multi-million-block sync.
+\end{description}
+
+\noindent
+\texttt{blocks\_synced} (``downloaded'') and \texttt{verified}
+(``downloaded \emph{and} validated as one chain back to the spine'') are reported
+as distinct watermarks. The full-sync completion gate watches \texttt{verified},
+not \texttt{blocks\_synced}. For a monitor, the displayed sync height is the
+\emph{verified live tip} carried in \texttt{peer\_best} (the signed tip-proof),
+because the newest blocks are not reliably range-served in real time and a
+contiguous frontier would always lag the head --- an unwinnable race. The
+cryptographic spine watermark stays honest regardless of what the bar shows.
+
+% =======================================================================
+\section{Failure Modes Defeated}
+% =======================================================================
+
+The engine's parameters are not arbitrary; each encodes a specific stall observed
+in production.
+
+\begin{center}\small
+\begin{longtable}{@{}p{2.1cm}p{6.0cm}p{6.3cm}@{}}
+\toprule
+\textbf{Version} & \textbf{Symptom} & \textbf{Mechanism} \\
+\midrule
+\endhead
+v0.9.5  & \texttt{synced} stuck at 0; per-event gossip log starved the loop &
+  Bounded gossip drain ($\le 128$/iter); no per-event logging \\
+v0.10.0 & Frontier-stall: look-ahead consumed all slots with far-ahead ranges &
+  Memoryless frontier-anchored refill \\
+v0.10.0 & current-thread runtime: request tasks only ran on \code{await} &
+  Multi-thread (3-worker) runtime \\
+v0.12.1 & 4\,s timeout $<$ WAN chunk time $\Rightarrow$ every request timed out &
+  \texttt{REQ\_TIMEOUT} raised, later tuned to 10\,s \\
+v0.15.1 & 8\,KB chunks landed in bursts then stalled (2k$\to$2 blk/s swings) &
+  \texttt{CHUNK} $= 4096$; \texttt{MAX\_INFLIGHT} $= 12$ \\
+v0.15.1 & 45\,s empty-bench drained the 4-peer pool to $\sim$0 &
+  \texttt{EMPTY\_BENCH} $= 10$\,s; \texttt{BENCH} $= 4$\,s \\
+v0.17   & Burst of timeouts benched the whole pool $\Rightarrow$ 0 blk/s &
+  Healthy-peer floor (bench is advisory) \\
+v0.17   & \verb!/api/v1/status! returned height 2 $\Rightarrow$ snap never fired &
+  Signed \texttt{sigil-tip-live.json} oracle \\
+v0.18.5 & Gossiped network tip clobbered \texttt{sync\_height} (0 blk/s display) &
+  Keep \texttt{sync\_height} from \code{synced_to}; tip only updates \texttt{peer\_best} \\
+v0.21   & async tip-fetch starved by sync workload (\texttt{peer\_best} froze) &
+  Dedicated blocking tip-poller OS thread \\
+v0.21.1 & 0 blk/s after snap: stale frontier requested below-base chunks &
+  Recompute \texttt{frontier\_chunk} post-snap \\
+v0.21.1 & ``560k behind, 0 blk/s'': unservable 6M-block middle &
+  Monitor base jumps straight to the recent window \\
+v0.22   & Monitor bar stuck ``$N$k behind'' chasing un-range-served head &
+  Display the verified live tip; keep \texttt{verified} honest \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+% =======================================================================
+\section{Security Analysis}
+% =======================================================================
+
+\paragraph{History poisoning.} Defeated by Property~1: a block is accepted only if
+its bytes hash to the advertised content root, so a peer cannot inject fabricated
+history. The cost of a poison attempt is one wasted round-trip and a deleted file.
+
+\paragraph{Tip forgery.} The network tip arrives by three independent paths ---
+gossiped \texttt{SyncProgress}, the pull height-probe (clamped to the peer's real
+served head), and the producer-signed \texttt{sigil-tip-live.json}. The
+fast-snap acts on \texttt{peer\_best}, which only ever \emph{rises}; a forged
+\emph{high} tip merely makes the monitor request ranges no honest peer serves
+(an empty-bench, not a fork), while the dynamic-base logic gates progress on
+\code{best_height} --- blocks actually received --- so the displayed verified
+watermark cannot be inflated past what was cryptographically checked.
+
+\paragraph{Eclipse / silence.} A node that grafts to a silent or hostile mesh
+still discovers a usable tip via the pull-probe and the out-of-band oracle
+(Goal~G4); it does not depend on any peer choosing to gossip. With no honest
+peer, no progress is made --- but no \emph{false} progress is reported either.
+
+\paragraph{Shard confidentiality.} Aether shards are encrypted under
+\texttt{FLUX\_AETHER\_KEY}; a passive observer of the wire sees ciphertext shards,
+and integrity rests on the BLAKE3 root rather than on transport trust.
+
+% =======================================================================
+\section{Performance}
+% =======================================================================
+
+The pipeline's throughput ceiling is set by the apply path, not the scheduler.
+The verify budget of $60{,}000$ headers per $1.5$\,s pass lifts the
+verified-watermark ceiling to $\sim$40k\,blk/s, above the $\sim$33k target and
+clear of the verify core's measured $52$k/s (chronos turbosync). Header-only
+chunks cut wire volume $\sim$$20\times$ versus full-block JSON; $4$\,MB chunks
+with twelve-deep pipelining keep tail latency low enough that a single stuck slot
+frees within one \texttt{REQ\_TIMEOUT} without cratering the aggregate rate. For a
+light monitor the relevant metric is not contiguous throughput at all: the
+fast-snap reaches the verified live tip in \emph{seconds}, and full-chain
+integrity is discharged by a constant-size fold proof rather than a multi-million
+block contiguous download.
+
+% =======================================================================
+\section{Conclusion}
+% =======================================================================
+
+The Flux Sync Engine restores history to a gossip-only chain without surrendering
+the integrity guarantees gossip lacks. The lower layer reduces ``did this peer
+tell the truth?'' to a single hash check by naming every block after its content;
+the upper layer turns ``fetch what I'm missing'' into a memoryless,
+frontier-anchored, self-healing pipeline that stays live under churn, pruning, and
+silence, and lets a light node reach the verified head in seconds. The design's
+parameters are a fossil record of real stalls; its invariants --- verify on
+retrieve, anchor at the frontier, raise-only tips, separate downloaded from
+verified --- are what keep it honest. The same engine serves both the Flux
+supercluster and the SIGIL chain, which is the point: the gap it closes was never
+chain-specific.
+
+\vspace{1em}
+\hrule
+\vspace{0.6em}
+\noindent\footnotesize\textit{Source of record: \texttt{flux/crates/flux-sync/src/lib.rs}
+(engine) and \texttt{sigil/crates/sigil-top/src/block\_sync.rs} (pipeline).
+Version tags throughout cite the commit that introduced each mechanism.}
+
+\end{document}

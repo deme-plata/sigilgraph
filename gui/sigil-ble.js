@@ -321,9 +321,14 @@
       const logout = [...settingsBody.querySelectorAll('button')].find((b) => /LOG OUT/i.test(b.textContent));
       if (logout) { settingsBody.insertBefore(fab, logout); settingsBody.insertBefore(hint, logout); }
       else { settingsBody.appendChild(fab); settingsBody.appendChild(hint); }
-    } else {
+    } else if (!window.SIGIL_BLE_NO_FAB) {
       document.body.appendChild(fab);
     }
+    // React (or any host that renders its own entry) sets window.SIGIL_BLE_NO_FAB = true
+    // before loading this file and calls window.SigilBLE.open() from its own Settings button.
+    window.SigilBLE = window.SigilBLE || {};
+    window.SigilBLE.open = () => { const s = document.getElementById('settings-modal'); if (s) s.style.display = 'none'; modal.style.display = 'flex'; render(); };
+    window.SigilBLE.available = !!navigator.bluetooth;
     const body = modal.querySelector('#sble-body'), logEl = modal.querySelector('#sble-log');
     const log = (m, cls) => { const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = m; logEl.appendChild(d); logEl.scrollTop = 1e9; };
     let link = null, state = { peer: null, sas: null, request: null };

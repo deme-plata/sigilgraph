@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code, Trash2, RefreshCw, AlertCircle, Server, ArrowDownToLine } from 'lucide-react';
+import { Bluetooth, Shield, Palette, Activity, Globe, Lock, Eye, Zap, LogOut, Clock, Info, Key, Download, EyeOff, Cloud, Code, Trash2, RefreshCw, AlertCircle, Server, ArrowDownToLine } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { walletSession } from '../services/walletAuth';
 import QuantumChamberCanvas from './QuantumChamberCanvas';
@@ -10,6 +10,24 @@ interface SettingsScreenProps {
 }
 
 export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
+  // Load the shared Bluetooth engine once, with its floating launcher suppressed.
+  const [bleReady, setBleReady] = useState(false);
+  const bleSupported = typeof navigator !== 'undefined' && !!(navigator as Navigator & { bluetooth?: unknown }).bluetooth;
+  useEffect(() => {
+    window.SIGIL_BLE_NO_FAB = true;
+    if (window.SigilBLE?.open) { setBleReady(true); return; }
+    const existing = document.querySelector<HTMLScriptElement>('script[data-sigil-ble]');
+    const onReady = () => setBleReady(!!window.SigilBLE?.open);
+    if (existing) { existing.addEventListener('load', onReady); return () => existing.removeEventListener('load', onReady); }
+    const el = document.createElement('script');
+    el.src = '/sigil-ble.js?v=3';
+    el.defer = true;
+    el.dataset.sigilBle = '1';
+    el.addEventListener('load', onReady);
+    document.body.appendChild(el);
+    return () => el.removeEventListener('load', onReady);
+  }, []);
+
   const [activeTab, setActiveTab] = useState<string>('crypto');
   const [cryptoSuite, setCryptoSuite] = useState('Q1');
   const [visualEffects, setVisualEffects] = useState({
@@ -1338,6 +1356,35 @@ export default function SettingsScreen({ onLogout }: SettingsScreenProps) {
           "Beauty is truth, truth beauty" - Where quantum consensus meets computational sublime
         </blockquote>
       </div>
+
+      {/* Bluetooth — connect a phone (Web Bluetooth, Chrome/Edge on a laptop).
+          The engine is the framework-agnostic /sigil-ble.js used by the embedded wallet;
+          we suppress its floating pill and drive it from this button (operator, 2026-09-22:
+          "hide the bluetooth button inside settings"). */}
+      <motion.div
+        className="mt-8 bg-quantum-indigo/50 backdrop-blur-xl rounded-3xl p-8"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.15 }}
+      >
+        <h3 className="text-xl font-semibold mb-6 flex items-center gap-3">
+          <Bluetooth className="w-5 h-5 text-cyan-400" />
+          Nearby phone
+        </h3>
+        <button
+          onClick={() => window.SigilBLE?.open()}
+          disabled={!bleReady}
+          className="w-full px-6 py-4 bg-cyan-500/10 border border-cyan-400/40 rounded-xl text-cyan-300 font-semibold flex items-center justify-center gap-3 hover:border-cyan-300/70 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Bluetooth className="w-5 h-5" />
+          <span>BLUETOOTH — CONNECT A PHONE</span>
+        </button>
+        <div className="mt-3 text-xs text-gray-400 leading-relaxed">
+          {bleSupported
+            ? 'Receive a SIGIL coin from a phone over Bluetooth. On the phone: More \u2192 Nearby \u2192 Be visible, then connect from here and check that both screens show the same six digits.'
+            : 'This browser has no Web Bluetooth. Chrome or Edge on a laptop with Bluetooth can do this; Firefox and Safari cannot.'}
+        </div>
+      </motion.div>
 
       {/* Logout Button */}
       {onLogout && (

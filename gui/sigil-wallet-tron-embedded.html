@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'self'; form-action 'self'"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#08100d"><meta name="color-scheme" content="dark">
 <title>SIGIL Wallet</title>
 <link rel="icon" type="image/png" sizes="32x32" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-32.png?v=1780639379">
@@ -228,7 +229,7 @@ body.view-desktop .desktop{display:flex}
   <div class="actions">
     <div class="act" onclick="openSend()"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
     <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
-    <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+    <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div><div class="act" onclick="window.open('/sigil-dex.html','_blank','noopener')"><i class="lic" data-lucide="candlestick-chart"></i><span class="t">DEX</span></div>
     <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
     <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
     <div class="act" onclick="makeAllPrivate()" title="Turn the whole transparent balance into spendable private coin"><i class="lic" data-lucide="shield-check"></i><span class="t">Private</span></div>
@@ -249,7 +250,7 @@ body.view-desktop .desktop{display:flex}
     <button onclick="window.openBridgeFrom('polyAddrPhone')" style="width:100%;margin-top:10px;border:1px solid rgba(0,224,198,.4);background:rgba(0,224,198,.08);color:#00e0c6;font-family:'Orbitron';font-weight:700;font-size:10.5px;letter-spacing:1px;padding:9px;border-radius:8px;cursor:pointer">🌉 BRIDGE MINED SIGIL HERE</button>
   </div>
   </div>
-  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.showExplorer&&showExplorer()" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
+  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.showExplorer&&showExplorer()" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div onclick="window.open('/sigil-dex.html','_blank','noopener')" style="cursor:pointer"><i class="lic" data-lucide="candlestick-chart"></i>DEX</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
 </div>
 
 <div class="desktop">
@@ -340,7 +341,7 @@ body.view-desktop .desktop{display:flex}
         <div class="dactions">
           <div class="act" onclick="openSend()"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
           <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
-          <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+          <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div><div class="act" onclick="window.open('/sigil-dex.html','_blank','noopener')"><i class="lic" data-lucide="candlestick-chart"></i><span class="t">DEX</span></div>
           <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
           <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
     <div class="act" onclick="makeAllPrivate()" title="Turn the whole transparent balance into spendable private coin"><i class="lic" data-lucide="shield-check"></i><span class="t">Private</span></div>
@@ -381,6 +382,14 @@ body.view-desktop .desktop{display:flex}
 
 <div class="caption">SIGIL Wallet · <b>cyan grid</b> · <b>⤢ expand → fullscreen</b></div>
 <script>
+  // 2026-09-24: resolved the moment the vendored Argon2id module below has loaded.
+  // Every signing path awaits this before deriving a 12-word phrase — deriving
+  // earlier threw "still loading", and the catch took that for a WRONG phrase and
+  // wiped the stored secret (caught live: sigilAutoShield → doShield, 0.2 s after
+  // landing, before the tester had touched anything).
+  window.sigilArgon2Ready = new Promise(function(r){ window.__argon2Resolve = r; });
+  window.sigilDeriveReady = async function(){ if(!window.__argon2id && window.sigilArgon2Ready) await window.sigilArgon2Ready; };
+
   function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}render();}
   // 2026-08-23: pick a view for a visitor who's never chosen one — an explicit
   // ?desktop/?phone param or a saved choice (once you've used the ⤢ toggle)
@@ -519,10 +528,15 @@ body.view-desktop .desktop{display:flex}
   // offline — so they are labelled by chain and kept visually distinct rather than
   // added into the SIGIL headline. Showing them is still right: they are the same
   // person's money, and until now the only way to see them was to open MetaMask.
-  var POLY = { wsigil3: null, wsigil: null, usdc: null, addr: null };
+  var POLY = { wsigil3: null, wsigil: null, usdc: null, chad: null, addr: null };
   var WSIGIL3   = '0x3fced760b0de6d57f96835c6110b1227941ec2e9'; // g3, deployed 2026-09-06
   var WSIGIL_L  = '0xc224602c32f5c7f68d3ef002ae4c99e4c7df25b7'; // the legacy wrapped token
   var POLY_USDC = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'; // native USDC, 6dp
+  // CHAD — operator-deployed on Polygon (creator 0xD7cAb807…3936), 18dp, and the one
+  // token here with a market worth the name: its CHAD/USDT pool holds ~$13, six
+  // thousand times the wSIGIL3 pool. Shown because the operator asked for it to be
+  // reachable from SIGIL's own asset list; it is a Polygon asset and stays badged as one.
+  var POLY_CHAD = '0x1421aa72aca6fc49699337b3d6d4d95d5fd797bf';
   async function refreshPolygonAssets(){
     try{
       var MM = window.SigilMM; if(!MM || !MM.rawCall) return;
@@ -546,6 +560,7 @@ body.view-desktop .desktop{display:flex}
       POLY.wsigil3 = await bal(WSIGIL3);
       POLY.wsigil  = await bal(WSIGIL_L);
       POLY.usdc    = await bal(POLY_USDC);
+      POLY.chad    = await bal(POLY_CHAD);
       render();
     }catch(e){}
   }
@@ -634,6 +649,10 @@ body.view-desktop .desktop{display:flex}
           'linear-gradient(135deg,#8b7bb8,#5b4a86)','#0b0416','\u2b1f');
       out += assetRow('USDC','stablecoin \u00b7 <span style="color:#a78bfa">Polygon</span>',
         fmtUnits(POLY.usdc,6,2), '', 'linear-gradient(135deg,#2775ca,#1a5fa0)','#eaf3ff','$');
+      if(POLY.chad == null || POLY.chad > 0n)
+        out += assetRow('CHAD','yours \u00b7 <span style="color:#a78bfa">Polygon</span> \u00b7 CHAD/USDT pool',
+          fmtUnits(POLY.chad,18,0), 'meme \u00b7 real market',
+          'linear-gradient(135deg,#e0a34a,#a86f1e)','#1a1004','\ud83d\uddff');
     } else {
       // An empty space is indistinguishable from a bug. Say why the Polygon side is
       // missing and how to make it appear.
@@ -1129,6 +1148,7 @@ window.lucide={createIcons:render};render();})();</script>
   // against the RFC 9106 Argon2id test vector before being trusted with a key.
   import { argon2id } from './sigil-argon2.mjs';
   window.__argon2id = argon2id;
+  if (window.__argon2Resolve) window.__argon2Resolve(argon2id);
 </script>
 <script>
   try {
@@ -1166,7 +1186,9 @@ window.lucide={createIcons:render};render();})();</script>
         // all sync, and turning money-signing async to save a preload would be a
         // far riskier change than loading 13 KB up front.
         if (!window.__argon2id) {
-          throw new Error('Secure (12-word) derivation is still loading — try again in a moment.');
+          const e = new Error('Secure (12-word) derivation is still loading — try again in a moment.');
+          e.code = 'ARGON2_LOADING';   // NOT a wrong phrase — callers must wait, never forget
+          throw e;
         }
         priv = window.__argon2id(bytes, V2_SALT, V2_PARAMS);
       } else {
@@ -1665,10 +1687,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.abPick=function(i){ var a=abLoad(); if(a[i]){ document.getElementById('checkAddr').value=a[i].addr; } };
   window.abDel=function(i){ var a=abLoad(); a.splice(i,1); abSave(a); abRender(); };
-  window.abAdd=function(){
+  window.abAdd=async function(){
     var addr=(document.getElementById('checkAddr').value||'').trim().toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(addr)){ checkStatus('Enter a valid 64-hex address first.', '#ff8a8a'); return; }
-    var label=prompt('Label for this address:', shortA(addr))||shortA(addr);
+    var label=(await window.sigilAskText('Label for this address:', shortA(addr)))||shortA(addr);
     var a=abLoad(); if(!a.some(function(e){return e.addr===addr;})){ a.unshift({label:label,addr:addr}); abSave(a); abRender(); }
   };
   // ══ ONE-TIME UNLOCK (2026-08-26, operator-directed) ══════════════════════════
@@ -1746,8 +1768,6 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function sendStatus(m,c){ var el=document.getElementById('sendMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   function checkStatus(m,c){ var el=document.getElementById('checkAddrMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   window.sendStatus=sendStatus;
-  // Exported so the node's injected one-action-send can wrap it (the gui lane's seam).
-  try{ window.showReceipt=showReceipt; }catch(e){}
   window.sendMax=function(){
     try{ document.getElementById('sendAmt').value=glyphStr(window.SIGIL_RAW||'0'); }catch(e){}
   };
@@ -2020,18 +2040,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.makeAllPrivate=async function(){
     var raw; try{ raw=BigInt(window.SIGIL_RAW||'0'); }catch(e){ raw=0n; }
     if(raw<=0n){
-      alert('Nothing to make private.\n\nThis wallet’s transparent balance is 0. Mining rewards and incoming transparent coin land there first — press this again once some has arrived.');
+      window.sigilNotice('Nothing to make private.\n\nThis wallet’s transparent balance is 0. Mining rewards and incoming transparent coin land there first — press this again once some has arrived.');
       return;
     }
     var amtStr=window.glyphStr(raw);   // exact inverse of strGlyphs (sigilFromGlyphs never existed)
     var parts=null;
     try{ parts=window.__sigilShield && window.__sigilShield.decompose(raw); }catch(e){}
     if(!parts || !parts.length){
-      alert('Could not split '+amtStr+' SIGIL into legal note denominations. Nothing was submitted.');
+      window.sigilNotice('Could not split '+amtStr+' SIGIL into legal note denominations. Nothing was submitted.');
       return;
     }
     var n=parts.length;
-    if(n>8 && !confirm('Make ALL '+amtStr+' SIGIL private?\n\nThe chain only accepts fixed note denominations, so this balance becomes '+n+' separate deposits — '+n+' signatures, submitted one after another. That can take a few minutes and this tab must stay open.\n\nStart?')) return;
+    if(n>8 && !(await window.sigilConfirm('Make ALL '+amtStr+' SIGIL private?\n\nThe chain only accepts fixed note denominations, so this balance becomes '+n+' separate deposits — '+n+' signatures, submitted one after another. That can take a few minutes and this tab must stay open.\n\nStart?'))) return;
     if(window.openSend) window.openSend();
     var adv=document.getElementById('sendAdvanced'), uni=document.getElementById('sendUnified');
     if(adv) adv.style.display='flex';
@@ -2039,7 +2059,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(window.sendShowTab) window.sendShowTab('shield');
     if(adv) adv.dataset.init='1';
     var box=document.getElementById('sendAmt');
-    if(!box){ alert('The shield pane is not available on this page.'); return; }
+    if(!box){ window.sigilNotice('The shield pane is not available on this page.'); return; }
     box.value=amtStr;
     await window.doShield();
   };
@@ -2078,12 +2098,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     sendStatus('');
 
     if(!window.sigilCryptoReady || !window.__sigilShield){ sendStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
+    await window.sigilDeriveReady();
     var mnemonic = window.__sigilMnemonic || sigilLoadSecret();
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this shield deposit.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      mnemonic = ((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to sign this shield deposit.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
       if(!mnemonic){ sendStatus('Cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ if(e&&e.code==='ARGON2_LOADING'){ await window.sigilDeriveReady(); try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e2){ window.__sigilMnemonic=null; sigilForgetSecret(); } } if(!kp){ window.__sigilMnemonic=null; sigilForgetSecret(); sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; } }
     if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); sendStatus('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -3010,9 +3031,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var wasm; try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
     catch(e){ privMsg('Prover failed to load — cannot open notes.', '#ff8a8a'); return; }
     if(!wasm.openNoteCiphertext){ privMsg('This wallet build cannot open notes yet — reload the page.', '#fbbf24'); return; }
+    await window.sigilDeriveReady();
     var mnemonic = window.__sigilMnemonic || sigilLoadSecret();
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to open your private inbox.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      mnemonic = ((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to open your private inbox.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
       if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
     }
     var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
@@ -3081,12 +3103,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
     catch(e){ privMsg('Prover failed to load — cannot build a private send.', '#ff8a8a'); return; }
 
+    await window.sigilDeriveReady();
     var mnemonic = window.__sigilMnemonic || sigilLoadSecret();
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to build this private send.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      mnemonic = ((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to build this private send.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
       if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ if(e&&e.code==='ARGON2_LOADING'){ await window.sigilDeriveReady(); try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e2){ window.__sigilMnemonic=null; sigilForgetSecret(); } } if(!kp){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; } }
     if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -3583,12 +3606,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(await trySwapFastPath(from,pool,window.__swapDir,q,L,fastNonce,msgEl)) return;
 
     if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return; }
+    await window.sigilDeriveReady();
     var mnemonic=window.__sigilMnemonic||sigilLoadSecret();
     if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this swap.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      mnemonic=((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to sign this swap.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
       if(!mnemonic){ msgEl.textContent='Swap cancelled — recovery phrase required to sign.'; msgEl.style.color='#fbbf24'; return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ if(e&&e.code==='ARGON2_LOADING'){ await window.sigilDeriveReady(); try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e2){ window.__sigilMnemonic=null; sigilForgetSecret(); } } if(!kp){ window.__sigilMnemonic=null; sigilForgetSecret(); msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; } }
     if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); msgEl.textContent='That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.'; msgEl.style.color='#ff8a8a'; return; }
     window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -3712,7 +3736,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      already pending, say so and wait for the user to answer it. ───────────*/
   async function sigilPickMetaMaskAccount(onWait){
     var eth = window.ethereum;
-    if (!eth) { alert('MetaMask (or another injected wallet) was not detected in this browser.'); return null; }
+    if (!eth) { window.sigilNotice('MetaMask (or another injected wallet) was not detected in this browser.'); return null; }
     try { var have = await eth.request({ method: 'eth_accounts' });
           if (have && have[0]) return have[0]; } catch (e) {}
     try {
@@ -3736,7 +3760,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 
   window.polyBridgeUseMetaMask = async function(inputId){
     var acct = await sigilPickMetaMaskAccount(function(){
-      alert('MetaMask already has a connection request open for this site.\n\n' +
+      window.sigilNotice('MetaMask already has a connection request open for this site.\n\n' +
             'Click the MetaMask fox in your browser toolbar and approve it — ' +
             'this page will fill the field in by itself once you do.');
     });
@@ -3829,7 +3853,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   };
   window.bridgeUseMetaMask=async function(){
     var acct = await sigilPickMetaMaskAccount(function(){
-      alert('MetaMask already has a connection request open for this site.\n\n' +
+      window.sigilNotice('MetaMask already has a connection request open for this site.\n\n' +
             'Click the MetaMask fox in your browser toolbar and approve it — ' +
             'this page will fill the field in by itself once you do.');
     });
@@ -3950,12 +3974,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(await tryBridgeFastPath(from,base,dest,amtStr,fastNonce,lockId,parts)) return;
 
     if(!window.sigilCryptoReady){ bridgeStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
+    await window.sigilDeriveReady();
     var mnemonic=window.__sigilMnemonic||sigilLoadSecret();
     if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      mnemonic=((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
       if(!mnemonic){ bridgeStatus('Bridge cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ if(e&&e.code==='ARGON2_LOADING'){ await window.sigilDeriveReady(); try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e2){ window.__sigilMnemonic=null; sigilForgetSecret(); } } if(!kp){ window.__sigilMnemonic=null; sigilForgetSecret(); bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; } }
     if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); bridgeStatus('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -6394,6 +6419,7 @@ async function sigilPaymentCode(){
     // Not published yet — derive from the phrase this browser holds, and publish it
     // in the background so a bare-address payer can find it in ~90 s too.
     try{
+      await window.sigilDeriveReady();
       var mn=window.__sigilMnemonic||null; if(!mn){ try{ mn=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); }catch(_){} }
       if(mn&&window.sigilDeriveAuto){ var kp=window.sigilDeriveAuto(mn,a);
         if(kp&&kp.address===a&&kp.priv){ var wasm=window.sigilShieldWasm||await window.sigilShieldWasmReady;
@@ -7483,11 +7509,11 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
           if(!window.sigilCryptoReady){ msg('Signer still loading — try again in a moment.','#fbbf24'); return; }
           var mn=window.__sigilMnemonic||(window.sigilLoadSecret&&window.sigilLoadSecret());
           if(!mn){
-            mn=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+            mn=((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
             if(!mn){ msg('Cancelled — recovery phrase required to sign.','#fbbf24'); return; }
           }
           var kp; try{ kp=window.sigilDeriveAuto(mn, from); }
-          catch(e){ window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret(); msg('Could not derive a key from that phrase.','#ff8a8a'); return; }
+          catch(e){ if(e&&e.code==='ARGON2_LOADING'){ await window.sigilDeriveReady(); try{ kp=window.sigilDeriveAuto(mn, from); }catch(e2){ window.__sigilMnemonic=null; sigilForgetSecret(); } } if(!kp){ window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret(); msg('Could not derive a key from that phrase.','#ff8a8a'); return; } }
           if(kp.address!==from){
             window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret();
             msg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press BRIDGE again.','#ff8a8a'); return;
@@ -7519,7 +7545,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
         var destS=dest.toLowerCase().replace(/^0x/,'');
         if(!/^[0-9a-f]{64}$/.test(destS)){ msg('Destination must be a 64-hex SIGIL address.','#ff8a8a'); return; }
         if(!MM || !MM.getState().connected){ msg('Connect MetaMask first.','#ff8a8a'); return; }
-        if(!confirm('Burn '+fmt8(base)+' wrapped SIGIL on Polygon?\n\nThis is a real, IRREVERSIBLE Polygon transaction. The bridge relayer will then release the same amount of native SIGIL to:\n\n'+destS)) { msg('Cancelled.','#fbbf24'); return; }
+        if(!(await window.sigilConfirm('Burn '+fmt8(base)+' wrapped SIGIL on Polygon?\n\nThis is a real, IRREVERSIBLE Polygon transaction. The bridge relayer will then release the same amount of native SIGIL to:\n\n'+destS))) { msg('Cancelled.','#fbbf24'); return; }
         msg('Confirm the burn in MetaMask…','#6df3ff');
         var tx=await MM.burnToSigil(base, destS);
         receipt('BURNED — QUEUED FOR RELEASE', fmt8(base)+' wSIGIL', [
@@ -7773,15 +7799,15 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     say('✓ saved','#00e0c6'); abkRender();
   };
 
-  window.abkDel=function(i){
+  window.abkDel=async function(i){
     var a=load(); if(!a[i]) return;
-    if(!confirm('Remove “'+(a[i].label||'unnamed')+'” from the address book?')) return;
+    if(!(await window.sigilConfirm('Remove “'+(a[i].label||'unnamed')+'” from the address book?'))) return;
     a.splice(i,1); save(a); say(''); abkRender();
   };
 
-  window.abkRename=function(i){
+  window.abkRename=async function(i){
     var a=load(); if(!a[i]) return;
-    var v=prompt('Name for this contact:', a[i].label||'');
+    var v=await window.sigilAskText('Name for this contact:', a[i].label||'');
     if(v===null) return;
     a[i].label=String(v).trim()||shortA(a[i].addr);
     save(a); abkRender();
@@ -8003,13 +8029,17 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   var POLY_TOKENS = [
     {addr:'0x3fced760b0de6d57f96835c6110b1227941ec2e9', sym:'wSIGIL3', dp:18, from:93331958},
     {addr:'0xc224602c32f5c7f68d3ef002ae4c99e4c7df25b7', sym:'wSIGIL',  dp:18, from:93331958},
-    {addr:'0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', sym:'USDC',    dp:6,  from:93331958}
+    {addr:'0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', sym:'USDC',    dp:6,  from:93331958},
+    // CHAD is much older than the g3 token, so its `from` block only bounds how far the
+    // chunked walk bothers to look back — not when the token was deployed.
+    {addr:'0x1421aa72aca6fc49699337b3d6d4d95d5fd797bf', sym:'CHAD',    dp:18, from:93000000}
   ];
   // A Uniswap V2 swap on the wire is a transfer to/from the PAIR, so a counterparty
   // matching one of these is a trade rather than a plain send.
   var POLY_PAIRS = {
     '0x7e9c5d73104ed2fc2bc55139ac0999036eaf41d7': 'wSIGIL3/USDC',
-    '0x06895e77a192ce525c7bb5f25c52d2ce19c052d1': 'wSIGIL/USDC (legacy)'
+    '0x06895e77a192ce525c7bb5f25c52d2ce19c052d1': 'wSIGIL/USDC (legacy)',
+    '0x7d7130ed42225e47462eb5aadcd24363cb2d7590': 'CHAD/USDT'
   };
   function polyUnits(hexv, dp){
     try{
@@ -8923,11 +8953,12 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     $('natAttest').style.display = (s.authority_wallet && addr===String(s.authority_wallet).toLowerCase()) ? 'block' : 'none';
   }
 
-  function natKey(from,msgEl){
+  async function natKey(from,msgEl){
+    await window.sigilDeriveReady();
     if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return null; }
     var mn=window.__sigilMnemonic||((window.sigilLoadSecret&&sigilLoadSecret())||null);
     if(!mn){
-      mn=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      mn=((await window.sigilAskSecret('Enter your recovery phrase (or 64-hex mining seed) to sign.\nSaved in THIS browser until you press LOG OUT.'))||'').trim();
       if(!mn){ msgEl.textContent='Cancelled — recovery phrase required to sign.'; msgEl.style.color='#fbbf24'; return null; }
     }
     var kp; try{ kp=window.sigilDeriveAuto(mn,from); }catch(e){ msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return null; }
@@ -8939,7 +8970,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   window.nationClaim=async function(){
     var from=((window.MINE_ADDR||window.ADDR)||'').toLowerCase();
     var msg=$('natMsg'); if(!from){ msg.textContent='Open a wallet first.'; return; }
-    var kp=natKey(from,msg); if(!kp) return;
+    var kp=await natKey(from,msg); if(!kp) return;
     var reqNonce=Date.now();
     var sig; try{ sig=window.sigilSign(kp.priv,'welfare_claim',[from,'0'],reqNonce); }catch(e){ msg.textContent='Signing failed.'; msg.style.color='#ff8a8a'; return; }
     msg.textContent='Submitting claim…'; msg.style.color='#8fb3c2';
@@ -8958,7 +8989,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     var cpr=($('natAtCpr').value||'').trim();
     if(!/^[0-9a-f]{64}$/.test(cit)){ msg.textContent='Citizen wallet must be 64-hex.'; msg.style.color='#ff8a8a'; return; }
     if(!cpr){ msg.textContent='Enter the civil id to hash.'; msg.style.color='#ff8a8a'; return; }
-    var kp=natKey(from,msg); if(!kp) return;
+    var kp=await natKey(from,msg); if(!kp) return;
     // Domain-tagged local hash — the raw identity NEVER leaves this browser.
     var dig=await crypto.subtle.digest('SHA-256', new TextEncoder().encode('sigil-cpr|'+cpr));
     var cprHash=Array.from(new Uint8Array(dig)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
@@ -9689,4 +9720,208 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 })();</script>
 
 <script src="sigil-ble.js?v=3" defer></script><!-- Nearby phone: coins over Web Bluetooth (flux-bluetooth::sigil port) -->
+<!-- ═══ USDS — Sigil Graph USD (injected 2026-09-11, rocky-usds-0911) — self-contained, copy-agnostic ═══ -->
+<style>
+#usdsFab{position:fixed;right:18px;bottom:88px;z-index:19990;background:linear-gradient(135deg,#0f2a1f,#123d2b);border:1px solid rgba(0,224,198,.55);color:#00e0c6;font:700 12px/1 'JetBrains Mono',monospace;letter-spacing:1.5px;padding:11px 15px;border-radius:999px;cursor:pointer;box-shadow:0 6px 24px rgba(0,224,198,.18)}
+#usdsFab:hover{filter:brightness(1.15)}
+#usdsModal{display:none;position:fixed;inset:0;z-index:19995;background:rgba(4,6,10,.74);backdrop-filter:blur(6px)}
+#usdsModal .usdsCard{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(560px,94vw);max-height:92vh;overflow:auto;background:#0d1117;border:1px solid rgba(0,224,198,.35);border-radius:16px;padding:20px 22px;color:#e2e8f0;font-family:'JetBrains Mono',monospace;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+#usdsModal h3{margin:0 0 4px;font-size:17px;color:#00e0c6;letter-spacing:2px}
+#usdsModal .sub{font-size:11px;color:#8fb3c2;margin-bottom:14px;line-height:1.5}
+#usdsModal .row{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 0;border-bottom:1px dashed rgba(143,179,194,.15)}
+#usdsModal .row b{color:#c9d7e0;font-weight:600}
+#usdsModal .sec{margin-top:16px;padding-top:12px;border-top:1px solid rgba(0,224,198,.2)}
+#usdsModal .sec h4{margin:0 0 8px;font-size:12px;letter-spacing:2px;color:#fbbf24}
+#usdsModal input{width:100%;box-sizing:border-box;background:#070a0f;border:1px solid rgba(143,179,194,.3);border-radius:9px;color:#e2e8f0;font:13px 'JetBrains Mono',monospace;padding:9px 11px;margin:4px 0}
+#usdsModal button.act{background:none;border:1px solid rgba(0,224,198,.55);border-radius:9px;color:#00e0c6;font:700 12px 'JetBrains Mono',monospace;letter-spacing:1px;padding:9px 16px;cursor:pointer;margin-top:6px}
+#usdsModal button.act:disabled{opacity:.4;cursor:not-allowed}
+#usdsModal .msg{font-size:11px;margin-top:6px;min-height:14px;color:#8fb3c2;word-break:break-all}
+#usdsModal .warn{font-size:11px;color:#fbbf24;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.3);border-radius:9px;padding:8px 10px;margin:8px 0;line-height:1.5}
+#usdsModal .x{position:absolute;right:14px;top:10px;background:none;border:none;color:#8fb3c2;font-size:22px;cursor:pointer}
+</style>
+<button id="usdsFab" onclick="openUsds()">$ USDS</button>
+<div id="usdsModal" onclick="if(event.target===this)closeUsds()">
+ <div class="usdsCard">
+  <button class="x" onclick="closeUsds()">×</button>
+  <h3>USDS · Sigil Graph USD</h3>
+  <div class="sub">A dollar IOU backed by SIGIL locked on this chain. Mint: lock SIGIL at the oracle price (105&nbsp;% collateral, 0.3&nbsp;% fee). Redeem: burn USDS, get SIGIL back at the current price. Send: transparent transfer. The Polygon twin (8&nbsp;dp, same base units) is minted only against SETTLED bridge locks.</div>
+  <div id="usdsStatus"><div class="row"><span>loading…</span></div></div>
+  <div id="usdsWarn" class="warn" style="display:none"></div>
+
+  <div class="sec"><h4>MINT — lock SIGIL → USDS</h4>
+   <input id="usdsMintAmt" placeholder="SIGIL to lock (e.g. 1.5)" inputmode="decimal" oninput="usdsQuote('mint')">
+   <div class="msg" id="usdsMintQuote"></div>
+   <button class="act" id="usdsMintBtn" onclick="usdsMint()">MINT USDS</button>
+   <div class="msg" id="usdsMintMsg"></div></div>
+
+  <div class="sec"><h4>REDEEM — burn USDS → SIGIL</h4>
+   <input id="usdsRedeemAmt" placeholder="USDS to redeem (e.g. 1.00)" inputmode="decimal" oninput="usdsQuote('redeem')">
+   <div class="msg" id="usdsRedeemQuote"></div>
+   <button class="act" id="usdsRedeemBtn" onclick="usdsRedeem()">REDEEM</button>
+   <div class="msg" id="usdsRedeemMsg"></div></div>
+
+  <div class="sec"><h4>SEND USDS</h4>
+   <input id="usdsSendTo" placeholder="recipient wallet (64-hex)">
+   <input id="usdsSendAmt" placeholder="USDS amount (e.g. 0.50)" inputmode="decimal">
+   <button class="act" id="usdsSendBtn" onclick="usdsSend()">SEND</button>
+   <div class="msg" id="usdsSendMsg"></div></div>
+
+  <div class="sec" id="usdsAdmin" style="display:none"><h4>ORACLE — master only</h4>
+   <div class="sub">Appoint the price feeder. The daemon on Epsilon signs as this wallet and refreshes the SIGIL/USD price every 10 min; without a delegated feeder no USDS can be minted or redeemed (stale price = frozen, by design). All-zero revokes.</div>
+   <input id="usdsFeeder" value="f06943e2ce2ed7c69ef0367b198066a66d6a669b8cff4fa2739b97d608c6ef03">
+   <button class="act" onclick="usdsDelegate()">DELEGATE FEEDER</button>
+   <div class="msg" id="usdsDelegateMsg"></div></div>
+ </div>
+</div>
+<script>
+(function(){
+  var E8=100000000, GLYPH=10000000000;
+  function $(i){return document.getElementById(i);}
+  function api(p){ var b=(typeof API_BASE!=='undefined')?API_BASE:((/(^|\.)sigilgraph\.org$/.test(location.hostname))?'/v1':'/api/v1'); return b+p; }
+  function me(){ return ((window.MINE_ADDR||window.ADDR)||'').toLowerCase(); }
+  function fmt(base,dec){ base=BigInt(base); var d=BigInt(dec); var w=base/d, f=(base%d).toString().padStart(dec.toString().length-1,'0').replace(/0+$/,''); return w.toString()+(f?'.'+f:''); }
+  function toBase(str,dec){ var s=String(str||'').trim(); if(!/^\d*(\.\d*)?$/.test(s)||s===''||s==='.') return null; var p=s.split('.'); var frac=(p[1]||'').padEnd(dec.toString().length-1,'0').slice(0,dec.toString().length-1); var v=BigInt(p[0]||'0')*BigInt(dec)+BigInt(frac||'0'); return v>0n?v:null; }
+  async function key(msgEl){
+    var from=me(); if(!from){ msgEl.textContent='Open a wallet first.'; msgEl.style.color='#ff8a8a'; return null; }
+    await window.sigilDeriveReady();
+    var mn=window.__sigilMnemonic||null; if(!mn){ try{ mn=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); }catch(_){} }
+    if(!mn){ mn=await window.sigilAskSecret('Enter your recovery phrase (or raw seed) to sign.'); if(!mn) return null; mn=mn.trim(); }
+    var kp; try{ kp=window.sigilDeriveAuto(mn,from); }catch(e){ msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return null; }
+    if(kp.address!==from){ msgEl.textContent='That phrase belongs to '+kp.address.slice(0,10)+'… not this wallet.'; msgEl.style.color='#ff8a8a'; return null; }
+    window.__sigilMnemonic=mn; if(window.sigilSaveSecret) try{ sigilSaveSecret(mn); }catch(_){}
+    return kp;
+  }
+  var ST=null;
+  window.openUsds=function(){ $('usdsModal').style.display='block'; refresh(); };
+  window.closeUsds=function(){ $('usdsModal').style.display='none'; };
+  async function refresh(){
+    try{
+      var r=await fetch(api('/usds/status')); var j=await r.json(); if(!j.ok) throw new Error(j.error||'status failed'); var d=j.data; ST=d;
+      var price=Number(d.price)/E8;
+      var rows=[
+        ['status', d.live?'<span style="color:#00e0c6">LIVE</span> (from block '+d.live_height.toLocaleString()+')':'<span style="color:#fbbf24">activates at block '+d.live_height.toLocaleString()+'</span> · now '+d.height.toLocaleString()],
+        ['SIGIL/USD', d.price==='0'?'<span style="color:#ff8a8a">no price</span>':'$'+price.toFixed(6)+(d.price_fresh?' <span style="color:#00e0c6">fresh</span>':' <span style="color:#ff8a8a">STALE (h'+d.price_height+')</span>')],
+        ['feeder', d.feeder?d.feeder.slice(0,12)+'…':'<span style="color:#fbbf24">none delegated</span>'],
+        ['USDS supply', '$'+fmt(d.usds_supply,E8)],
+        ['vault collateral', fmt(d.vault_sigil,GLYPH)+' SIGIL'+(d.collateral_bps?' ('+(d.collateral_bps/100).toFixed(1)+' %)':'')],
+      ];
+      $('usdsStatus').innerHTML=rows.map(function(x){return '<div class="row"><span>'+x[0]+'</span><b>'+x[1]+'</b></div>';}).join('');
+      var from=me(); var bal='';
+      if(from){ try{ var b=await fetch(api('/balance?wallet='+from+'&token='+d.token_id)); var bj=await b.json(); var v=(bj.data&&(bj.data.balance||bj.data.amount))||bj.balance||'0'; bal='$'+fmt(String(v),E8); }catch(_){ } }
+      if(bal) $('usdsStatus').insertAdjacentHTML('beforeend','<div class="row"><span>your USDS</span><b>'+bal+'</b></div>');
+      var w=$('usdsWarn'); var problems=[];
+      if(!d.live) problems.push('USDS switches on at block '+d.live_height.toLocaleString()+' — mint/redeem/send are refused until then.');
+      else if(!d.price_fresh) problems.push('The oracle price is not fresh, so mint/redeem/welfare REFUSE (frozen, not mispriced). The feeder must push a price.');
+      w.style.display=problems.length?'block':'none'; w.textContent=problems.join(' ');
+      var ok=d.live&&d.price_fresh; ['usdsMintBtn','usdsRedeemBtn'].forEach(function(i){$(i).disabled=!ok;}); $('usdsSendBtn').disabled=!d.live;
+      // master-only admin
+      try{ var n=await fetch(api('/nation/status')); var nj=await n.json(); var auth=(nj.data&&nj.data.authority_wallet)||''; $('usdsAdmin').style.display=(auth&&from&&auth.toLowerCase()===from)?'block':'none'; }catch(_){}
+    }catch(e){ $('usdsStatus').innerHTML='<div class="row"><span style="color:#ff8a8a">'+(e.message||e)+'</span></div>'; }
+  }
+  window.usdsQuote=async function(kind){
+    var from=me(); if(!from) return;
+    var el=$(kind==='mint'?'usdsMintQuote':'usdsRedeemQuote');
+    var v=toBase($(kind==='mint'?'usdsMintAmt':'usdsRedeemAmt').value, kind==='mint'?GLYPH:E8); if(!v){ el.textContent=''; return; }
+    try{ var r=await fetch(api('/usds/quote?wallet='+from+'&'+(kind==='mint'?'sigil_amount':'usds_amount')+'='+v.toString())); var j=await r.json();
+      if(j.ok) el.innerHTML=kind==='mint'?('→ you receive <b>$'+fmt(j.usds_to_wallet,E8)+' USDS</b> at $'+(Number(j.price)/E8).toFixed(6)):('→ you receive <b>'+fmt(j.sigil_to_wallet,GLYPH)+' SIGIL</b> at $'+(Number(j.price)/E8).toFixed(6));
+      else el.textContent='refused: '+j.error; el.style.color=j.ok?'#c9d7e0':'#ff8a8a';
+    }catch(e){ el.textContent=''; }
+  };
+  async function post(path, body, msgEl, okText){
+    try{ var r=await fetch(api(path),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); var j=await r.json();
+      if(j.ok){ msgEl.innerHTML=okText+' tx <span style="font-size:10px">'+String(j.tx_hash||j.txid).slice(0,16)+'…</span>'; msgEl.style.color='#00e0c6'; setTimeout(refresh,1500); }
+      else { msgEl.textContent=j.error||'refused'; msgEl.style.color='#ff8a8a'; }
+    }catch(e){ msgEl.textContent='Network error — not submitted.'; msgEl.style.color='#ff8a8a'; }
+  }
+  window.usdsMint=async function(){
+    var m=$('usdsMintMsg'); var v=toBase($('usdsMintAmt').value,GLYPH); if(!v){ m.textContent='Enter a SIGIL amount.'; m.style.color='#ff8a8a'; return; }
+    var kp=await key(m); if(!kp) return; var from=me(); var n=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'usds_mint',[from,v.toString()],n); }catch(e){ m.textContent='Signing failed.'; m.style.color='#ff8a8a'; return; }
+    m.textContent='Submitting…'; m.style.color='#8fb3c2';
+    await post('/usds/mint',{from:from,sigil_amount:Number(v),sig:sig,req_nonce:n},m,'Mint queued ✓ — settles with finality.');
+  };
+  window.usdsRedeem=async function(){
+    var m=$('usdsRedeemMsg'); var v=toBase($('usdsRedeemAmt').value,E8); if(!v){ m.textContent='Enter a USDS amount.'; m.style.color='#ff8a8a'; return; }
+    var kp=await key(m); if(!kp) return; var from=me(); var n=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'usds_redeem',[from,v.toString()],n); }catch(e){ m.textContent='Signing failed.'; m.style.color='#ff8a8a'; return; }
+    m.textContent='Submitting…'; m.style.color='#8fb3c2';
+    await post('/usds/redeem',{from:from,usds_amount:Number(v),sig:sig,req_nonce:n},m,'Redeem queued ✓ — settles with finality.');
+  };
+  window.usdsSend=async function(){
+    var m=$('usdsSendMsg'); var to=($('usdsSendTo').value||'').trim().toLowerCase().replace(/^0x/,''); var v=toBase($('usdsSendAmt').value,E8);
+    if(!/^[0-9a-f]{64}$/.test(to)){ m.textContent='Recipient must be 64-hex.'; m.style.color='#ff8a8a'; return; }
+    if(!v){ m.textContent='Enter a USDS amount.'; m.style.color='#ff8a8a'; return; }
+    var kp=await key(m); if(!kp) return; var from=me(); var n=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'usds_transfer',[from,to,v.toString()],n); }catch(e){ m.textContent='Signing failed.'; m.style.color='#ff8a8a'; return; }
+    m.textContent='Submitting…'; m.style.color='#8fb3c2';
+    await post('/usds/transfer',{from:from,to:to,amount:Number(v),sig:sig,req_nonce:n},m,'Sent ✓ — settles with finality.');
+  };
+  window.usdsDelegate=async function(){
+    var m=$('usdsDelegateMsg'); var f=($('usdsFeeder').value||'').trim().toLowerCase().replace(/^0x/,'');
+    if(!/^[0-9a-f]{64}$/.test(f)){ m.textContent='Feeder must be 64-hex.'; m.style.color='#ff8a8a'; return; }
+    var kp=await key(m); if(!kp) return; var from=me(); var n=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'oracle_delegate',[from,f,'0'],n); }catch(e){ m.textContent='Signing failed.'; m.style.color='#ff8a8a'; return; }
+    m.textContent='Submitting delegation…'; m.style.color='#8fb3c2';
+    await post('/nation/oracle/delegate_wallet',{authority:from,feeder:f,fee:0,sig:sig,req_nonce:n},m,'Delegated ✓ — the feeder may push once this settles.');
+  };
+})();
+</script>
+
+
+<!-- 2026-09-24: in-page unlock / question / notice. Replaces window.prompt/confirm/alert on the
+     money paths — those render as a browser-chrome "sigilgraph.org says:" box (Brave/Chrome), which
+     testers read as a system error, and dismissing one cancelled the payment. -->
+<div id="ask-modal" style="display:none;position:fixed;inset:0;z-index:10050;background:rgba(2,5,9,.84);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:440px;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'JetBrains Mono',monospace">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div id="askIcon" style="font-size:20px">🔐</div>
+      <div id="askTitle" style="flex:1;font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:14px">UNLOCK</div>
+    </div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:10px">
+      <div id="askText" style="font-size:12.5px;line-height:1.55;color:#a9c7d3;white-space:pre-wrap"></div>
+      <div id="askRow" style="display:flex;gap:8px">
+        <input id="askInput" type="password" autocomplete="off" spellcheck="false" style="flex:1;background:rgba(33,212,253,.05);border:1px solid rgba(33,212,253,.3);color:#e6f7ff;border-radius:10px;padding:10px 12px;font-family:inherit;font-size:13px;outline:none">
+        <button id="askEye" type="button" title="show" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;width:42px;cursor:pointer">👁</button>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+        <button id="askNo" type="button" style="background:transparent;border:1px solid rgba(255,255,255,.14);color:#9fb6c2;border-radius:10px;padding:9px 14px;cursor:pointer;font-family:'Orbitron';font-size:11px">CANCEL</button>
+        <button id="askOk" type="button" style="background:linear-gradient(90deg,rgba(33,212,253,.28),rgba(0,224,198,.28));border:1px solid rgba(33,212,253,.5);color:#e6f7ff;border-radius:10px;padding:9px 16px;cursor:pointer;font-family:'Orbitron';font-size:11px;font-weight:700">OK</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var m=document.getElementById('ask-modal'), txt=document.getElementById('askText'), inp=document.getElementById('askInput'),
+      row=document.getElementById('askRow'), ok=document.getElementById('askOk'), no=document.getElementById('askNo'),
+      eye=document.getElementById('askEye'), title=document.getElementById('askTitle'), icon=document.getElementById('askIcon');
+  var pending=null;
+  function close(v){ m.style.display='none'; inp.value=''; inp.type='password'; var p=pending; pending=null; if(p) p(v); }
+  function open(o){
+    return new Promise(function(resolve){
+      if(pending){ var prev=pending; pending=null; prev(null); }
+      pending=resolve;
+      icon.textContent=o.icon||'🔐'; title.textContent=o.title||'UNLOCK'; txt.textContent=o.text||'';
+      row.style.display=o.input?'flex':'none'; eye.style.display=o.secret?'':'none';
+      inp.type=o.secret?'password':'text'; inp.value=o.value||''; inp.placeholder=o.placeholder||'';
+      no.style.display=o.cancel===false?'none':''; ok.textContent=o.okText||'OK';
+      m.style.display='flex'; if(o.input) setTimeout(function(){ inp.focus(); inp.select(); },30); else setTimeout(function(){ ok.focus(); },30);
+    });
+  }
+  ok.addEventListener('click',function(){ close(row.style.display==='none' ? true : inp.value); });
+  no.addEventListener('click',function(){ close(row.style.display==='none' ? false : null); });
+  eye.addEventListener('click',function(){ inp.type = inp.type==='password' ? 'text' : 'password'; inp.focus(); });
+  inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); ok.click(); } if(e.key==='Escape'){ e.preventDefault(); no.click(); } });
+  m.addEventListener('keydown',function(e){ if(e.key==='Escape' && row.style.display==='none'){ no.click(); } });
+  m.addEventListener('click',function(e){ if(e.target===m) no.click(); });
+  /** Ask for the recovery phrase / 64-hex seed. Resolves the string, or null on cancel. */
+  window.sigilAskSecret=function(reason){ return open({icon:'🔐',title:'UNLOCK TO SIGN',text:reason||'Enter your recovery phrase (or 64-hex mining seed).',input:true,secret:true,placeholder:'twelve words, or 64 hex characters',okText:'UNLOCK'}); };
+  /** Ask for a short text (labels, names). Resolves the string, or null on cancel. */
+  window.sigilAskText=function(q,dflt){ return open({icon:'✎',title:'NAME',text:q||'',input:true,secret:false,value:dflt||'',okText:'SAVE'}); };
+  /** Yes/no. Resolves true/false. */
+  window.sigilConfirm=function(q){ return open({icon:'⚠️',title:'CONFIRM',text:q||'',input:false,okText:'YES'}); };
+  /** Notice with one OK. Resolves true. Fire-and-forget safe. */
+  window.sigilNotice=function(q){ return open({icon:'ⓘ',title:'NOTICE',text:q||'',input:false,cancel:false,okText:'OK'}); };
+})();
+</script>
 </body></html>

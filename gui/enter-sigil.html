@@ -2,6 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'self'; form-action 'self'">
     <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SIGILGRAPH · The Undeniable Chain</title>
@@ -56,6 +57,30 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
       .mmstat{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;line-height:1.5;color:#6df3ff;margin-top:7px;min-height:14px;text-align:left;word-break:break-word}
       .mmstat.err{color:#ff8a8a}
       .mmstat.ok{color:#00e0c6}
+      /* import verification panel (2026-09-06) */
+      .chk{display:none;margin-top:12px;padding:12px 14px;border-radius:12px;text-align:left;
+           font-size:12.5px;line-height:1.6;border:1px solid rgba(120,150,170,.28);background:rgba(8,26,34,.55);color:#cfe6ee}
+      .chk b{color:#e6f6fb}
+      .chk.good{border-color:rgba(0,224,198,.45);background:rgba(0,224,198,.07)}
+      .chk.good b{color:#00e0c6}
+      .chk.fix{border-color:rgba(200,168,78,.5);background:rgba(200,168,78,.07)}
+      .chk.fix b{color:#e4c26a}
+      .chk.warn{border-color:rgba(200,168,78,.4);background:rgba(200,168,78,.05)}
+      .chk.bad{border-color:rgba(255,138,138,.45);background:rgba(255,80,80,.06)}
+      .chk.bad b{color:#ff9d9d}
+      .chk .cd{margin-top:7px;color:#9fbecb;font-size:12px}
+      .chk .cd-tip{color:#7fa3b3;border-top:1px solid rgba(120,150,170,.2);padding-top:7px;margin-top:9px}
+      .chk .caddr{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#6df3ff;word-break:break-all}
+      .chk .cph{margin-top:8px;padding:9px 11px;border-radius:9px;background:rgba(200,168,78,.09);
+                border:1px solid rgba(200,168,78,.3);font-family:'JetBrains Mono',ui-monospace,monospace;
+                font-size:12px;color:#e4c26a;word-spacing:3px;line-height:1.7;user-select:all}
+      .chk .clist{margin:9px 0 0;padding-left:18px;color:#ffb9b9;font-size:12px}
+      .chk .clist li{margin:4px 0}
+      .chk .cbtns{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}
+      .chk .cbtn{flex:1 1 auto;padding:9px 12px;border-radius:9px;cursor:pointer;font-size:12px;font-weight:600;
+                 background:rgba(255,255,255,.05);border:1px solid rgba(120,150,170,.35);color:#cfe6ee}
+      .chk .cbtn:hover{border-color:rgba(109,243,255,.5);color:#6df3ff}
+      .chk .cbtn-go{background:rgba(0,224,198,.14);border-color:rgba(0,224,198,.5);color:#00e0c6}
     </style>
   </head>
   <body>
@@ -73,7 +98,7 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
       <form onsubmit="event.preventDefault();go()">
         <div class="form-group">
           <label>Node ID or Seed Phrase</label>
-          <input type="text" id="seed" placeholder="qnk… or your recovery phrase (6-word or 12-word)" autofocus>
+          <input type="text" id="seed" placeholder="Your 12-word recovery phrase (or a 64-hex address)" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false" autofocus>
         </div>
         <button type="submit" class="btn" id="goBtn">◈ Enter Sigilgraph</button>
       </form>
@@ -81,6 +106,7 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
       <button type="button" class="btn btn-secondary" id="mmCreateBtn" style="margin-top:8px" onclick="createWalletMetaMask()">🦊 Open My MetaMask Wallet</button>
       <div class="mmnote" id="mmNote">Derives your SIGIL wallet from a MetaMask signature (free, not a transaction), switches MetaMask to Polygon and adds the wrapped SIGIL token. <b>This does not make a new wallet.</b> The signature is deterministic, so one MetaMask account maps to exactly ONE SIGIL wallet — pressing this again, in a new tab or a private window, re-opens the SAME wallet with the SAME balance. MetaMask lives in the browser extension, not in the page, so private browsing does not change the result. For a genuinely new, empty wallet use <b>✨ Create New Wallet</b> above.</div>
       <div class="mmstat" id="mmStat"></div>
+      <div class="chk" id="chk"></div>
       <div class="words" id="words" title="Click to select — copy and store safely"></div>
       <div class="warn" id="warn">⚠ Write these 12 words down — they <b>are</b> your wallet. Anyone with them controls it; lose them and the wallet is gone. Then press <b>◈ Enter Sigilgraph</b>.</div>
 
@@ -185,6 +211,11 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
         const wl=document.getElementById('words'); wl.textContent = phrase; wl.classList.add('show');
         document.getElementById('warn').classList.add('show');
         document.getElementById('seed').value = phrase;
+        // Remember what we just made: go() opens it directly instead of running the
+        // "have I seen these words" probe, whose answer for a fresh phrase is always no.
+        window.__freshPhrase = phrase;
+        var gb=document.getElementById('goBtn'); if(gb) gb.textContent='◈ Open this new wallet';
+        chkHide();
       };
       // legacy alias kept for any old callers
       window.generateMnemonic = window.createWallet;
@@ -246,7 +277,11 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
         if(btn) btn.disabled = true;
         try{
           mmStat('Waiting for MetaMask\u2026');
-          const st = await window.SigilMM.connect();
+          // The callback fires only if MetaMask already has a popup open for
+          // this origin — it tells the user to go answer it instead of
+          // showing them the raw -32002 string, and the helper keeps polling
+          // eth_accounts so the page continues by itself once they do.
+          const st = await window.SigilMM.connect(msg => mmStat(msg, 'err'));
 
           mmStat('Switching MetaMask to Polygon\u2026');
           try { await window.SigilMM.ensurePolygon(); }
@@ -280,6 +315,8 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
           const m = (e && (e.message || e.toString())) || 'unknown error';
           // 4001 = user rejected the request in MetaMask.
           if(e && e.code === 4001) mmStat('Cancelled in MetaMask.', 'err');
+          else if(window.SigilMM && window.SigilMM.isPendingErr && window.SigilMM.isPendingErr(e))
+            mmStat(window.SigilMM.PENDING_MSG, 'err');
           else mmStat('MetaMask: ' + m, 'err');
         }finally{
           if(btn) btn.disabled = false;
@@ -293,40 +330,307 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
         window.open('http://localhost:9800','_blank','noopener');
       };
 
+      // ── IMPORT VERIFICATION (2026-09-06) ─────────────────────────────────
+      //
+      // WHY THIS EXISTS. The phone and this page compute the SAME key from the
+      // SAME characters — re-verified 2026-09-06 against the shipped bundles,
+      // all six parity vectors byte-identical. So when someone reads the twelve
+      // words off the Android app's "Show my recovery phrase" screen, types them
+      // here, and their mined coins are not there, the arithmetic is not the
+      // problem. THE CHARACTERS ARE.
+      //
+      // And that failure is completely silent, because every 32-byte string is a
+      // valid private key. One capital letter from a phone keyboard, one word
+      // autocorrected, one word dropped, and this page cheerfully derives a
+      // perfectly good BRAND NEW EMPTY wallet and shows you a balance of zero.
+      // Nothing anywhere says "wrong words" — it says "0 SIGIL", which reads as
+      // "your mining earned nothing" or "the site is broken".
+      //
+      // Worse than a wrong letter: drop one word and you have ELEVEN, and the
+      // word-count dispatch above flips the whole scheme from v2 (Argon2id) to
+      // v1 (SHA3) — not a near miss, a different universe.
+      //
+      // So: derive, then ASK THE CHAIN whether that wallet has ever existed
+      // before letting anyone through believing it. A wallet that has mined has
+      // published shielded keys (`/v1/shielded/address`) and/or holds a
+      // transparent balance; a typo has neither. When the typed phrase is
+      // unknown we retry the obvious repairs — lowercase, collapsed spacing,
+      // NFKC, stripped trailing punctuation — and if one of THOSE is a wallet
+      // the chain knows, we say exactly what was wrong instead of guessing.
+
+      var WLSET = null;
+      function wlSet(){ if(!WLSET) WLSET = new Set(WL); return WLSET; }
+
+      // Cheap edit-distance-1 lookup, for "you typed teslar, did you mean tesla".
+      // 2,159 words is small enough that a full scan is instant.
+      function nearestWord(w){
+        if(!w || w.length<2) return null;
+        var best=null, bestD=3;
+        for(var i=0;i<WL.length;i++){
+          var c=WL[i];
+          if(Math.abs(c.length-w.length)>1) continue;
+          var d=editDist(w,c,2);
+          if(d<bestD){ bestD=d; best=c; if(d===1) break; }
+        }
+        return bestD<=2 ? best : null;
+      }
+      function editDist(a,b,cap){
+        var m=a.length,n=b.length; if(Math.abs(m-n)>cap) return cap+1;
+        var prev=new Array(n+1), cur=new Array(n+1);
+        for(var j=0;j<=n;j++) prev[j]=j;
+        for(var i=1;i<=m;i++){
+          cur[0]=i; var row=cap+1;
+          for(var k=1;k<=n;k++){
+            cur[k]=Math.min(prev[k]+1, cur[k-1]+1, prev[k-1]+(a[i-1]===b[k-1]?0:1));
+            if(cur[k]<row) row=cur[k];
+          }
+          if(row>cap) return cap+1;
+          var t=prev; prev=cur; cur=t;
+        }
+        return prev[n];
+      }
+
+      // Local lint — runs with no network, catches the common phone-keyboard
+      // damage and names the exact word.
+      function lintPhrase(raw){
+        var out=[], t=(raw||'').trim();
+        if(/^[0-9a-fA-F]{64}$/.test(t)) return out;         // raw address / seed
+        if(/^(v1:|v2:|mm2:)/i.test(t))  return out;         // explicit scheme, hands off
+        var words=t.split(/\s+/).filter(Boolean), S=wlSet();
+        if(words.length!==12 && words.length!==6){
+          out.push(words.length+' words. A phrase made by the Android app is exactly <b>12</b>. '+
+            (words.length<12
+              ? 'A missing word is not a small error: at '+words.length+' words this page switches to the OLD (v1/SHA3) derivation and opens a completely different wallet.'
+              : 'An extra word does the same thing in reverse.'));
+        }
+        for(var i=0;i<words.length;i++){
+          var w=words[i]; if(S.has(w)) continue;
+          var lower=w.toLowerCase();
+          if(S.has(lower)){
+            out.push('word '+(i+1)+' <b>“'+esc(w)+'”</b> is capitalised. The phrase is hashed exactly as typed, so a capital letter is a different wallet — it should be <b>“'+esc(lower)+'”</b>.');
+          } else {
+            var near=nearestWord(lower);
+            out.push('word '+(i+1)+' <b>“'+esc(w)+'”</b> is not in the SIGIL word list'+
+              (near ? ' — did you mean <b>“'+esc(near)+'”</b>? (phone autocorrect)' : ' (phone autocorrect?)')+'.');
+          }
+        }
+        if(/\S[ \t]{2,}\S/.test(t)) out.push('there is a double space inside the phrase — the spacing is hashed exactly as typed.');
+        if(/[.,;:!?]$/.test(t))     out.push('there is trailing punctuation — remove it.');
+        if(/[\u00a0\u2000-\u200b]/.test(t)) out.push('the text contains a non-breaking or exotic space (usually from copying out of a chat app) — retype the spaces.');
+        return out;
+      }
+      function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+      // The repair candidates, in the order most likely to be the real phrase.
+      // Deduped, because for a clean phrase they all collapse to the same string
+      // and we must not pay 1.2 s of Argon2id four times for nothing.
+      function repairCandidates(raw){
+        var t=(raw||'').trim(), seen={}, out=[];
+        seen[t]=1;
+        function add(s){ s=(s||'').trim(); if(s && !seen[s]){ seen[s]=1; out.push(s); } }
+        var flat = t.replace(/\s+/g,' ');
+        add(t.toLowerCase());
+        add(flat);
+        add(flat.toLowerCase());
+        add(t.normalize('NFKC').replace(/[\u00a0\u2000-\u200b]/g,' ').replace(/\s+/g,' ').toLowerCase());
+        add(flat.replace(/[.,;:!?]+$/,'').trim().toLowerCase());
+        // Per-word case + autocorrect repair: only when EVERY unknown word has an
+        // unambiguous list neighbour, so we never invent a phrase out of nothing.
+        var words=flat.split(' ').filter(Boolean), S=wlSet(), fixed=[], ok=words.length>0;
+        for(var i=0;i<words.length;i++){
+          var w=words[i], lw=w.toLowerCase();
+          if(S.has(lw)) { fixed.push(lw); continue; }
+          var near=nearestWord(lw);
+          if(near) fixed.push(near); else { ok=false; break; }
+        }
+        if(ok) add(fixed.join(' '));
+        return out;
+      }
+
+      // Ask the chain whether this wallet has ever been used. A wallet that has
+      // mined from the phone has published shielded keys (the app registers
+      // automatically, and mining rewards for a registered wallet mint as
+      // shielded notes); one that has only ever held transparent coin has a
+      // non-zero balance. Either is proof the words are right. Note that
+      // /v1/balance answers ok:true for ANY 64-hex string, so a 200 alone proves
+      // nothing — the BALANCE has to be non-zero.
+      async function chainProbe(addr){
+        var transparent=null, registered=false, reachable=false;
+        try{
+          var r=await fetch('/v1/balance?wallet='+addr,{cache:'no-store'});
+          var j=await r.json();
+          if(j && j.ok && j.data && typeof j.data.balance==='string'){ transparent=BigInt(j.data.balance); reachable=true; }
+        }catch(e){}
+        try{
+          var r2=await fetch('/v1/shielded/address?wallet='+addr,{cache:'no-store'});
+          var j2=await r2.json();
+          if(j2 && typeof j2.ok==='boolean') reachable=true;
+          registered=!!(j2 && j2.ok && j2.pk_shield);
+        }catch(e){}
+        return { transparent:transparent, registered:registered, reachable:reachable,
+                 known: registered || (transparent!==null && transparent>0n) };
+      }
+
+      function fmtSigil(glyphs){
+        // g2 is 10 decimals — base unit "glyph", 1 SIGIL = 10^10 glyphs.
+        var neg=glyphs<0n; if(neg) glyphs=-glyphs;
+        var whole=glyphs/10000000000n, frac=(glyphs%10000000000n).toString().padStart(10,'0').replace(/0+$/,'');
+        return (neg?'-':'')+whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+(frac?'.'+frac:'');
+      }
+
+      var CHK=null;
+      function chk(){ if(!CHK) CHK=document.getElementById('chk'); return CHK; }
+      function chkShow(cls, html){ var c=chk(); if(!c) return; c.className='chk '+(cls||''); c.innerHTML=html; c.style.display='block'; }
+      function chkHide(){ var c=chk(); if(c){ c.style.display='none'; c.innerHTML=''; } }
+      function setBusy(on, text){
+        var b=document.getElementById('goBtn'); if(!b) return;
+        if(on){ if(b.dataset.prev===undefined) b.dataset.prev=b.textContent; b.disabled=true; b.textContent=text||'Working…'; }
+        else  { b.disabled=false; if(b.dataset.prev!==undefined){ b.textContent=b.dataset.prev; delete b.dataset.prev; } }
+      }
+
+      // Commit: this is the wallet we are opening.
+      function enterWith(seed, address){
+        // WRITE BOTH KEYS. Found 2026-09-06, and it is a silent wrong-wallet bug all on
+        // its own — no typo required.
+        //
+        // The wallet page's `sigilLoadSecret()` reads
+        //     localStorage['sigil-wallet-mnemonic'] || localStorage['sigil-wallet-seed']
+        // and its shielded-balance scanner (the ONLY thing that can see mined coins,
+        // because a registered wallet's mining rewards mint as shielded notes) reads
+        // `sigil-wallet-mnemonic` with NO fallback at all. This gate used to write only
+        // `sigil-wallet-seed`. So on any browser that had EVER opened another wallet —
+        // a MetaMask-derived one, an older phrase, a demo — the stale
+        // `sigil-wallet-mnemonic` outranked the phrase just typed here: the header
+        // showed the NEW address (that comes from `sigil-wallet-address`, which this
+        // gate did update) while the private balance was scanned for the OLD seed.
+        // Result: the right words, the right address on screen, and no coins. Exactly
+        // the shape of "I typed my phone's recovery phrase and my mined SIGIL is gone".
+        //
+        // The gate is the authority on which wallet is open, so it now overwrites every
+        // secret slot rather than leaving one behind to win a race it should not be in.
+        localStorage.setItem('sigil-wallet-seed', seed);
+        localStorage.setItem('sigil-wallet-mnemonic', seed);
+        localStorage.setItem('sigil-wallet-address', address);
+        // The node-local signer (:9800) adopts the seed once per session; clear the
+        // latch or it keeps signing for the previous wallet.
+        try{ sessionStorage.removeItem('sigil-adopted'); }catch(e){}
+        // RELATIVE, so the wallet opens on the SAME ORIGIN that served this gate.
+        // It used to be a hardcoded absolute redirect to fluxapp.xyz — but this gate
+        // saves `sigil-wallet-seed`/`sigil-wallet-address` to localStorage, and
+        // localStorage is PER-ORIGIN. Sending the user across a domain boundary made
+        // the seed they had just typed invisible to the wallet, so it re-prompted for
+        // the recovery phrase on EVERY send, forever. Reported as "i've just logged in
+        // using the same mnemonic, now it asks me twice". Same origin => the seed is
+        // simply already there. No secret in any URL.
+        window.location.href='sigil-wallet-tron-embedded.html';
+      }
+      window.__enterWith = enterWith;
+      // 2026-09-24: the verdict buttons used to carry the phrase INSIDE an inline
+      // onclick="__enterWith("…")" — JSON's own double quotes ended the attribute at
+      // the first one, the handler became `__enterWith(` and every click threw
+      // "Unexpected end of input". Every phrase the chain had never seen — i.e. every
+      // NEW tester — was stuck at the gate with a button that did nothing. The phrase
+      // now rides in data attributes (HTML-escaped) and ONE delegated listener reads
+      // them; no inline code ever contains user text again.
+      document.addEventListener('click', function(ev){
+        var b = ev.target && ev.target.closest ? ev.target.closest('[data-enter-seed]') : null;
+        if(!b) return;
+        ev.preventDefault();
+        enterWith(b.getAttribute('data-enter-seed'), b.getAttribute('data-enter-addr'));
+      });
+
       window.go = async function(){
-        const seed = document.getElementById('seed').value.trim();
-        if(!seed){ alert('Enter a seed phrase or generate one'); return; }
-        let address;
-        if(/^[0-9a-fA-F]{64}$/.test(seed)){
-          address = seed.toLowerCase();              // already a raw address
-        } else {
+        var seed = document.getElementById('seed').value.trim();
+        if(!seed){ chkShow('warn','<b>Enter your recovery phrase</b><div class="cd">Type the words you wrote down, or press <b>✨ Create New Wallet</b> for a fresh one.</div>'); return; }
+        chkHide();
+
+        // A bare 64-hex string is already an address — nothing to derive, and the
+        // wallet page treats it as watch-only/raw. Straight through, as before.
+        if(/^[0-9a-fA-F]{64}$/.test(seed)){ enterWith(seed, seed.toLowerCase()); return; }
+
+        if(window.__freshPhrase && seed === window.__freshPhrase){
+          // Made on this page a moment ago: derive and go, no verdict needed.
+          try{
+            setBusy(true,'Deriving your wallet…');
+            var fresh = await deriveAddress(seed);
+            chkShow('good','<b>✓ New wallet.</b><div class="cd">'+addrLine(fresh)+'Opening the wallet…</div>');
+            setTimeout(function(){ enterWith(seed, fresh); }, 400);
+          }catch(e){ chkShow('bad','<b>Could not derive a wallet from that phrase.</b><div class="cd">'+esc(String(e))+'</div>'); setBusy(false); }
+          return;
+        }
+
+        var address;
+        try{
           // v2 derivation is Argon2id — deliberately slow (~1.2 s, longer on a
           // phone). Say so, or the page looks frozen and people click twice.
-          const btn = document.getElementById('goBtn');
-          const prev = btn ? btn.textContent : null;
-          if (btn) { btn.disabled = true; btn.textContent = 'Deriving your wallet…'; }
-          try { address = await deriveAddress(seed); }
-          catch(e){ alert('Could not derive a wallet from that phrase: '+e); return; }
-          finally { if (btn) { btn.disabled = false; if (prev !== null) btn.textContent = prev; } }
+          setBusy(true,'Deriving your wallet…');
+          try{ address = await deriveAddress(seed); }
+          catch(e){ chkShow('bad','<b>Could not derive a wallet from that phrase.</b><div class="cd">'+esc(String(e))+'</div>'); return; }
+
+          setBusy(true,'Checking the chain…');
+          var probe = await chainProbe(address);
+
+          if(probe.known){
+            // The words are right. Say what was found, then go.
+            var bits=[];
+            if(probe.transparent!==null && probe.transparent>0n) bits.push(fmtSigil(probe.transparent)+' SIGIL transparent');
+            if(probe.registered) bits.push('private notes registered');
+            chkShow('good','<b>✓ Found on chain.</b> '+esc(bits.join(' · '))+
+              '<div class="cd">'+addrLine(address)+'Opening the wallet…</div>');
+            setTimeout(function(){ enterWith(seed, address); }, 700);
+            return;
+          }
+
+          if(!probe.reachable){
+            // Never claim "wrong words" when we simply could not ask.
+            chkShow('warn','<b>Could not reach the chain to check this phrase.</b>'+
+              '<div class="cd">'+addrLine(address)+
+              'The derivation is fine — we just could not confirm whether this wallet has history. You can continue, but if the balance shows 0, re-check your words before concluding anything.</div>'+
+              '<div class="cbtns"><button type="button" class="cbtn" data-enter-seed="'+esc(seed)+'" data-enter-addr="'+esc(address)+'">Continue anyway</button></div>');
+            return;
+          }
+
+          // Unknown wallet. Before saying anything discouraging, try the obvious repairs.
+          var lint = lintPhrase(seed);
+          var cands = repairCandidates(seed);
+          for(var i=0;i<cands.length;i++){
+            setBusy(true,'Checking a correction… ('+(i+1)+'/'+cands.length+')');
+            var a2;
+            try{ a2 = await deriveAddress(cands[i]); }catch(e){ continue; }
+            if(a2===address) continue;
+            var p2 = await chainProbe(a2);
+            if(p2.known){
+              var b2=[];
+              if(p2.transparent!==null && p2.transparent>0n) b2.push(fmtSigil(p2.transparent)+' SIGIL transparent');
+              if(p2.registered) b2.push('private notes registered');
+              chkShow('fix','<b>Found it — with a small correction.</b>'+
+                '<div class="cd">The phrase exactly as you typed it opens an empty wallet the chain has never seen. This does:</div>'+
+                '<div class="cph">'+esc(cands[i])+'</div>'+
+                '<div class="cd">'+esc(b2.join(' · '))+'<br>'+addrLine(a2)+
+                (lint.length?('<br>What was different: '+lint[0]):'')+'</div>'+
+                '<div class="cbtns"><button type="button" class="cbtn cbtn-go" data-enter-seed="'+esc(cands[i])+'" data-enter-addr="'+esc(a2)+'">Open this wallet</button>'+
+                '<button type="button" class="cbtn" data-enter-seed="'+esc(seed)+'" data-enter-addr="'+esc(address)+'">No — use exactly what I typed</button></div>');
+              return;
+            }
+          }
+
+          // Nothing matched. Be explicit that this is a NEW wallet, not a broken site.
+          chkShow('bad','<b>These words open a wallet the chain has never seen.</b>'+
+            '<div class="cd">'+addrLine(address)+
+            'That address has no balance and has never published shielded keys, so nothing has ever been mined or received to it. '+
+            'Your coins are not lost — they are at a different address, which means these are not quite the right words. '+
+            'The phrase is hashed <b>exactly</b> as typed: capitals, spacing and every letter count.</div>'+
+            (lint.length ? '<ul class="clist"><li>'+lint.join('</li><li>')+'</li></ul>'
+                         : '<div class="cd">Every word is in the list and the count is right, so the damage is subtler — check for a swapped word order, or read the words off the phone again.</div>')+
+            '<div class="cd cd-tip">On the phone: <b>More → Show my recovery phrase</b>, and compare word by word. The address shown at <b>More → This wallet</b> is what should appear above.</div>'+
+            '<div class="cbtns"><button type="button" class="cbtn" data-enter-seed="'+esc(seed)+'" data-enter-addr="'+esc(address)+'">Open this new empty wallet anyway</button></div>');
+        } finally {
+          setBusy(false);
         }
-        localStorage.setItem('sigil-wallet-seed', seed);
-        localStorage.setItem('sigil-wallet-address', address);
-        // Absolute → the shared fluxapp vhost where /api (sigil-rpcd) is wired, so
-        // balances load regardless of which host served this gate (apex sigilgraph
-        // is served by its own fluxc-serve backend that only carries the gate).
-        // 2026-08-26 (operator-directed): RELATIVE, so the wallet opens on the SAME
-        // ORIGIN that served this gate. It used to be a hardcoded absolute redirect to
-        // fluxapp.xyz — but this gate saves `sigil-wallet-seed`/`sigil-wallet-address`
-        // to localStorage, and localStorage is PER-ORIGIN. Sending the user across a
-        // domain boundary made the seed they had just typed invisible to the wallet, so
-        // it re-prompted for the recovery phrase on EVERY send, forever. Reported as
-        // "i've just logged in using the same mnemonic, now it asks me twice".
-        // Same origin => the seed is simply already there. No secret in any URL.
-        // Verified 2026-08-26: sigilgraph.org serves /v1/health, /v1/balance and
-        // /v1/shielded/address all 200, so the old "only fluxapp has /api wired"
-        // reason for the absolute URL no longer holds.
-        window.location.href='sigil-wallet-tron-embedded.html';
       };
+      function addrLine(a){
+        return 'Address <code class="caddr">'+esc(a)+'</code><br>';
+      }
 
       // ── chain search from the gate (same as wallet/explorer; routes detail to the explorer) ──
       var _wT=null;
@@ -363,5 +667,238 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
       document.addEventListener('keydown',function(e){ if(e.key==='/'&&document.activeElement.id!=='wsearch'&&document.activeElement.id!=='seed'){ var s=document.getElementById('wsearch'); if(s){ e.preventDefault(); s.focus(); } } });
       document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWrap')){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; } });
     </script>
-  </body>
+  <!-- ══ SKYSKRABEREN — K_DC campus gauge · global topbar dropdown ═══════════════════════
+     The Quillon Graph tower's coordination gauge, driven here by SIGIL's own live
+     endpoints because SIGIL is the network actually running today. Same discipline as the
+     K-gauge beside it: every number is computed from a same-origin /v1/* reading, and a
+     channel with no data says so instead of showing a zero.
+
+     K_DC = 2π·√(ΔH·Δs·τ/τ₀)   — dimensionless, engineering scale, NO ħ.
+     ΔH = Σ pᵢ(1−readinessᵢ)   how far the campus is from being one working whole
+     Δs = −Σ pᵢ ln pᵢ           how FRAGMENTED the reason is
+     pᵢ ∝ exp(−slackᵢ/θ)·wᵢ·deficitᵢ   derived from slack, never asserted
+
+     The unit shown as "work" is months-equivalent pulled off the ready date, NOT −ΔK.
+     Measured in the Rust crate (flux-skyskraber::kdc): a grid slip from 30 to 44 months
+     made K FALL, because one dominant constraint is a clearer cause. Clarity is not
+     progress, so ΔK is never the thing you pay on. -->
+<style>
+  #skChip{position:fixed;top:10px;right:150px;z-index:1400;display:flex;align-items:center;gap:7px;
+    padding:6px 11px;border-radius:999px;cursor:pointer;font-family:'JetBrains Mono',monospace;
+    font-size:12px;background:rgba(4,22,30,.82);border:1px solid rgba(45,212,191,.45);
+    color:#e2e8f0;backdrop-filter:blur(8px);user-select:none;transition:border-color .2s}
+  #skChip:hover{border-color:#5eead4}
+  #skChip .skSig{color:#2dd4bf;font-size:14px;font-weight:800}
+  #skChip .skK{font-weight:700;color:#5eead4}
+  #skChip .skReg{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;padding:1px 7px;border-radius:999px}
+  .sk-ready{background:rgba(16,185,129,.18);color:#34d399;border:1px solid rgba(16,185,129,.35)}
+  .sk-building{background:rgba(45,212,191,.15);color:#5eead4;border:1px solid rgba(45,212,191,.35)}
+  .sk-blocked{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}
+  .sk-unknown{background:rgba(120,130,150,.18);color:#94a3b8;border:1px solid rgba(120,130,150,.35)}
+  #skPanel{position:fixed;top:52px;right:12px;z-index:1400;width:392px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
+    background:#04161e;border:1px solid rgba(45,212,191,.4);border-radius:14px;
+    box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 42px rgba(45,212,191,.14);color:#e2e8f0}
+  #skPanel.on{display:block}
+  #skPanel .skHd{padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;
+    justify-content:space-between;align-items:flex-start;gap:10px}
+  #skPanel .skTitle{font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:rgba(255,255,255,.42)}
+  #skPanel .skForm{font-size:10px;color:rgba(255,255,255,.6);margin-top:3px}
+  #skPanel .skBig{font-size:26px;font-weight:800;line-height:1;text-align:right;color:#5eead4}
+  #skPanel .skSub2{font-size:10px;color:rgba(255,255,255,.55);text-align:right;margin-top:2px}
+  #skPanel .skGrid{padding:12px 15px;display:grid;grid-template-columns:1fr 1fr;gap:9px 14px;
+    border-bottom:1px solid rgba(255,255,255,.06)}
+  #skPanel .skLab{font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.08em}
+  #skPanel .skVal{font-size:13px;font-weight:600;color:#cfe9f2}
+  #skPanel .skSub{font-size:8.5px;color:rgba(255,255,255,.32)}
+  #skPanel .skSec{padding:11px 15px;border-bottom:1px solid rgba(255,255,255,.06);font-size:11px;line-height:1.5}
+  #skPanel .skSec b{color:#5eead4;font-weight:600}
+  #skPanel .skBar{height:5px;border-radius:3px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:4px}
+  #skPanel .skBar i{display:block;height:100%;background:linear-gradient(90deg,#2dd4bf,#5eead4)}
+  #skPanel .skRow{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;padding:3px 0}
+  #skPanel .skRow .skNm{color:rgba(255,255,255,.72)}
+  #skPanel .skRow .skPct{color:#cfe9f2;font-weight:600}
+  #skPanel .skBind{color:#fbbf24;font-weight:700}
+  #skPanel .skFoot{padding:9px 15px;font-size:9px;color:rgba(255,255,255,.3);line-height:1.5}
+  #skPanel .skX{cursor:pointer;color:rgba(255,255,255,.4);font-size:16px;line-height:1}
+  @media(max-width:640px){#skChip{right:12px;top:46px}}
+</style>
+<script>
+(function(){
+  var PANEL_HTML=`
+  <div class="skHd">
+    <div>
+      <div class="skTitle">Skyskraberen · K_DC</div>
+      <div class="skForm">K_DC = 2π·√(ΔH·Δs·τ/τ₀) &nbsp;·&nbsp; no ħ</div>
+    </div>
+    <div>
+      <div class="skBig" id="skBigK">—</div>
+      <div class="skSub2" id="skReady">—</div>
+      <span class="skX" onclick="window.__skToggle(false)">✕</span>
+    </div>
+  </div>
+  <div class="skGrid">
+    <div><div class="skLab">ΔH — distance</div><div class="skVal" id="skDH">—</div><div class="skSub">how far from one working whole</div></div>
+    <div><div class="skLab">Δs — fragmentation</div><div class="skVal" id="skDS">—</div><div class="skSub">how scattered the cause is</div></div>
+    <div><div class="skLab">Bottleneck</div><div class="skVal skBind" id="skBind">—</div><div class="skSub">what everything waits on</div></div>
+    <div><div class="skLab">Work rate</div><div class="skVal" id="skRate">—</div><div class="skSub">months-equiv pulled in / hour</div></div>
+  </div>
+  <div class="skSec">
+    <div class="skLab" style="margin-bottom:6px">Constraints — readiness, and the weight each carries as the NEXT wall</div>
+    <div id="skRows"></div>
+  </div>
+  <div class="skSec" id="skVerdict" style="font-size:10.5px;color:rgba(255,255,255,.75)">—</div>
+  <div class="skFoot">
+    Readiness is MEASURED from this node's own /v1 endpoints. The month figures are a MODEL
+    over those readings, not a delivery date anyone committed to. pᵢ is derived from slack,
+    so the entropy is a measurement rather than an opinion. ΔK is shown for honesty but is
+    never the work: a bottleneck getting worse can make the cause clearer and K fall.
+    <span style="color:#f87171">physical_datacenter_commissioned: false</span> — the campus is a model until steel says otherwise.
+  </div>`;
+
+  var $=function(id){return document.getElementById(id)};
+  var open=false;
+  window.__skToggle=function(v){open=(v===undefined)?!open:v;$('skPanel').classList.toggle('on',open);};
+  // (the click handler is attached in host(), which is what CREATES the chip)
+
+  var J=function(p){return fetch(p,{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).catch(function(){return null});};
+
+  // The campus, expressed as constraints over what SIGIL actually reports. Each row has a
+  // TARGET that is stated, not hidden — you are entitled to disagree with a target, but
+  // not to wonder what it was.
+  function constraints(mine,mesh,anchor,supply){
+    var c=[];
+    if(mine){
+      // Compute: the network's own hash rate against a 1 GH/s build-out target.
+      c.push({n:'compute capacity',b:'build',req:1e9,av:mine.net_hps||0,months:14,w:1.0,
+              note:((mine.net_hps||0)/1e6).toFixed(1)+' MH/s of 1000'});
+      c.push({n:'rig fleet',b:'build',req:32,av:mine.live_miners||0,months:10,w:0.8,
+              note:(mine.live_miners||0)+' of 32 rigs'});
+    }
+    if(mesh){
+      // Mesh: the analogue of fibre. Reachability nobody on the node can force.
+      c.push({n:'mesh reachability',b:'grid',req:16,av:mesh.peer_count||0,months:20,w:2.0,
+              note:(mesh.peer_count||0)+' of 16 peers'});
+    }
+    if(anchor){
+      // Settlement: the shielded pool is the campus's usable privacy capacity.
+      c.push({n:'settlement pool',b:'procurement',req:anchor.capacity||32768,av:anchor.notes||0,months:18,w:1.5,
+              note:(anchor.notes||0).toLocaleString()+' of '+(anchor.capacity||32768).toLocaleString()+' notes'});
+      c.push({n:'published keys',b:'procurement',req:64,av:anchor.registered||0,months:6,w:0.7,
+              note:(anchor.registered||0)+' of 64 wallets payable'});
+    }
+    if(supply){
+      c.push({n:'commissioning',b:'commissioning',req:100,av:(supply.minted_pct||0)*100,months:4,w:1.0,
+              note:((supply.minted_pct||0)).toFixed(3)+'% of cap minted'});
+    }
+    return c;
+  }
+
+  function gauge(cs){
+    if(!cs.length) return null;
+    cs.forEach(function(c){ c.ready=c.req>0?Math.max(0,Math.min(1,c.av/c.req)):1; c.def=1-c.ready; });
+    // months remaining scales with how much is left — a constraint 90% done is nearly done.
+    cs.forEach(function(c){ c.rem=c.months*c.def; });
+    var branch={};
+    cs.forEach(function(c){ branch[c.b]=(branch[c.b]||0)+c.rem; });
+    var par=['build','grid','procurement'].map(function(b){return [b,branch[b]||0]});
+    var crit=par.reduce(function(a,b){return b[1]>a[1]?b:a},['build',-1]);
+    var comm=branch['commissioning']||0;
+    var months=Math.max(0,crit[1])+comm;
+    var sorted=par.map(function(p){return p[1]}).sort(function(a,b){return b-a});
+    var headroom=sorted.length>1?Math.max(0,sorted[0]-sorted[1]):0;
+    // p_i from SLACK — the whole point. theta = 6 months of softness.
+    var theta=6;
+    var raw=cs.map(function(c){
+      var slack=(c.b==='commissioning')?0:Math.max(0,crit[1]-(branch[c.b]||0));
+      return Math.exp(-slack/theta)*Math.max(0,c.w)*c.def;
+    });
+    var tot=raw.reduce(function(a,b){return a+b},0);
+    var p=tot>0?raw.map(function(r){return r/tot}):raw.map(function(){return 0});
+    var dH=0,dS=0;
+    p.forEach(function(pi,i){ dH+=pi*cs[i].def; if(pi>0) dS+=-pi*Math.log(pi); });
+    // tau/tau0: one observation window against a one-month construction reference.
+    var K=2*Math.PI*Math.sqrt(Math.max(0,dH*dS*1.0));
+    var top=p.reduce(function(a,v,i){return v>a[1]?[i,v]:a},[0,-1]);
+    return {cs:cs,p:p,dH:dH,dS:dS,K:K,months:months,headroom:headroom,
+            bind:cs[top[0]]?cs[top[0]].n:'—',bindW:top[1],critBranch:crit[0]};
+  }
+
+  var LS='sigil.skyskraber.last';
+  function work(g){
+    try{
+      var prev=JSON.parse(localStorage.getItem(LS)||'null');
+      var now=Date.now();
+      localStorage.setItem(LS,JSON.stringify({K:g.K,months:g.months,t:now}));
+      if(!prev||!prev.t||now<=prev.t) return null;
+      var hours=(now-prev.t)/3.6e6;
+      if(hours<0.002) return null;               // too short to mean anything
+      return {dm:prev.months-g.months,dk:prev.K-g.K,hours:hours,rate:(prev.months-g.months)/hours};
+    }catch(e){ return null; }
+  }
+
+  function paint(g){
+    if(!g){ $('skChipReg').textContent='no data'; $('skChipReg').className='skReg sk-unknown';
+            $('skVerdict').textContent='The node is not answering, so there is nothing to measure. This says nothing about the campus — only that this page cannot see it.'; return; }
+    $('skChipK').textContent=g.K.toFixed(2);
+    $('skBigK').textContent=g.K.toFixed(2);
+    $('skDH').textContent=g.dH.toFixed(3);
+    $('skDS').textContent=g.dS.toFixed(3);
+    $('skBind').textContent=g.bind;
+    $('skReady').textContent=g.months<=0?'ready':('~'+g.months.toFixed(1)+' months to ready');
+    var reg = g.months<=0 ? ['ready','sk-ready'] : (g.headroom<=0.5 ? ['blocked','sk-blocked'] : ['building','sk-building']);
+    $('skChipReg').textContent=reg[0]; $('skChipReg').className='skReg '+reg[1];
+    var rows='';
+    g.cs.forEach(function(c,i){
+      var pct=(c.ready*100);
+      rows+='<div class="skRow"><span class="skNm">'+(c.n===g.bind?'▸ ':'')+c.n+' <span style="color:rgba(255,255,255,.3)">'+c.note+'</span></span>'+
+            '<span class="skPct">'+pct.toFixed(0)+'% · p '+(g.p[i]*100).toFixed(0)+'%</span></div>'+
+            '<div class="skBar"><i style="width:'+pct.toFixed(1)+'%"></i></div>';
+    });
+    $('skRows').innerHTML=rows;
+    var w=work(g);
+    $('skRate').textContent = w ? (w.rate>=0?'+':'')+w.rate.toFixed(3)+' mo/h' : 'first reading';
+    var v='<b>'+g.bind+'</b> is what everything else is waiting on'+
+          (g.headroom>0.5?(' — shortening it is worth at most <b>'+g.headroom.toFixed(1)+' months</b> before the next wall arrives.')
+                         :' — and the runner-up is level with it, so speeding it up buys almost nothing on its own.');
+    if(g.dS>1.0) v+=' The cause is <b>fragmented</b> (Δs '+g.dS.toFixed(2)+'): several constraints could each be the delay, so reduce the ambiguity before optimising anything.';
+    else v+=' The cause is <b>concentrated</b> (Δs '+g.dS.toFixed(2)+'): one thing decides the date.';
+    if(w&&w.dm<0) v+=' <span style="color:#f87171">Since the last reading the date slipped '+Math.abs(w.dm).toFixed(2)+' months.</span>';
+    $('skVerdict').innerHTML=v;
+  }
+
+  function tick(){
+    Promise.all([J('/v1/mining/miners'),J('/v1/network/topology'),J('/v1/shielded/anchor'),J('/v1/supply')])
+      .then(function(r){
+        var mine=r[0]&&r[0].data, mesh=r[1]&&r[1].data, anchor=r[2], supply=r[3]&&r[3].data;
+        paint(gauge(constraints(mine,mesh,anchor,supply)));
+      }).catch(function(){ paint(null); });
+  }
+
+  // ── SURVIVE THE GATE ──────────────────────────────────────────────────────────
+  // This page renders a login gate first and REPLACES document.body when it hands over
+  // to the wallet. Anything parked inside <body> is destroyed at that moment — which is
+  // why the K-gauge chip and this one were both absent from the live DOM despite being
+  // present in the HTML. So the chip is built in JS and attached to <html>, which no body
+  // swap can touch, and re-attached if anything removes it anyway.
+  function host(){
+    var el=document.getElementById('skChip');
+    if(el&&el.isConnected&&document.getElementById('skPanel')) return;
+    var chip=document.createElement('div'); chip.id='skChip';
+    chip.title='Skyskraberen — K_DC campus coordination gauge';
+    chip.innerHTML='<span class="skSig">\u2302</span><span class="skK" id="skChipK">\u2014</span>'+
+      '<span class="skReg sk-unknown" id="skChipReg">measuring</span>';
+    var panel=document.createElement('div'); panel.id='skPanel'; panel.innerHTML=PANEL_HTML;
+    document.documentElement.appendChild(chip);
+    document.documentElement.appendChild(panel);
+    chip.addEventListener('click',function(){window.__skToggle();});
+    var x=panel.querySelector('.skX'); if(x) x.addEventListener('click',function(){window.__skToggle(false);});
+  }
+  host();
+  setInterval(host,3000);   // cheap, and the only thing that survives an arbitrary DOM swap
+
+  tick(); setInterval(tick,20000);
+})();
+</script>
+</body>
 </html>

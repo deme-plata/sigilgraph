@@ -1739,6 +1739,30 @@ pub fn coinbase_is_transparent(height: u64) -> bool {
     height >= TRANSPARENT_COINBASE_HEIGHT
 }
 
+/// From this height every TRANSPARENT coinbase credit also emits a typed
+/// `SigilEvent::MintReward { miner, height, amount }` and commits its leaf into
+/// `event_log_root`, so a miner's income is on the record the court, an auditor and the
+/// miner's own disclosure packet read.
+///
+/// Why (measured 2026-09-25, g2): a real `sigil-top mine-rig` earned +63 SIGIL over 7,342
+/// blocks and the court's self-disclosure for that wallet sealed a packet of ZERO records —
+/// the coinbase was a bare `SetBalance`, which pushes no event, and `MintReward` was emitted
+/// only in genesis and tests. Miners did the chain's most honest work and left no trace of it.
+///
+/// **Consensus-changing** (it moves `event_log_root`), so it is height-gated and ships
+/// DORMANT at `u64::MAX`. The operator commits a real height; rollout is follower-first and
+/// the rollback plan is a height plus a snapshot, never "reinstall the old binary" — a
+/// producer cannot be rolled back out of blocks it has already minted.
+///
+/// Shielded coinbase notes deliberately emit nothing: naming the owner of a private note in
+/// a public event would undo the note.
+pub const MINT_REWARD_EVENT_HEIGHT: u64 = u64::MAX;
+
+/// Does the coinbase at `height` carry `MintReward` events? The one place the rule is asked.
+pub fn mint_reward_events_active(height: u64) -> bool {
+    height >= MINT_REWARD_EVENT_HEIGHT
+}
+
 /// Does the chain require this wallet's ramps to carry a SQIsign signature at `height`?
 ///
 /// Two conditions, both necessary: the network has activated the rule, AND this

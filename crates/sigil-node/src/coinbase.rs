@@ -356,10 +356,14 @@ pub fn build_block_body_for_with_schedule(
                 amount: work.balance_of(&producer, &NATIVE).saturating_add(reward),
             },
         };
+        let (mint_events, mint_leaves) = mint_reward_events(&work, height, std::slice::from_ref(&cb));
+        let mut cb_all = vec![cb];
+        cb_all.extend(mint_leaves);
         if sigil_state::commit_state_transition(
-            &mut work, &StateTransition { at_height: height, mutations: vec![cb.clone()] }, height,
+            &mut work, &StateTransition { at_height: height, mutations: cb_all.clone() }, height,
         ).is_ok() {
-            mutations.push(cb);
+            mutations.extend(cb_all);
+            events.extend(mint_events);
         }
     }
 
@@ -455,7 +459,9 @@ pub fn build_block_body_for_shares_with_schedule(
     //    `work`, which already carries it, so the master's cut of THIS block's reward goes to
     //    the new wallet — the same thing every follower computes when it applies the block.
     apply_scheduled_rotation(&mut work, &mut mutations, height, schedule);
-    let cb_mutations = split_coinbase_mutations(&work, height, reward, winner, shares);
+    let mut cb_mutations = split_coinbase_mutations(&work, height, reward, winner, shares);
+    let (mint_events, mint_leaves) = mint_reward_events(&work, height, &cb_mutations);
+    cb_mutations.extend(mint_leaves);
 
     if !cb_mutations.is_empty() {
         // FAIL LOUD, not silent. This used to be a bare `.is_ok()` with no `else`: when the
@@ -469,7 +475,12 @@ pub fn build_block_body_for_shares_with_schedule(
         match sigil_state::commit_state_transition(
             &mut work, &StateTransition { at_height: height, mutations: cb_mutations.clone() }, height,
         ) {
-            Ok(_) => mutations.extend(cb_mutations),
+            Ok(_) => {
+                mutations.extend(cb_mutations);
+                // Coinbase leaves precede every tx leaf in `mutations`, so the typed events
+                // go first too: the court re-hashes `block.events` in order.
+                events.extend(mint_events);
+            }
             Err(e) => eprintln!(
                 "🚨 COINBASE DROPPED at h={height} ({e:?}) — miner, master AND commons cuts \
                  are unpaid for this block. {} mutation(s) discarded.",
@@ -551,6 +562,58 @@ pub fn build_block_body_for_shares_with_schedule(
     // `ChainTip::apply` recomputes it from ITS state and refuses the block on mismatch.
     let pool_root = work.shielded_pool_root();
     (StateTransition { at_height: height, mutations }, roots, events, included, pool_root)
+}
+
+// Test seam: the gate ships at `u64::MAX`, so tests must be able to switch it on without
+// moving the constant. THREAD-LOCAL on purpose — a process-global override would leak into
+// every other test running in parallel (learned on the fifth-root sim override, 2026-09-25).
+#[cfg(test)]
+thread_local! {
+    static FORCE_MINT_EVENTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+fn test_force_mint_events() -> bool { FORCE_MINT_EVENTS.with(|c| c.get()) }
+#[cfg(not(test))]
+#[inline(always)]
+fn test_force_mint_events() -> bool { false }
+
+/// Typed `MintReward` events (plus their `PushEventHash` leaves) for the TRANSPARENT credits
+/// in a coinbase, when [`sigil_tx::mint_reward_events_active`] says so at `height`.
+///
+/// Amounts are recovered as the balance DELTA each `SetBalance` makes against the pre-coinbase
+/// state, with a running balance per wallet so a wallet credited twice in one coinbase (the
+/// winner also being the master, say) gets two correct deltas rather than one cumulative one.
+/// `ShieldedCoinbase` and every non-native or non-increasing write are skipped on purpose.
+///
+/// Returns `(events, leaf mutations)` in the same order, so the header's `event_log_root`
+/// (rebuilt from the leaves) and the typed `block.events` the court re-hashes agree by
+/// construction.
+pub fn mint_reward_events(
+    pre: &SigilState,
+    height: u64,
+    cb_mutations: &[StateMutation],
+) -> (Vec<sigil_events::SigilEvent>, Vec<StateMutation>) {
+    if !(sigil_tx::mint_reward_events_active(height) || test_force_mint_events()) {
+        return (Vec::new(), Vec::new());
+    }
+    let mut running: std::collections::HashMap<WalletId, u128> = std::collections::HashMap::new();
+    let mut events = Vec::new();
+    let mut leaves = Vec::new();
+    for m in cb_mutations {
+        if let StateMutation::SetBalance { wallet, token, amount } = m {
+            if *token != NATIVE {
+                continue;
+            }
+            let prev = *running.entry(*wallet).or_insert_with(|| pre.balance_of(wallet, &NATIVE));
+            running.insert(*wallet, *amount);
+            if *amount > prev {
+                let evt = sigil_events::SigilEvent::MintReward { miner: *wallet, height, amount: *amount - prev };
+                leaves.push(StateMutation::PushEventHash(evt.leaf_hash()));
+                events.push(evt);
+            }
+        }
+    }
+    (events, leaves)
 }
 
 /// Full pool-share coinbase: split `reward` proportionally over `shares`
@@ -1949,6 +2012,98 @@ mod tests {
              makes it 'Quillon-style': the same annual emission whether the chain runs fast or slow)"
         );
     }
+
+    // ── MintReward emission (TASK 1, 2026-09-25) ────────────────────────────────────────
+
+    fn force_mint_events(on: bool) { FORCE_MINT_EVENTS.with(|c| c.set(on)); }
+
+    fn two_miner_base() -> (SigilState, WalletId, WalletId) {
+        let (a, b) = ([0xA1u8; 32], [0xB2u8; 32]);
+        let mut base = SigilState::new();
+        sigil_state::commit_state_transition(
+            &mut base,
+            &StateTransition { at_height: 0, mutations: vec![
+                StateMutation::SetBalance { wallet: a, token: NATIVE, amount: 5 },
+            ] }, 0,
+        ).unwrap();
+        (base, a, b)
+    }
+
+    #[test]
+    fn dormant_gate_emits_nothing_and_leaves_the_block_as_it_was() {
+        force_mint_events(false);
+        assert!(!sigil_tx::mint_reward_events_active(25_808_013), "ships dormant");
+        assert!(!sigil_tx::mint_reward_events_active(u64::MAX - 1));
+        let (base, a, b) = two_miner_base();
+        let shares: std::collections::HashMap<WalletId, u64> = [(a, 3), (b, 1)].into_iter().collect();
+        let (tr, roots, events, _inc, _pr) = build_block_body_for_shares(&base, 7, Some(1_000_000), &[], a, &shares);
+        assert!(events.is_empty(), "no typed events while dormant");
+        assert!(!tr.mutations.iter().any(|m| matches!(m, StateMutation::PushEventHash(_))));
+        assert_eq!(roots.event_log_root, [0u8; 32], "byte-identical to the pre-change coinbase");
+    }
+
+    /// The property that broke the chain on 2026-09-10: the HEADER root must commit the BODY
+    /// events, and a follower applying the transition in one commit must agree on every root.
+    #[test]
+    fn active_gate_mint_events_commit_header_body_and_follower_agree() {
+        force_mint_events(true);
+        let (base, a, b) = two_miner_base();
+        let shares: std::collections::HashMap<WalletId, u64> = [(a, 3), (b, 1)].into_iter().collect();
+        let (tr, roots, events, _inc, _pr) = build_block_body_for_shares(&base, 7, Some(1_000_000), &[], a, &shares);
+        force_mint_events(false);
+
+        let mints: Vec<(WalletId, u128)> = events.iter().filter_map(|e| match e {
+            sigil_events::SigilEvent::MintReward { miner, height, amount } => { assert_eq!(*height, 7); Some((*miner, *amount)) }
+            _ => None,
+        }).collect();
+        assert!(mints.iter().any(|(w, _)| *w == a) && mints.iter().any(|(w, _)| *w == b), "both miners named: {mints:?}");
+
+        // Amounts are exactly the balance each wallet gained.
+        let mut after = base.clone();
+        let computed = sigil_state::commit_state_transition(&mut after, &tr, 7).expect("follower applies it");
+        for w in [a, b] {
+            let gained = after.balance_of(&w, &NATIVE) - base.balance_of(&w, &NATIVE);
+            let said: u128 = mints.iter().filter(|(x, _)| *x == w).map(|(_, v)| *v).sum();
+            assert_eq!(said, gained, "MintReward must state the real credit");
+        }
+
+        // Header commits body: leaves in the transition == hashes of the typed events, in order.
+        let leaves: Vec<[u8; 32]> = tr.mutations.iter().filter_map(|m| match m {
+            StateMutation::PushEventHash(h) => Some(*h), _ => None }).collect();
+        let typed: Vec<[u8; 32]> = events.iter().map(|e| e.leaf_hash()).collect();
+        assert_eq!(leaves, typed, "header leaves and body events must be the same list");
+        assert_ne!(roots.event_log_root, [0u8; 32]);
+
+        // Follower agrees on all four roots.
+        assert_eq!(computed.event_log_root, roots.event_log_root, "fork: event_log_root");
+        assert_eq!(computed.wallet_state_root, roots.wallet_state_root);
+        assert_eq!(computed.dex_state_root, roots.dex_state_root);
+        assert_eq!(computed.contract_state_root, roots.contract_state_root);
+
+        // And the court accepts the block as evidence — the reason this exists.
+        let court = sigil_api::court::CourtBridge::new();
+        assert!(court.record_block(7, roots.event_log_root, events.clone()),
+            "the court must accept a block whose MintReward events hash to the header root");
+    }
+
+    #[test]
+    fn a_wallet_credited_twice_in_one_coinbase_gets_two_true_deltas() {
+        let w = [0xC3u8; 32];
+        let mut pre = SigilState::new();
+        sigil_state::commit_state_transition(&mut pre, &StateTransition { at_height: 0, mutations: vec![
+            StateMutation::SetBalance { wallet: w, token: NATIVE, amount: 100 }] }, 0).unwrap();
+        force_mint_events(true);
+        let (ev, leaves) = mint_reward_events(&pre, 9, &[
+            StateMutation::SetBalance { wallet: w, token: NATIVE, amount: 150 },
+            StateMutation::SetBalance { wallet: w, token: NATIVE, amount: 170 },
+            StateMutation::SetBalance { wallet: w, token: [7u8; 32], amount: 999 }, // not native
+        ]);
+        force_mint_events(false);
+        let amts: Vec<u128> = ev.iter().filter_map(|e| match e {
+            sigil_events::SigilEvent::MintReward { amount, .. } => Some(*amount), _ => None }).collect();
+        assert_eq!(amts, vec![50, 20], "running balance, not cumulative");
+        assert_eq!(leaves.len(), 2);
+    }
 }
 
 /// Seal a coinbase note's `(value, blinding)` for its recipient, so the wallet can find
@@ -1971,4 +2126,3 @@ fn seal_coinbase_note(
     let addr = sigil_shield::note_cipher::ShieldedAddress::new(pk, &hex::encode(enc));
     sigil_shield::note_cipher::seal_note_compact(&pt, &addr).ok().map(|c| c.0)
 }
-

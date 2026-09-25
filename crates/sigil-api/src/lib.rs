@@ -803,6 +803,16 @@ pub async fn shielded_send_handler(
         Ok(p) => p,
         Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
     };
+    // Door check against the chain's spent set BEFORE queueing or signing a receipt —
+    // otherwise a spent note gets "ok" now and a reversal ~14 s later (2026-09-25, live).
+    {
+        let guard = match st.state.read() { Ok(g) => g, Err(p) => p.into_inner() };
+        let mut nfs: Vec<&str> = vec![req.nullifier.as_str()];
+        nfs.extend(req.extra_nullifiers.iter().map(String::as_str));
+        if let Err(e) = shielded::refuse_if_spent(guard.shielded(), &req.anchor, &nfs) {
+            return Json(serde_json::json!({ "ok": false, "error": e.message(), "permanent": true }));
+        }
+    }
     match st.shielded.submit_shielded_send(
         &req.anchor, &req.nullifier, &req.extra_nullifiers, &req.cm_outs, req.fee, proof,
         &req.note_ciphertexts,
@@ -835,6 +845,12 @@ pub async fn unshield_handler(
         Ok(p) => p,
         Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
     };
+    {
+        let guard = match st.state.read() { Ok(g) => g, Err(p) => p.into_inner() };
+        if let Err(e) = shielded::refuse_if_spent(guard.shielded(), &req.anchor, &[req.nullifier.as_str()]) {
+            return Json(serde_json::json!({ "ok": false, "error": e.message(), "permanent": true }));
+        }
+    }
     match st.shielded.submit_unshield(
         &req.to, req.amount, &req.anchor, &req.nullifier, &req.cm_outs, proof, req.fee,
     ) {

@@ -178,6 +178,12 @@ pub enum ShieldedSubmitError {
     /// hashes every ciphertext forever; this is the only thing stopping a sender from
     /// attaching kilobytes of junk to each output.
     CiphertextTooLong { got: usize, limit: usize },
+    /// An input nullifier is ALREADY in the chain's spent set, in the epoch the proof's
+    /// anchor belongs to. Refused at the door (2026-09-25) because until then the door
+    /// only consulted its own queue: a wallet that picked a spent note got `ok:true`, a
+    /// signed acceptance receipt and "✓ sent", and the builder's refusal arrived ~14 s
+    /// later as a reversal. Carries the RAW nullifier, as the chain's own error does.
+    AlreadySpent([u8; 32]),
 }
 
 impl ShieldedSubmitError {
@@ -225,6 +231,11 @@ impl ShieldedSubmitError {
                 "a note ciphertext is {got} bytes; the limit is {limit} (a sealed note with a \
                  full {}-byte memo is well under it)",
                 sigil_shield::note_cipher::MEMO_LEN
+            ),
+            Self::AlreadySpent(nf) => format!(
+                "nullifier {} is already spent on chain — this note was paid out before; \
+                 rescan your notes and pick an unspent one (nothing was queued)",
+                hex::encode(nf)
             ),
         }
     }
@@ -280,6 +291,28 @@ fn hex32(s: &str, field: &'static str) -> Result<[u8; 32], ShieldedSubmitError> 
     let mut out = [0u8; 32];
     out.copy_from_slice(&v);
     Ok(out)
+}
+
+/// Door check against the chain's spent set: refuse a spend whose input nullifier is
+/// already spent in the epoch its anchor belongs to — the exact test
+/// `ShieldedPool::spend_nullifier_in_epoch` applies at commit, run before anything is
+/// queued or a receipt is signed. An anchor the pool does not know is NOT refused here:
+/// the chain owns that verdict, and this check must never refuse what the chain accepts.
+/// Pure over the pool so it is tested without a node.
+pub fn refuse_if_spent(
+    pool: &sigil_state::shielded::ShieldedPool,
+    anchor: &str,
+    nullifiers: &[&str],
+) -> Result<(), ShieldedSubmitError> {
+    let anchor = hex32(anchor, "anchor")?;
+    let Some(epoch) = pool.epoch_of_anchor(&anchor) else { return Ok(()) };
+    for n in nullifiers {
+        let nf = hex32(n, "nullifier")?;
+        if pool.is_spent_in_epoch(epoch, &nf) {
+            return Err(ShieldedSubmitError::AlreadySpent(nf));
+        }
+    }
+    Ok(())
 }
 
 /// One shielded-pool operation, carrying exactly what its HTTP handler
@@ -1775,4 +1808,47 @@ mod tests {
         assert_eq!(bridge.pending_len(), 0, "a confirmed tx must leave the retry queue");
         assert_eq!(bridge.snapshot_for_mint().len(), 0, "nothing left to re-embed");
     }
+
+    /// A pool that knows `anchor` (epoch 0) and has `spent` (already epoch-scoped) in its
+    /// spent set. Built through serde because every mutator is crate-private to sigil-state.
+    fn pool_with(anchor: [u8; 32], spent: &[[u8; 32]]) -> sigil_state::shielded::ShieldedPool {
+        let mut v = serde_json::to_value(sigil_state::shielded::ShieldedPool::default()).unwrap();
+        v["anchors"] = serde_json::json!([anchor]);
+        v["nullifiers"] = serde_json::json!(spent);
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// 2026-09-25, reproduced live on sigilgraph.org: a spent note got `ok:true`, a signed
+    /// receipt and "✓ sent", then a double-spend reversal ~14 s later. The door must say no
+    /// at once, by the same epoch-scoped test the chain applies at commit.
+    #[test]
+    fn door_refuses_a_nullifier_the_chain_already_spent() {
+        let (anchor, nf) = ([9u8; 32], [0xe1u8; 32]);
+        let pool = pool_with(anchor, &[sigil_state::shielded::scoped_nullifier(0, nf)]);
+        let a = hex::encode(anchor);
+        let err = refuse_if_spent(&pool, &a, &[&hex::encode(nf)]).unwrap_err();
+        assert_eq!(err, ShieldedSubmitError::AlreadySpent(nf));
+        assert!(err.message().contains(&hex::encode(nf)), "names the raw nullifier");
+        // The SECOND input of a two-input spend is checked too — not just the first.
+        let fresh = hex::encode([3u8; 32]);
+        assert_eq!(
+            refuse_if_spent(&pool, &a, &[&fresh, &hex::encode(nf)]).unwrap_err(),
+            ShieldedSubmitError::AlreadySpent(nf)
+        );
+        assert_eq!(refuse_if_spent(&pool, &a, &[&fresh]), Ok(()), "an unspent note passes");
+    }
+
+    /// The door must never refuse what the chain would accept.
+    #[test]
+    fn door_defers_to_the_chain_on_unknown_anchors_and_other_epochs() {
+        let (anchor, nf) = ([9u8; 32], [0xe1u8; 32]);
+        // Spent in epoch 1 only: the same raw tag proven against an epoch-0 anchor is a
+        // DIFFERENT note, and the chain accepts it. Unscoped, the door would freeze it.
+        let pool = pool_with(anchor, &[sigil_state::shielded::scoped_nullifier(1, nf)]);
+        assert_eq!(refuse_if_spent(&pool, &hex::encode(anchor), &[&hex::encode(nf)]), Ok(()));
+        // An anchor the pool does not know is the chain's verdict (UnknownAnchor), not ours.
+        let pool = pool_with(anchor, &[sigil_state::shielded::scoped_nullifier(0, nf)]);
+        assert_eq!(refuse_if_spent(&pool, &hex::encode([7u8; 32]), &[&hex::encode(nf)]), Ok(()));
+    }
 }
+

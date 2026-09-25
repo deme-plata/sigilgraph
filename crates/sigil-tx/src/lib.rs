@@ -1756,7 +1756,13 @@ pub fn coinbase_is_transparent(height: u64) -> bool {
 ///
 /// Shielded coinbase notes deliberately emit nothing: naming the owner of a private note in
 /// a public event would undo the note.
-pub const MINT_REWARD_EVENT_HEIGHT: u64 = u64::MAX;
+///
+/// ACTIVATED 2026-09-25 (operator: "go, ~40 hours ahead"): measured 8.0 blk/s at h≈25,831,900,
+/// so 26,950,000 is ≈39 h out and 50,000 blocks (~1.7 h) BEFORE the fifth-root gate at
+/// 27,000,000 — two consensus activations must never share a window, or a failure cannot be
+/// attributed. Producer-only rule: followers apply the leaves as ordinary mutations and need
+/// no upgrade.
+pub const MINT_REWARD_EVENT_HEIGHT: u64 = 26_950_000;
 
 /// Does the coinbase at `height` carry `MintReward` events? The one place the rule is asked.
 pub fn mint_reward_events_active(height: u64) -> bool {

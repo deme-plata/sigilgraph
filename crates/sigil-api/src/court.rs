@@ -60,7 +60,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sigil_court::{
     bank_scope, Verdict, constitution_hash_hex, disclosure, tax_scope, verify_packet, Article, BlockEvents,
-    CourtEvent, DisclosurePacket, DisclosureRequest, Jurisdiction, Purpose, Rank,
+    CourtEvent, DisclosurePacket, DisclosureRequest, Jurisdiction, OrderId, Purpose, Rank,
     SupremeCourt, CONSTITUTION_VERSION,
 };
 use sigil_events::SigilEvent;
@@ -89,7 +89,13 @@ struct StoredPacket {
 pub struct CourtBridge {
     court: RwLock<SupremeCourt>,
     archive: RwLock<BTreeMap<u64, BlockEvents>>,
-    packets: RwLock<HashMap<[u8; 32], StoredPacket>>,
+    /// Held packets, keyed by ORDER id — unique per order by construction — and never by packet
+    /// root. The root is content-derived: two orders that disclosed the same records share it,
+    /// and before the attested-empty root every order that disclosed NOTHING shared the all-zero
+    /// one, so a root-keyed map let the second silently replace the first (measured live
+    /// 2026-09-25: `packets_held` stayed 1 while the docket grew, and the share link of the first
+    /// packet served the second). Lookups by root scan; the map holds at most `MAX_PACKETS`.
+    packets: RwLock<HashMap<OrderId, StoredPacket>>,
     seq: RwLock<u64>,
     max_blocks: usize,
     /// Public base for share links, e.g. `https://sigilgraph.org`. SIGIL's own home — never
@@ -287,21 +293,55 @@ impl CourtBridge {
         self.archive.read().map(|a| a.range(from..=to).map(|(_, b)| b.clone()).collect()).unwrap_or_default()
     }
 
-    fn store(&self, packet: DisclosurePacket) -> [u8; 32] {
+    /// Hold a sealed packet under its order id and return its root. REFUSES, with the reason, to
+    /// replace a packet already held for the same order: an overwrite here is a disclosure that
+    /// vanished with no docket entry saying so. The refusal must reach the caller's response —
+    /// a link to a packet that was never stored is worse than an error.
+    fn store(&self, packet: DisclosurePacket) -> Result<[u8; 32], String> {
         let root = packet.seal.body.packet_root;
+        let order = packet.order.id;
         let mut seq = self.seq.write().map(|mut s| { *s += 1; *s }).unwrap_or(0);
         if seq == 0 { seq = now_s(); }
-        if let Ok(mut p) = self.packets.write() {
-            p.insert(root, StoredPacket { packet, created_ts: now_s(), seq });
-            while p.len() > MAX_PACKETS {
-                if let Some(oldest) = p.values().min_by_key(|s| s.seq).map(|s| s.packet.seal.body.packet_root) {
-                    p.remove(&oldest);
-                } else {
-                    break;
-                }
+        let mut p = self.packets.write().map_err(|_| "packet store poisoned".to_string())?;
+        if let Some(held) = p.get(&order) {
+            return Err(format!(
+                "a packet for order {} is already held (root {}); refusing to replace it — request a fresh order instead",
+                hex::encode(order),
+                hex::encode(held.packet.seal.body.packet_root)
+            ));
+        }
+        p.insert(order, StoredPacket { packet, created_ts: now_s(), seq });
+        while p.len() > MAX_PACKETS {
+            if let Some(oldest) = p.values().min_by_key(|s| s.seq).map(|s| s.packet.order.id) {
+                p.remove(&oldest);
+            } else {
+                break;
             }
         }
-        root
+        Ok(root)
+    }
+
+    /// The newest held packet sealed over `root`, with when it was stored. A root may sit behind
+    /// more than one order (identical records ⇒ identical root); the share link then serves the
+    /// most recent, and revocation by root kills them all (see `court_revoke`).
+    fn packet_by_root(&self, root: &[u8; 32]) -> Option<(DisclosurePacket, u64)> {
+        let p = self.packets.read().ok()?;
+        p.values()
+            .filter(|s| s.packet.seal.body.packet_root == *root)
+            .max_by_key(|s| s.seq)
+            .map(|s| (s.packet.clone(), s.created_ts))
+    }
+
+    /// Every held order sealed over `root`, newest first, with the wallet each one discloses.
+    fn orders_by_root(&self, root: &[u8; 32]) -> Vec<(OrderId, Option<WalletId>)> {
+        let Ok(p) = self.packets.read() else { return Vec::new() };
+        let mut v: Vec<(u64, OrderId, Option<WalletId>)> = p
+            .values()
+            .filter(|s| s.packet.seal.body.packet_root == *root)
+            .map(|s| (s.seq, s.packet.order.id, s.packet.order.request.scope.subjects.iter().next().copied()))
+            .collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.into_iter().map(|(_, o, w)| (o, w)).collect()
     }
 
     fn share_url(&self, root: &[u8; 32]) -> String {
@@ -553,6 +593,9 @@ pub struct PacketLink {
     pub csv_url: String,
     pub verify_url: String,
     pub records: usize,
+    /// True when the packet discloses NOTHING: the court found no record in scope. The seal is
+    /// real, the root is bound to this order, and nothing was proven — say so at issue time.
+    pub attested_empty: bool,
     pub redacted_fields: u32,
     pub counterparties_in_clear: bool,
     pub expires_ts: u64,
@@ -584,6 +627,7 @@ fn build_link(b: &CourtBridge, p: &DisclosurePacket, reveal: bool) -> PacketLink
         csv_url: format!("{base}/v1/court/packet/{h}/csv"),
         verify_url: format!("{base}/v1/court/packet/{h}/verify"),
         records: p.records.len(),
+        attested_empty: p.records.is_empty(),
         redacted_fields: p.summary.redacted_fields,
         counterparties_in_clear: reveal,
         expires_ts: p.order.expires_ts,
@@ -706,10 +750,10 @@ async fn export_through_court(s: &AppState, request: DisclosureRequest, case: Op
     })
     .await;
     match res {
-        Ok(Ok(packet)) => {
-            s.court.store(packet.clone());
-            ApiResponse::ok(build_link(&s.court, &packet, reveal))
-        }
+        Ok(Ok(packet)) => match s.court.store(packet.clone()) {
+            Ok(_) => ApiResponse::ok(build_link(&s.court, &packet, reveal)),
+            Err(e) => ApiResponse::err(e),
+        },
         Ok(Err(e)) => ApiResponse::err(e),
         Err(e) => ApiResponse::err(format!("export task failed: {e}")),
     }
@@ -717,20 +761,19 @@ async fn export_through_court(s: &AppState, request: DisclosureRequest, case: Op
 
 fn fetch_live(s: &AppState, root_hex: &str) -> Result<DisclosurePacket, String> {
     let Some(root) = hex32(root_hex) else { return Err("packet root must be 64 hex".into()) };
-    let p = s.court.packets.read().map_err(|_| "packet store poisoned".to_string())?;
-    let Some(sp) = p.get(&root) else { return Err("no such packet: it may have expired out of the store, or the node restarted".into()) };
+    let Some((packet, created_ts)) = s.court.packet_by_root(&root) else { return Err("no such packet: it may have expired out of the store, or the node restarted".into()) };
     let now = now_s();
-    if now >= sp.packet.order.expires_ts {
-        return Err(format!("Art. XI: this disclosure expired at {} (now {}). The link is dead; a new order is required.", sp.packet.order.expires_ts, now));
+    if now >= packet.order.expires_ts {
+        return Err(format!("Art. XI: this disclosure expired at {} (now {}). The link is dead; a new order is required.", packet.order.expires_ts, now));
     }
     let c = s.court.court.read().map_err(|_| "court lock poisoned".to_string())?;
     // A revocation is on the docket; the link must die the moment it lands.
-    let revoked = c.docket().by_order(&sp.packet.order.id).iter().any(|e| matches!(e.event, CourtEvent::DisclosureRevoked { .. }));
+    let revoked = c.docket().by_order(&packet.order.id).iter().any(|e| matches!(e.event, CourtEvent::DisclosureRevoked { .. }));
     if revoked {
         return Err("this disclosure was revoked by the court; the link no longer serves".into());
     }
-    let _ = sp.created_ts;
-    Ok(sp.packet.clone())
+    let _ = created_ts;
+    Ok(packet)
 }
 
 /// **The share link.** Returns the sealed packet itself.
@@ -762,6 +805,14 @@ pub async fn court_packet_csv(State(s): State<AppState>, Path(root): Path<String
 pub struct VerifyView {
     pub valid: bool,
     pub error: Option<String>,
+    pub order_id: String,
+    /// How many records the packet carries. `0` with `valid: true` is a valid seal over NOTHING.
+    pub records: u32,
+    /// True when the packet discloses nothing: the seal attests the court found no record in
+    /// scope, its root is `BLAKE3("sigil-court-empty-packet-v1" ‖ order_id)`, and no inclusion
+    /// was proven. A consumer that reads `valid` alone will mistake this for a full check.
+    pub attested_empty: bool,
+    pub attested_empty_note: Option<&'static str>,
     pub records_proven: u32,
     pub fields_recomputed: u32,
     pub fields_attested: u32,
@@ -795,9 +846,16 @@ pub async fn court_packet_verify(State(s): State<AppState>, Path(root): Path<Str
         Ok(v) => (true, None, Some(v)),
         Err(e) => (false, Some(e.to_string()), None),
     };
+    let attested_empty = p.records.is_empty();
     ApiResponse::ok(VerifyView {
         valid,
         error: err,
+        order_id: hex::encode(p.order.id),
+        records: p.records.len() as u32,
+        attested_empty,
+        attested_empty_note: attested_empty.then_some(
+            "This packet discloses ZERO records. `valid: true` means the court's seal over an empty result is genuine and bound to this order — not that any record was checked."
+        ),
         records_proven: v.as_ref().map(|x| x.records_proven).unwrap_or(0),
         fields_recomputed: v.as_ref().map(|x| x.fields_recomputed).unwrap_or(0),
         fields_attested: v.as_ref().map(|x| x.fields_attested).unwrap_or(0),
@@ -817,16 +875,17 @@ pub struct RevokeReq { pub packet_root: String, pub reason: String, pub nonce: u
 /// with the admin token can kill any.
 pub async fn court_revoke(State(s): State<AppState>, headers: HeaderMap, Json(req): Json<RevokeReq>) -> Json<ApiResponse<serde_json::Value>> {
     let Some(root) = hex32(&req.packet_root) else { return ApiResponse::err("packet root must be 64 hex") };
-    let (order_id, subject) = {
-        let p = match s.court.packets.read() { Ok(p) => p, Err(_) => return ApiResponse::err("packet store poisoned") };
-        let Some(sp) = p.get(&root) else { return ApiResponse::err("no such packet") };
-        (sp.packet.order.id, sp.packet.order.request.scope.subjects.iter().next().copied())
-    };
+    // Every order sealed over this root. Usually one; two orders that disclosed identical records
+    // legitimately share a root, and "kill this link" has to kill the link — every packet behind
+    // it — or the older one keeps serving at the same URL.
+    let held = s.court.orders_by_root(&root);
+    if held.is_empty() { return ApiResponse::err("no such packet") }
     let admin = std::env::var("SIGIL_COURT_ADMIN_TOKEN").ok().filter(|t| !t.is_empty()).map(|t| {
         headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) == Some(t.as_str())
     }).unwrap_or(false);
-    let by_subject = match (hex32(&req.wallet), subject) {
-        (Some(w), Some(sub)) if w == sub => {
+    let signer = hex32(&req.wallet);
+    let by_subject = match signer {
+        Some(w) if held.iter().any(|(_, sub)| *sub == Some(w)) => {
             let msg = format!("sigil-court/revoke/v1\npacket:{}\nnonce:{}", req.packet_root, req.nonce);
             verify_wallet_sig(&w, &msg, &req.signature)
         }
@@ -835,15 +894,33 @@ pub async fn court_revoke(State(s): State<AppState>, headers: HeaderMap, Json(re
     if !admin && !by_subject {
         return ApiResponse::err("revocation requires the admin token, or a signature from the wallet the packet discloses");
     }
+    // Under the admin token every order behind the root dies; under a subject's signature only the
+    // orders that disclose that subject do (in practice the same set — identical records name the
+    // same subject — but the rule is stated, not assumed).
+    let targets: Vec<OrderId> = held.iter().filter(|(_, sub)| admin || *sub == signer).map(|(o, _)| *o).collect();
+    if targets.is_empty() { return ApiResponse::err("no packet under that root discloses the signing wallet") }
     let height = s.court.coverage().map(|(_, t)| t).unwrap_or(0);
-    {
+    let mut done: Vec<OrderId> = Vec::new();
+    let failed = {
         let mut c = match s.court.court.write() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
-        if let Err(e) = c.revoke_disclosure(order_id, req.reason.clone(), height) {
-            return ApiResponse::err(e.to_string());
+        let mut failed = None;
+        for order_id in &targets {
+            match c.revoke_disclosure(*order_id, req.reason.clone(), height) {
+                Ok(()) => done.push(*order_id),
+                Err(e) => { failed = Some(e.to_string()); break; }
+            }
         }
-    }
-    if let Ok(mut p) = s.court.packets.write() { p.remove(&root); }
-    ApiResponse::ok(serde_json::json!({ "revoked": req.packet_root, "order": hex::encode(order_id), "by": if admin { "operator" } else { "subject" } }))
+        failed
+    };
+    // Whatever the docket now says is revoked leaves the store, even on a partial failure.
+    if let Ok(mut p) = s.court.packets.write() { for o in &done { p.remove(o); } }
+    if let Some(e) = failed { return ApiResponse::err(e) }
+    ApiResponse::ok(serde_json::json!({
+        "revoked": req.packet_root,
+        "order": hex::encode(done[0]),
+        "orders": done.iter().map(hex::encode).collect::<Vec<_>>(),
+        "by": if admin { "operator" } else { "subject" },
+    }))
 }
 
 // ───────────────────────────── sitting: file, hear, rule, appeal ─────────────────────────────
@@ -1305,5 +1382,55 @@ mod tests {
     fn a_bad_signature_cannot_disclose_a_wallet() {
         assert!(!verify_wallet_sig(&w(3), "msg", "00"));
         assert!(!verify_wallet_sig(&w(3), "msg", &"ab".repeat(64)));
+    }
+
+    /// Order + export through the real court path, exactly as `export_through_court` does it but
+    /// synchronously, so a test can hold the packets it produces.
+    fn seal_self_disclosure(b: &CourtBridge, subject: WalletId, from: u64, to: u64) -> DisclosurePacket {
+        let request = DisclosureRequest {
+            jurisdiction: Jurisdiction::new("SELF", "citizen"),
+            purpose: Purpose::Tax,
+            scope: tax_scope(subject, from, to),
+            key_kind: None,
+            reason: "test".into(),
+            requested_ts: 1_000,
+            ttl_secs: 3_600,
+        };
+        let blocks = b.blocks_in(from, to);
+        let mut c = b.court.write().unwrap();
+        let id = disclosure::order_id(&request, to, 1_000);
+        let panel = c.bench().select_panel(&id, 3).unwrap();
+        let votes: Vec<(WalletId, bool)> = panel.iter().map(|p| (*p, true)).collect();
+        let order = c.order_disclosure(request, None, &votes, to, 1_000).unwrap();
+        c.export_disclosure(order, &blocks, &[], to, 1_000).unwrap()
+    }
+
+    /// Two orders that disclose NOTHING must both stay held and both stay reachable by root.
+    /// Before 2026-09-25 they shared the all-zero Merkle root, the store was keyed by it, and the
+    /// second silently replaced the first (measured on the live node: `packets_held` 1, docket
+    /// 8 → 10, the first link serving the second order).
+    #[test]
+    fn two_empty_packets_are_both_held_and_neither_root_is_zero() {
+        let b = bridge(); // archive 100..=109, events for w(7)/w(8) only
+        let a = seal_self_disclosure(&b, w(9), 100, 104);
+        let z = seal_self_disclosure(&b, w(9), 105, 109);
+        assert_eq!((a.records.len(), z.records.len()), (0, 0), "w(9) has no events: both packets are empty");
+        assert!(a.summary.attested_empty && z.summary.attested_empty);
+        assert_ne!(a.order.id, z.order.id);
+        assert_ne!(a.seal.body.packet_root, [0u8; 32], "an empty packet no longer seals the zero root");
+        assert_ne!(a.seal.body.packet_root, z.seal.body.packet_root, "two empty orders, two roots");
+
+        let ra = b.store(a.clone()).unwrap();
+        let rz = b.store(z.clone()).unwrap();
+        assert_eq!(b.packets.read().unwrap().len(), 2, "the second empty packet must not replace the first");
+        assert_eq!(b.packet_by_root(&ra).map(|(p, _)| p.order.id), Some(a.order.id));
+        assert_eq!(b.packet_by_root(&rz).map(|(p, _)| p.order.id), Some(z.order.id));
+        assert_eq!(b.orders_by_root(&ra), vec![(a.order.id, Some(w(9)))]);
+        assert_eq!(b.packet_by_root(&[0u8; 32]).map(|(p, _)| p.order.id), None, "nothing answers to the zero root any more");
+
+        // The same order offered a second time is refused with a reason, never replaced.
+        let err = b.store(a.clone()).unwrap_err();
+        assert!(err.contains("already held"), "{err}");
+        assert_eq!(b.packets.read().unwrap().len(), 2);
     }
 }

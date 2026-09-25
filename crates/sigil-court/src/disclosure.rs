@@ -216,6 +216,12 @@ pub struct Summary {
     /// token hex → totals
     pub per_token: BTreeMap<String, TokenTotals>,
     pub per_kind: BTreeMap<String, u32>,
+    /// True when the packet discloses NOTHING. Stated beside `records: 0` so a reader cannot take
+    /// "nothing to disclose" for "everything checked": the seal on such a packet attests that the
+    /// court found no record in scope — it proves no inclusion and recomputes no field. Absent
+    /// (false) in packets sealed before 2026-09-25.
+    #[serde(default)]
+    pub attested_empty: bool,
 }
 
 /// Sight without authority (see `sigil_shield::viewing`). Only ever a viewing key.
@@ -268,9 +274,28 @@ pub struct DisclosurePacket {
 }
 
 impl DisclosurePacket {
+    /// The bare Merkle root over the records — **all-zero for zero records. Never seal with this.**
+    ///
+    /// 🪤 An all-zero root is the same for EVERY empty packet, so two orders that disclosed nothing
+    /// collided on it: measured on the live node 2026-09-25, the second empty self-disclosure
+    /// silently replaced the first in the root-keyed packet store and `/verify` answered
+    /// `valid:true` for a packet that had judged nothing. The sealing and verifying paths use
+    /// [`Self::packet_root_for`]. This stays, unchanged, for a caller that wants the Merkle root of
+    /// a record set it already knows is non-empty.
     pub fn packet_root(records: &[DisclosedRecord]) -> [u8; 32] {
         let leaves: Vec<[u8; 32]> = records.iter().map(|r| r.record_leaf()).collect();
         merkle::root(&leaves)
+    }
+
+    /// The root the seal commits to.
+    ///
+    /// With one or more records this IS [`Self::packet_root`] — the plain Merkle root, byte for
+    /// byte, so every packet ever sealed with records keeps verifying. With ZERO records it is
+    /// [`attested_empty_root`]: `BLAKE3("sigil-court-empty-packet-v1" ‖ order_id)`, non-zero and
+    /// different for every order, so "nothing to disclose" is a commitment the court made about
+    /// THIS order rather than one value shared by every empty packet in existence.
+    pub fn packet_root_for(order_id: &OrderId, records: &[DisclosedRecord]) -> [u8; 32] {
+        if records.is_empty() { attested_empty_root(order_id) } else { Self::packet_root(records) }
     }
     pub fn to_json(&self) -> String { serde_json::to_string_pretty(self).unwrap_or_default() }
 
@@ -288,6 +313,21 @@ impl DisclosurePacket {
         }
         s
     }
+}
+
+/// Domain tag of the root sealed over a packet that discloses NOTHING. Versioned: a change here is
+/// a change to what every empty packet commits to.
+pub const EMPTY_PACKET_DOMAIN: &[u8] = b"sigil-court-empty-packet-v1";
+
+/// `BLAKE3(EMPTY_PACKET_DOMAIN ‖ order_id)` — the root an empty packet is sealed over. Non-zero, and
+/// bound to the one order it answers, so it can neither collide with another order's empty packet
+/// nor with the (all-zero) Merkle root of an empty set that the chain uses for a block with no
+/// events. See [`DisclosurePacket::packet_root_for`].
+pub fn attested_empty_root(order_id: &OrderId) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(EMPTY_PACKET_DOMAIN);
+    h.update(order_id);
+    *h.finalize().as_bytes()
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -575,6 +615,7 @@ pub fn summarize(order: &DisclosureOrder, records: &[DisclosedRecord]) -> Summar
         to_height: order.request.scope.to_height,
         first_height: records.first().map(|r| r.height),
         last_height: records.last().map(|r| r.height),
+        attested_empty: records.is_empty(),
         ..Default::default()
     };
     let amt = |r: &DisclosedRecord, k: &str| r.fields.get(k).and_then(|v| v.parse::<u128>().ok()).unwrap_or(0);
@@ -646,7 +687,7 @@ pub fn export(order: &DisclosureOrder, blocks: &[BlockEvents], viewing_keys: &[(
         schema: PACKET_SCHEMA.into(),
         order_id: order.id,
         order_digest: order_digest(order),
-        packet_root: DisclosurePacket::packet_root(&records),
+        packet_root: DisclosurePacket::packet_root_for(&order.id, &records),
         court_root,
         constitution_hash: constitution_hash(),
         issued_ts: now_ts,
@@ -677,6 +718,10 @@ pub struct Verified {
     pub fields_recomputed: u32,
     /// Records whose cleartext fields rest on the court's seal (minimized records).
     pub fields_attested: u32,
+    /// True when the packet carries ZERO records: the seal is a valid attestation that the court
+    /// found nothing in scope, and nothing was proven under any block root. Never read an `Ok(_)`
+    /// from [`verify_packet`] as "everything checked" without looking here.
+    pub attested_empty: bool,
 }
 
 /// The recipient's check. `roots` = block height → `event_log_root` from the block headers they
@@ -696,8 +741,10 @@ pub fn verify_packet(p: &DisclosurePacket, roots: &BTreeMap<u64, [u8; 32]>, cour
     if b.constitution_hash != constitution_hash() { return Err(DisclosureError::BadSeal("sealed under a different constitution".into())); }
     if now_ts >= b.expires_ts { return Err(DisclosureError::Expired { expires_ts: b.expires_ts, now: now_ts }); }
     if b.records != p.records.len() as u32 || b.viewing_grants != p.viewing_grants.len() as u32 { return Err(DisclosureError::BadSeal("record/grant counts differ from seal".into())); }
-    if DisclosurePacket::packet_root(&p.records) != b.packet_root { return Err(DisclosureError::PacketRootMismatch); }
-    let mut v = Verified { records_proven: 0, fields_recomputed: 0, fields_attested: 0 };
+    // `b.order_id == p.order.id` was checked above, so binding to the packet's order is binding to
+    // the sealed one.
+    if DisclosurePacket::packet_root_for(&p.order.id, &p.records) != b.packet_root { return Err(DisclosureError::PacketRootMismatch); }
+    let mut v = Verified { records_proven: 0, fields_recomputed: 0, fields_attested: 0, attested_empty: p.records.is_empty() };
     for r in &p.records {
         let root = roots.get(&r.height).ok_or(DisclosureError::RootUnknown { height: r.height })?;
         if !merkle::verify(r.leaf, &r.proof, *root) { return Err(DisclosureError::RecordNotProven { height: r.height, index: r.index }); }
@@ -793,7 +840,7 @@ mod tests {
         assert_eq!(p.summary.redacted_fields, 3);
         assert_eq!(p.viewing_grants.len(), 1);
         let v = verify_packet(&p, &roots(&c), &keys.pk, 3_000).unwrap();
-        assert_eq!(v, Verified { records_proven: 5, fields_recomputed: 0, fields_attested: 5 });
+        assert_eq!(v, Verified { records_proven: 5, fields_recomputed: 0, fields_attested: 5, attested_empty: false });
         assert!(p.tax_csv().lines().count() == 6);
     }
 
@@ -824,7 +871,7 @@ mod tests {
         assert_eq!(p.records.len(), 2);
         assert!(p.records.iter().all(|r| r.full_event.is_some() && r.redacted.is_empty()));
         let v = verify_packet(&p, &roots(&c), &keys.pk, 3_000).unwrap();
-        assert_eq!(v, Verified { records_proven: 2, fields_recomputed: 2, fields_attested: 0 });
+        assert_eq!(v, Verified { records_proven: 2, fields_recomputed: 2, fields_attested: 0, attested_empty: false });
         // tamper an amount → packet root moves → seal no longer covers it
         p.records[0].fields.insert("amount".into(), "1".into());
         assert_eq!(verify_packet(&p, &roots(&c), &keys.pk, 3_000), Err(DisclosureError::PacketRootMismatch));
@@ -895,5 +942,65 @@ mod tests {
         assert_eq!(a, pseudonym(&[1; 32], "aa"));
         assert_ne!(a, pseudonym(&[2; 32], "aa"));
         assert_ne!(a, pseudonym(&[1; 32], "ab"));
+    }
+
+    /// Pins the packet root of a NON-EMPTY packet. The value was computed on the tree BEFORE the
+    /// attested-empty root landed (rocky-help-0925, 2026-09-25), so if it ever moves, a packet
+    /// sealed under the old rule has stopped verifying.
+    #[test]
+    fn non_empty_packet_root_is_pinned() {
+        let keys = CourtKeys::from_seed(&[42; 32]);
+        let c = chain();
+        let o = order(Purpose::Tax, tax_scope(w(7), 0, 100), Some(KeyKind::Viewing));
+        let p = export(&o, &c, &[(w(7), [0xAB; 32])], [1; 32], &keys, 2_000).unwrap();
+        assert_eq!(p.records.len(), 5);
+        const PINNED: &str = "13484a31116d3fa96a2a9505b3f084f9052408b446f57cabc366d5596ffdc385";
+        assert_eq!(hex::encode(p.seal.body.packet_root), PINNED);
+        // With at least one record the sealing path IS the plain Merkle root.
+        assert_eq!(DisclosurePacket::packet_root_for(&o.id, &p.records), DisclosurePacket::packet_root(&p.records));
+        assert!(!p.summary.attested_empty);
+    }
+
+    /// Two orders that disclose NOTHING must not share a root. Before 2026-09-25 both sealed the
+    /// all-zero Merkle root of an empty set, so the node's root-keyed packet store let the second
+    /// overwrite the first (measured live), and a verifier could not tell the two apart.
+    #[test]
+    fn two_empty_orders_get_distinct_non_zero_roots_and_still_verify() {
+        let keys = CourtKeys::from_seed(&[42; 32]);
+        let c = chain();
+        // No block lies in either range, so both packets are empty — for different orders.
+        let a = order(Purpose::Tax, tax_scope(w(7), 50, 60), None);
+        let z = order(Purpose::Tax, tax_scope(w(7), 70, 80), None);
+        assert_ne!(a.id, z.id);
+        let pa = export(&a, &c, &[], [1; 32], &keys, 2_000).unwrap();
+        let pz = export(&z, &c, &[], [1; 32], &keys, 2_000).unwrap();
+        assert_eq!((pa.records.len(), pz.records.len()), (0, 0));
+        // The bare Merkle root of nothing is still zero — which is exactly why it is not sealed.
+        assert_eq!(DisclosurePacket::packet_root(&[]), [0u8; 32]);
+        let (ra, rz) = (pa.seal.body.packet_root, pz.seal.body.packet_root);
+        assert_ne!(ra, [0u8; 32]);
+        assert_ne!(rz, [0u8; 32]);
+        assert_ne!(ra, rz, "an empty packet's root must be bound to its order");
+        assert_eq!(ra, attested_empty_root(&a.id));
+        assert_eq!(rz, attested_empty_root(&z.id));
+        assert_eq!(ra, DisclosurePacket::packet_root_for(&a.id, &[]));
+        // Emptiness is stated in the summary, not merely inferable from the count.
+        assert!(pa.summary.attested_empty && pa.summary.records == 0);
+        // The seal round-trips, and the verifier SAYS it attested nothing.
+        let v = verify_packet(&pa, &roots(&c), &keys.pk, 3_000).unwrap();
+        assert_eq!(v, Verified { records_proven: 0, fields_recomputed: 0, fields_attested: 0, attested_empty: true });
+        verify_packet(&pz, &roots(&c), &keys.pk, 3_000).unwrap();
+        // An empty packet sealed the OLD way (all-zero root), re-signed by the real court key so
+        // that only the root rule can refuse it: refused. This is the exact shape that answered
+        // `valid:true` on the live node.
+        let mut legacy = pa.clone();
+        legacy.seal.body.packet_root = [0u8; 32];
+        legacy.seal.sig_hex = hex::encode(flux_sqisign::sign(&legacy.seal.body.signing_bytes(), &keys.sk, &keys.pk).unwrap());
+        assert_eq!(verify_packet(&legacy, &roots(&c), &keys.pk, 3_000), Err(DisclosureError::PacketRootMismatch));
+        // And one order's empty root does not verify under the other order, even freshly sealed.
+        let mut crossed = pa.clone();
+        crossed.seal.body.packet_root = rz;
+        crossed.seal.sig_hex = hex::encode(flux_sqisign::sign(&crossed.seal.body.signing_bytes(), &keys.sk, &keys.pk).unwrap());
+        assert_eq!(verify_packet(&crossed, &roots(&c), &keys.pk, 3_000), Err(DisclosureError::PacketRootMismatch));
     }
 }

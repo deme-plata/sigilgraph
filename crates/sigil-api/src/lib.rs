@@ -2273,7 +2273,15 @@ pub async fn integrity_handler(State(st): State<AppState>) -> Json<serde_json::V
             "dex_state_root": hex::encode(roots.dex_state_root),
             "event_log_root": hex::encode(roots.event_log_root),
             "contract_state_root": hex::encode(roots.contract_state_root),
+            // THE FIFTH ROOT — the shielded pool commitment (notes root, note count,
+            // nullifier multiset, value locked, epoch, sealed-epoch roots). Computed on
+            // every node; carried in the header from `shielded_pool_root_in_header`.
+            "shielded_pool_root": hex::encode(guard.shielded_pool_root()),
         },
+        // `true` once `applied_height` ≥ sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT:
+        // from there a follower REFUSES a block whose header root differs from its own.
+        "shielded_pool_root_in_header": height.map(sigil_header::shielded_pool_root_required),
+        "shielded_pool_root_activation_height": sigil_header::shielded_pool_root_activation_height(),
         "native_supply": supply.to_string(),
         "shielded": {
             "anchor": hex::encode(pool.current_root()),

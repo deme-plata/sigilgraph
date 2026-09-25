@@ -212,6 +212,7 @@ fn mk_wedge_header(height: u64, parent: sigil_header::BlockHash, seed: u64) -> S
         sig_scheme: scheme, producer: [0u8; 32],
         producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
         topology_commitment: None,
+        shielded_pool_root: None,
     }
 }
 

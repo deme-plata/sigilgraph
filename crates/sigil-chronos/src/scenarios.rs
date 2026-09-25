@@ -156,6 +156,45 @@ pub fn tamper_each_of_four_roots() -> ScenarioOutcome {
     }
 }
 
+/// THE FIFTH ROOT at its gate: a block minted at/after the activation height carries
+/// `shielded_pool_root`; an honest one is applied, a tampered one is a Divergence, one
+/// with the root missing is Rejected at precheck, and — with the gate back at its real
+/// height — a PREMATURE root below the gate is Rejected too. Lowers the process-global
+/// activation for its own duration and restores it.
+pub fn tamper_shielded_pool_root_at_gate() -> ScenarioOutcome {
+    sigil_header::override_shielded_pool_root_activation_for_simulation(1);
+    let mut detail = Vec::new();
+    let mut all_ok = true;
+    let mut producer = producer_with_send(1, 2, 100);
+    let mut block = producer.produce_one().expect("mint");
+    let has_root = block.header.shielded_pool_root.is_some();
+    all_ok &= has_root;
+    detail.push(format!("minted-with-root:{}", if has_root { "yes" } else { "NO" }));
+    let honest = fresh_follower().apply_external_block(&block) == ApplyOutcome::Ok;
+    all_ok &= honest;
+    detail.push(format!("honest:{}", if honest { "applied" } else { "REFUSED" }));
+    let genuine = block.header.shielded_pool_root;
+    block.header.shielded_pool_root = Some([0x55; 32]);
+    let caught = fresh_follower().apply_external_block(&block) == ApplyOutcome::Divergence;
+    all_ok &= caught;
+    detail.push(format!("tampered:{}", if caught { "caught" } else { "MISSED" }));
+    block.header.shielded_pool_root = None;
+    let missing = fresh_follower().apply_external_block(&block) == ApplyOutcome::Rejected;
+    all_ok &= missing;
+    detail.push(format!("missing-at-gate:{}", if missing { "rejected" } else { "ACCEPTED" }));
+    // Gate back at its compiled-in height (27 M): the same root at height 1 is premature.
+    sigil_header::override_shielded_pool_root_activation_for_simulation(u64::MAX);
+    block.header.shielded_pool_root = genuine;
+    let premature = fresh_follower().apply_external_block(&block) == ApplyOutcome::Rejected;
+    all_ok &= premature;
+    detail.push(format!("premature-below-gate:{}", if premature { "rejected" } else { "ACCEPTED" }));
+    if all_ok {
+        ScenarioOutcome::pass("tamper_shielded_pool_root_at_gate", format!("fifth root gated + checked — {}", detail.join(" ")))
+    } else {
+        ScenarioOutcome::fail("tamper_shielded_pool_root_at_gate", format!("fifth root NOT enforced — {}", detail.join(" ")))
+    }
+}
+
 /// Re-submit an already-applied block. The first application succeeds; the
 /// replay must be Rejected (the follower already advanced past that height).
 pub fn replay_attack() -> ScenarioOutcome {
@@ -396,6 +435,7 @@ pub fn run_library() -> Vec<ScenarioOutcome> {
         double_spend(),
         byzantine_tampered_block(),
         tamper_each_of_four_roots(),
+        tamper_shielded_pool_root_at_gate(),
         replay_attack(),
         equivocation(),
         partition_safety(),
@@ -489,6 +529,6 @@ mod tests {
             "scenario(s) failed: {:?}",
             failed.iter().map(|r| (r.name, &r.detail)).collect::<Vec<_>>()
         );
-        assert_eq!(results.len(), 11, "library should have 11 scenarios");
+        assert_eq!(results.len(), 12, "library should have 12 scenarios");
     }
 }

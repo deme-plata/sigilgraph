@@ -88,6 +88,11 @@ pub struct BackfillReq {
     /// ~73 B/header), beating lz4 (11.0×) at the same compress speed AND faster decomp.
     /// Compat both ways: old servers ignore unknown JSON fields → reply 'H' (we still
     /// decode it); old clients omit the field → serde defaults 0 → new servers reply 'H'.
+    /// 2026-09-25: **5** = `'V'+zstd(bincode)` of the FIFTH-ROOT header layout
+    /// (`sigil_header::HEADER_PAGE_CODEC_V1`). Codecs 0/1 are frozen on the pre-fifth-root
+    /// byte layout, so an old node answering a codec-5 request with `'H'` is still decoded
+    /// (as legacy, root `None`) and an old client asking for 0/1 keeps getting the bytes it
+    /// always did. Positional bincode is not cross-version, hence the split.
     #[serde(default)]
     pub codec: u8,
 }
@@ -1770,7 +1775,7 @@ impl P2PBlockSync {
                                     // the responder already clamped to lo+serve_cap (32768 default), so
                                     // this probe never learned a tip further than that anyway, and
                                     // peer_best_height is independently fed by the oracle/tipfetch feed.
-                                    &BackfillReq { from: probe_from, to: probe_from.saturating_add(CHUNK), headers_only: true, codec: 1 }
+                                    &BackfillReq { from: probe_from, to: probe_from.saturating_add(CHUNK), headers_only: true, codec: sigil_header::HEADER_PAGE_CODEC_V1 }
                                 ).unwrap();
                                 let n = net.clone();
                                 let tx = probe_tx.clone();
@@ -1861,7 +1866,7 @@ impl P2PBlockSync {
                             // clamps [from, min(to, its_tip)] and returns the recent headers it has.
                             let rbase = align_base(peer_best.saturating_sub(RECENT_WINDOW), CHUNK, sync_base);
                             let payload = serde_json::to_vec(
-                                &BackfillReq { from: rbase, to: rbase + CHUNK, headers_only: true, codec: 1 }
+                                &BackfillReq { from: rbase, to: rbase + CHUNK, headers_only: true, codec: sigil_header::HEADER_PAGE_CODEC_V1 }
                             ).unwrap();
                             let n = net.clone();
                             let tx = recent_tx.clone();
@@ -2124,7 +2129,7 @@ impl P2PBlockSync {
                                     }
                                     let req_to = if frontier_want_narrow { start.saturating_add(1) } else { start + CHUNK };
                                     let payload = serde_json::to_vec(
-                                        &BackfillReq { from: start, to: req_to, headers_only: true, codec: 1 } // v0.58: span==stride(CHUNK) so look-ahead TILES contiguous (was use_chunk -> gaps)
+                                        &BackfillReq { from: start, to: req_to, headers_only: true, codec: sigil_header::HEADER_PAGE_CODEC_V1 } // v0.58: span==stride(CHUNK) so look-ahead TILES contiguous (was use_chunk -> gaps)
                                     ).unwrap();
                                     let n = net.clone();
                                     let tx = done_tx.clone();
@@ -2511,7 +2516,7 @@ impl P2PBlockSync {
                                 if let Some(peer) = net.connected_peers().first().cloned() {
                                     pass2_inflight = true;
                                     let payload = serde_json::to_vec(
-                                        &BackfillReq { from, to, headers_only: true, codec: 1 }
+                                        &BackfillReq { from, to, headers_only: true, codec: sigil_header::HEADER_PAGE_CODEC_V1 }
                                     ).unwrap();
                                     let n = net.clone();
                                     let tx = pass2_tx.clone();
@@ -2558,7 +2563,7 @@ impl P2PBlockSync {
                                     vcatch_inflight = true;
                                     let to = (v + CHUNK).min(s);
                                     let payload = serde_json::to_vec(
-                                        &BackfillReq { from: v, to, headers_only: true, codec: 1 }
+                                        &BackfillReq { from: v, to, headers_only: true, codec: sigil_header::HEADER_PAGE_CODEC_V1 }
                                     ).unwrap();
                                     let n = net.clone();
                                     let tx = vcatch_tx.clone();
@@ -3211,6 +3216,7 @@ mod lane3_decode_batch_bench {
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
+            shielded_pool_root: None,
         }
     }
 

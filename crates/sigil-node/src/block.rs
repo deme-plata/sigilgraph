@@ -40,6 +40,20 @@ impl Block {
         self.header.event_log_root      == computed.event_log_root &&
         self.header.contract_state_root == computed.contract_state_root
     }
+
+    /// THE FIFTH ROOT check: from `sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT`
+    /// the header must carry exactly the shielded pool root this node computed after
+    /// applying the body; below it the header must carry none (a premature root would
+    /// hash differently on every node that has not activated). `precheck` refuses the
+    /// presence mismatch first; this is the value check, kept gate-aware on purpose so
+    /// the two rules cannot drift.
+    pub fn check_shielded_pool_root(&self, computed: [u8; 32]) -> bool {
+        let required = sigil_header::shielded_pool_root_required(self.header.height);
+        match self.header.shielded_pool_root {
+            Some(r) => required && r == computed,
+            None => !required,
+        }
+    }
 }
 
 /// Test-only: build a tiny `n`-block chain of well-formed-but-fake blocks for
@@ -89,6 +103,7 @@ pub(crate) fn __test_chain(n: u64) -> Vec<Block> {
                 producer: [0u8; 32],
                 producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             };
             Block {
                 header,

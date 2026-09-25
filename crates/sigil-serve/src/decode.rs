@@ -52,7 +52,14 @@ pub fn inflate_zstd(frame: &[u8], max_out: u64) -> Option<Vec<u8>> {
 /// inflate then `bincode::deserialize::<Vec<header>>`. `None` on any failure.
 pub fn decode_zstd_header_page(frame: &[u8], max_out: u64) -> Option<Vec<SigilBlockHeaderV0>> {
     let inflated = inflate_zstd(frame, max_out)?;
-    bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&inflated).ok()
+    // 'Z' pages carry the pre-fifth-root (legacy) layout — see `sigil_header::SigilBlockHeaderV0Legacy`.
+    sigil_header::decode_legacy_header_page(&inflated)
+}
+
+/// A codec-5 (`'V'`) page: zstd of the FULL header layout, fifth root included.
+pub fn decode_v1_header_page(frame: &[u8], max_out: u64) -> Option<Vec<SigilBlockHeaderV0>> {
+    let inflated = inflate_zstd(frame, max_out)?;
+    sigil_header::decode_v1_header_page(&inflated)
 }
 
 /// Decode ONE tagged transport page as the prod wire frames it:
@@ -62,7 +69,8 @@ pub fn decode_zstd_header_page(frame: &[u8], max_out: u64) -> Option<Vec<SigilBl
 pub fn decode_tagged_header_page(page: &[u8], max_out: u64) -> Option<Vec<SigilBlockHeaderV0>> {
     match page.first()? {
         b'Z' => decode_zstd_header_page(&page[1..], max_out),
-        b'H' => bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&page[1..]).ok(),
+        b'H' => sigil_header::decode_legacy_header_page(&page[1..]),
+        &sigil_header::HEADER_PAGE_TAG_V1 => decode_v1_header_page(&page[1..], max_out),
         _ => None,
     }
 }
@@ -192,6 +200,8 @@ mod tests {
             sig_scheme: scheme,
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+            topology_commitment: None,
+            shielded_pool_root: None,
         }
     }
 
@@ -206,13 +216,14 @@ mod tests {
         chain
     }
 
-    /// Page a chain into CHUNK-sized 'Z' blobs (tagless zstd of bincode(Vec<header>)),
-    /// exactly as the responder emits and commit_pipeline_bench measures.
+    /// Page a chain into CHUNK-sized 'Z' blobs (tagless zstd of the LEGACY-layout
+    /// bincode(Vec<header>) — exactly the bytes `serve_read::encode_headers` emits for
+    /// codecs 0/1, see `sigil_header::SigilBlockHeaderV0Legacy`).
     fn zstd_pages(chain: &[SigilBlockHeaderV0], chunk: usize) -> Vec<Vec<u8>> {
         chain
             .chunks(chunk)
             .map(|c| {
-                let raw = bincode::serialize(&c.to_vec()).expect("ser");
+                let raw = sigil_header::encode_legacy_header_page(c);
                 zstd::encode_all(&raw[..], 1).expect("zstd")
             })
             .collect()
@@ -222,7 +233,7 @@ mod tests {
         let mut out = Vec::new();
         for z in pages {
             let inf = inflate_zstd(z, DEFAULT_MAX_INFLATE).expect("inflate");
-            let mut v: Vec<SigilBlockHeaderV0> = bincode::deserialize(&inf).expect("de");
+            let mut v: Vec<SigilBlockHeaderV0> = sigil_header::decode_legacy_header_page(&inf).expect("de");
             out.append(&mut v);
         }
         out
@@ -261,11 +272,25 @@ mod tests {
         let par = decode_tagged_header_pages_parallel(&z, DEFAULT_MAX_INFLATE);
         assert_eq!(par, chain);
 
-        // a single 'H' (raw bincode) page also decodes
-        let raw = bincode::serialize(&chain[0..10].to_vec()).unwrap();
+        // a single 'H' (raw legacy bincode) page also decodes
+        let raw = sigil_header::encode_legacy_header_page(&chain[0..10]);
         let mut h_page = vec![b'H'];
         h_page.extend(raw);
         assert_eq!(decode_tagged_header_page(&h_page, DEFAULT_MAX_INFLATE).unwrap().len(), 10);
+        // a 'V' (codec 5) page carries the FULL layout — a gated header keeps its fifth root
+        let mut gated = chain[0..10].to_vec();
+        gated[3].shielded_pool_root = Some([0x5A; 32]);
+        let v_body = zstd::encode_all(&sigil_header::encode_v1_header_page(&gated)[..], 1).unwrap();
+        let mut v_page = vec![sigil_header::HEADER_PAGE_TAG_V1];
+        v_page.extend(v_body);
+        let back = decode_tagged_header_page(&v_page, DEFAULT_MAX_INFLATE).unwrap();
+        assert_eq!(back, gated, "'V' pages round-trip the fifth root");
+        // and the same headers through a legacy page lose it — by design, not by accident
+        let mut z_page = vec![b'Z'];
+        z_page.extend(zstd::encode_all(&sigil_header::encode_legacy_header_page(&gated)[..], 1).unwrap());
+        let lossy = decode_tagged_header_page(&z_page, DEFAULT_MAX_INFLATE).unwrap();
+        assert!(lossy[3].shielded_pool_root.is_none());
+        assert_ne!(lossy[3].hash(), gated[3].hash());
     }
 
     #[test]

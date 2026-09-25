@@ -266,7 +266,7 @@ pub fn build_block_body(
     height: u64,
     reward: Option<u128>,
     txs: &[SignedTx],
-) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>, [u8; 32]) {
     build_block_body_for(state, height, reward, txs, producer_wallet())
 }
 
@@ -287,7 +287,7 @@ pub fn build_block_body_for(
     reward: Option<u128>,
     txs: &[SignedTx],
     producer: WalletId,
-) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>, [u8; 32]) {
     build_block_body_for_with_schedule(state, height, reward, txs, producer, sigil_state::MASTER_WALLET_ROTATIONS)
 }
 
@@ -301,7 +301,7 @@ pub fn build_block_body_for_with_schedule(
     txs: &[SignedTx],
     producer: WalletId,
     schedule: &[(u64, WalletId)],
-) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>, [u8; 32]) {
     let mut work = state.clone();
     let mut mutations: Vec<StateMutation> = Vec::new();
     let mut events: Vec<sigil_events::SigilEvent> = Vec::new();
@@ -403,7 +403,10 @@ pub fn build_block_body_for_with_schedule(
         .collect();
     work.restore_block_event_log(&event_leaves);
     let roots = work.roots();
-    (StateTransition { at_height: height, mutations }, roots, events, included)
+    // THE FIFTH ROOT, from the same post-transition state as the four — the follower's
+    // `ChainTip::apply` recomputes it from ITS state and refuses the block on mismatch.
+    let pool_root = work.shielded_pool_root();
+    (StateTransition { at_height: height, mutations }, roots, events, included, pool_root)
 }
 
 /// [`build_block_body_for`], but the coinbase is [`split_coinbase_mutations`]
@@ -423,7 +426,7 @@ pub fn build_block_body_for_shares(
     txs: &[SignedTx],
     winner: WalletId,
     shares: &std::collections::HashMap<WalletId, u64>,
-) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>, [u8; 32]) {
     build_block_body_for_shares_with_schedule(state, height, reward, txs, winner, shares, sigil_state::MASTER_WALLET_ROTATIONS)
 }
 
@@ -437,7 +440,7 @@ pub fn build_block_body_for_shares_with_schedule(
     winner: WalletId,
     shares: &std::collections::HashMap<WalletId, u64>,
     schedule: &[(u64, WalletId)],
-) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>, [u8; 32]) {
     let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
 
     // Re-apply the coinbase mutations against a fresh evolving clone (mirrors
@@ -544,7 +547,10 @@ pub fn build_block_body_for_shares_with_schedule(
         .collect();
     work.restore_block_event_log(&event_leaves);
     let roots = work.roots();
-    (StateTransition { at_height: height, mutations }, roots, events, included)
+    // THE FIFTH ROOT, from the same post-transition state as the four — the follower's
+    // `ChainTip::apply` recomputes it from ITS state and refuses the block on mismatch.
+    let pool_root = work.shielded_pool_root();
+    (StateTransition { at_height: height, mutations }, roots, events, included, pool_root)
 }
 
 /// Full pool-share coinbase: split `reward` proportionally over `shares`
@@ -1592,7 +1598,7 @@ mod tests {
             &sk, &pk,
         );
 
-        let (transition, roots, events, included) = build_block_body(&base, 1, Some(0), &[tx]);
+        let (transition, roots, events, included, _pool_root) = build_block_body(&base, 1, Some(0), &[tx]);
 
         // Guard first: with no events this whole test passes vacuously at all-zero, which is the
         // exact blindness that hid the bug.
@@ -1636,8 +1642,8 @@ mod tests {
         );
 
         // build the block body (coinbase + the send) on two independent nodes
-        let (tr1, r1, ev1, inc1) = build_block_body(&base, 1, Some(0), &[tx.clone()]);
-        let (tr2, r2, _ev2, inc2) = build_block_body(&base, 1, Some(0), &[tx]);
+        let (tr1, r1, ev1, inc1, _p1) = build_block_body(&base, 1, Some(0), &[tx.clone()]);
+        let (tr2, r2, _ev2, inc2, _p2) = build_block_body(&base, 1, Some(0), &[tx]);
 
         // The transparent send is retired chain-wide, so neither node includes it.
         assert!(sigil_tx::SHIELDED_ONLY_HEIGHT == 0, "this test encodes the shielded-only policy");
@@ -1701,6 +1707,7 @@ mod tests {
                 sig_scheme: SigScheme::SqiSign5, producer: [0u8; 32],
                 producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             };
             Block { header, transition: tr, events: vec![] }
         }
@@ -1728,6 +1735,7 @@ mod tests {
             all.iter().map(|b| (b.hash(), *b)).collect();
         let view = |b: &Block| BlockView::from(&b.header);
         let cfg = || BraidConfig {
+            final_quorum: None,
             final_depth: 2,
             max_window: 64,
             max_pending: 64,

@@ -488,6 +488,15 @@ impl SigilState {
     /// [`commit_state_transition`].
     /// Read-only view of the shielded pool. Mutation is only possible through
     /// [`commit_state_transition`], like every other part of state.
+    /// THE FIFTH ROOT: the shielded pool commitment the header carries from
+    /// `sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT` — see
+    /// [`ShieldedPool::pool_root`](shielded::ShieldedPool::pool_root). Kept beside
+    /// [`roots`](Self::roots) rather than inside [`StateRoots`] so the four-root tip-proof
+    /// and heartbeat wire shapes stay byte-identical.
+    pub fn shielded_pool_root(&self) -> Root {
+        self.shielded.pool_root()
+    }
+
     pub fn shielded(&self) -> &shielded::ShieldedPool {
         &self.shielded
     }

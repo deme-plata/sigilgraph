@@ -335,6 +335,58 @@ pub struct ShieldedPool {
     /// re-open the exact replay hole `DuplicateCommitment` was added to close.
     #[serde(skip)]
     pub(crate) seen_commitments: Option<BTreeSet<[u8; 32]>>,
+
+    /// Memo for [`pool_root`](Self::pool_root): the sparse notes root keyed by
+    /// `(epoch, notes.len())`. Derived, never serialized, ignored by `PartialEq`;
+    /// reset at every note append and epoch rotation (and self-checking by key, so a
+    /// missed reset costs a recompute, never a wrong root).
+    #[serde(skip)]
+    pub(crate) notes_root_memo: Memo<(u32, usize, [u8; 32])>,
+
+    /// Memo for [`pool_root`](Self::pool_root): the additive multiset accumulator over
+    /// the nullifier set (`crate::acc_add` of `nullifier_leaf`, the wallet-root
+    /// construction). Maintained incrementally at
+    /// [`spend_nullifier_in_epoch`](Self::spend_nullifier_in_epoch), folded from the set
+    /// on first use after a boot. Commutative, so the incremental and the folded value
+    /// are identical by construction — a snapshot-booted node and a genesis-replayed
+    /// node cannot disagree on it.
+    #[serde(skip)]
+    pub(crate) nullifier_acc_memo: Memo<[u64; 4]>,
+}
+
+/// A derived-value cache that is invisible to `serde` and `PartialEq`: two pools with
+/// identical consensus contents compare equal whether or not either has warmed its memo.
+/// `OnceLock` keeps `&self` readers race-free under the state `RwLock`.
+#[derive(Debug, Default)]
+pub struct Memo<T>(std::sync::OnceLock<T>);
+
+impl<T: Clone> Clone for Memo<T> {
+    fn clone(&self) -> Self {
+        match self.0.get() {
+            Some(v) => Memo(std::sync::OnceLock::from(v.clone())),
+            None => Memo(std::sync::OnceLock::new()),
+        }
+    }
+}
+impl<T> PartialEq for Memo<T> {
+    fn eq(&self, _: &Self) -> bool { true }
+}
+impl<T> Eq for Memo<T> {}
+
+/// Multiset-accumulator leaf for one (epoch-scoped) nullifier — the wallet-root
+/// construction (`wallet_leaf` → `acc_add`), domain-separated.
+fn nullifier_leaf(scoped_nf: &[u8; 32]) -> [u64; 4] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"SIGIL/nullifier-acc/v1");
+    h.update(scoped_nf);
+    let b = h.finalize();
+    let d = b.as_bytes();
+    [
+        u64::from_le_bytes(d[0..8].try_into().unwrap()),
+        u64::from_le_bytes(d[8..16].try_into().unwrap()),
+        u64::from_le_bytes(d[16..24].try_into().unwrap()),
+        u64::from_le_bytes(d[24..32].try_into().unwrap()),
+    ]
 }
 
 /// A sealed pool generation: the anonymity set exactly as it stood when it filled.
@@ -535,6 +587,7 @@ impl ShieldedPool {
         self.ensure_commitment_index();
         // Fresh, empty tree for the new generation.
         self.tree = None;
+        self.notes_root_memo = Memo::default();
         // `seen_commitments` spans ALL epochs, so it deliberately survives rotation — the
         // archived commitments are still off-limits for a replay.
         self.anchors_dirty = true;
@@ -779,6 +832,7 @@ impl ShieldedPool {
         let leaf = sigil_shield::note_v1::from_wire(&cm).unwrap_or_default();
         self.tree_mut().append(leaf);
         self.notes.push(cm);
+        self.notes_root_memo = Memo::default();
         self.note_ciphertexts.push(ciphertext);
         if let Some(seen) = self.seen_commitments.as_mut() {
             seen.insert(cm);
@@ -795,12 +849,75 @@ impl ShieldedPool {
         epoch: u32,
         nf: [u8; 32],
     ) -> Result<(), ShieldedError> {
-        if !self.nullifiers.insert(scoped_nullifier(epoch, nf)) {
+        let scoped = scoped_nullifier(epoch, nf);
+        if !self.nullifiers.insert(scoped) {
             // Report the RAW nullifier: it is what the transaction published and what an
             // operator correlating against a client can actually recognise.
             return Err(ShieldedError::NullifierAlreadySpent(nf));
         }
+        // Keep a warmed accumulator exact; a cold one is folded from the set on demand.
+        if let Some(acc) = self.nullifier_acc_memo.0.get().copied() {
+            self.nullifier_acc_memo = Memo(std::sync::OnceLock::from(crate::acc_add(acc, nullifier_leaf(&scoped))));
+        }
         Ok(())
+    }
+
+    /// The sparse notes root of the live epoch, memoized by `(epoch, notes.len())`.
+    /// Notes are append-only within an epoch, so the key identifies the contents.
+    fn notes_root_memoized(&self) -> [u8; 32] {
+        let key = (self.epoch, self.notes.len());
+        match self.notes_root_memo.0.get() {
+            Some((e, n, r)) if (*e, *n) == key => *r,
+            // A stale memo means an invalidation was missed somewhere: still correct,
+            // just not cached — never serve a root for a different note set.
+            Some(_) => self.current_root(),
+            None => {
+                let r = self.current_root();
+                let _ = self.notes_root_memo.0.set((key.0, key.1, r));
+                r
+            }
+        }
+    }
+
+    /// The additive accumulator over every (epoch-scoped) nullifier ever spent.
+    fn nullifier_acc(&self) -> [u64; 4] {
+        *self.nullifier_acc_memo.0.get_or_init(|| {
+            self.nullifiers.iter().fold([0u64; 4], |acc, nf| crate::acc_add(acc, nullifier_leaf(nf)))
+        })
+    }
+
+    /// THE FIFTH ROOT — the commitment `SigilBlockHeaderV0::shielded_pool_root` carries
+    /// from `sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT`.
+    ///
+    /// Binds what two nodes must never disagree on about the money: the live epoch's
+    /// notes root and note count, the multiset of every nullifier ever spent (and its
+    /// count), the value locked in the pool, the epoch number and every sealed epoch's
+    /// root. O(1) per block on an untouched pool (both expensive parts are memoized and
+    /// only move when a note is appended or a nullifier is spent), deterministic from the
+    /// consensus fields alone — `Memo`s are derived and never serialized, so a node that
+    /// booted from a state snapshot computes exactly what a node that replayed from
+    /// genesis computes.
+    ///
+    /// v1 deliberately EXCLUDES the delivery ciphertexts and the address/key registries
+    /// (the postbag and the address book, not the money) and the whole of
+    /// [`digest`](Self::digest), which hashes every ciphertext and every archived epoch on
+    /// each call — tens of MB per block on today's pool, unusable on a producer minting
+    /// at 8–110 blk/s. That digest was written "for folding into wallet_state_root" and
+    /// never got a caller; this is the version that ships.
+    pub fn pool_root(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"sigil-shielded-pool-root-v1");
+        h.update(&self.epoch.to_le_bytes());
+        h.update(&self.notes_root_memoized());
+        h.update(&(self.notes.len() as u64).to_le_bytes());
+        h.update(&(self.nullifiers.len() as u64).to_le_bytes());
+        h.update(&crate::acc_to_root(self.nullifier_acc()));
+        h.update(&self.value_locked.to_le_bytes());
+        h.update(&(self.archive.len() as u64).to_le_bytes());
+        for a in &self.archive {
+            h.update(&a.root);
+        }
+        *h.finalize().as_bytes()
     }
 
     /// Record a nullifier as spent in epoch 0 — the pre-rotation behaviour, unchanged.
@@ -1201,6 +1318,66 @@ mod tests {
         assert_ne!(d, with_nf.digest(), "nullifiers must affect the digest");
         assert_ne!(d, with_value.digest(), "locked value must affect the digest");
         assert_eq!(base.digest(), ShieldedPool::new().digest(), "deterministic");
+    }
+
+    /// The fifth root must move with everything a node could disagree about in the
+    /// money — notes, nullifiers, locked value, epoch — and be deterministic.
+    #[test]
+    fn pool_root_covers_notes_nullifiers_value_and_epoch() {
+        let base = ShieldedPool::new();
+        let r0 = base.pool_root();
+        assert_eq!(r0, ShieldedPool::new().pool_root(), "deterministic");
+        let mut with_note = base.clone();
+        with_note.append_note(cm(1)).unwrap();
+        assert_ne!(r0, with_note.pool_root(), "a note must move the root");
+        let mut with_nf = base.clone();
+        with_nf.spend_nullifier(cm(2)).unwrap();
+        assert_ne!(r0, with_nf.pool_root(), "a nullifier must move the root");
+        let mut with_value = base.clone();
+        with_value.lock_value(1).unwrap();
+        assert_ne!(r0, with_value.pool_root(), "locked value must move the root");
+        let mut rotated = ShieldedPool::new();
+        fill_to_capacity(&mut rotated);
+        let before = rotated.pool_root();
+        rotated.append_note(wire(7_000_000)).unwrap();
+        assert!(rotated.epoch > 0, "capacity+1 rotates");
+        assert_ne!(before, rotated.pool_root(), "an epoch rotation must move the root");
+        let mut e0 = base.clone(); e0.spend_nullifier_in_epoch(0, cm(3)).unwrap();
+        let mut e1 = base.clone(); e1.spend_nullifier_in_epoch(1, cm(3)).unwrap();
+        assert_ne!(e0.pool_root(), e1.pool_root(), "the same nullifier in two epochs = two roots");
+    }
+
+    /// The memo must be invisible: a warmed pool, a serde round trip of it (the
+    /// state-snapshot codec, memos come back cold) and a fresh pool built by the same
+    /// mutations in a different order all report the same root. This is the
+    /// snapshot-boot ≡ genesis-replay property the follower depends on.
+    #[test]
+    fn pool_root_is_identical_warm_cold_after_roundtrip_and_order_independent() {
+        let mut a = ShieldedPool::new();
+        a.append_note(cm(1)).unwrap();
+        a.lock_value(500).unwrap();
+        let warm_before = a.pool_root(); // warms both memos
+        for i in 10u8..20 { a.spend_nullifier(cm(i)).unwrap(); } // incremental acc updates
+        a.append_note(cm(2)).unwrap();
+        let warm = a.pool_root();
+        assert_ne!(warm_before, warm);
+        let bytes = rmp_serde::to_vec_named(&a).unwrap();
+        let cold: ShieldedPool = rmp_serde::from_slice(&bytes).unwrap();
+        // (no `assert_eq!(cold, a)`: the pre-existing `#[serde(skip)] tree` field takes part in
+        // the derived PartialEq, so a warmed pool never compares equal to its cold twin — the
+        // consensus contents are what the root below proves identical)
+        assert_eq!(cold.notes.len(), a.notes.len());
+        assert_eq!(cold.nullifiers, a.nullifiers);
+        assert_eq!(cold.pool_root(), warm, "snapshot-booted root == replayed root");
+        let mut b = ShieldedPool::new();
+        b.append_note(cm(1)).unwrap();
+        b.lock_value(500).unwrap();
+        for i in (10u8..20).rev() { b.spend_nullifier(cm(i)).unwrap(); }
+        b.append_note(cm(2)).unwrap();
+        assert_eq!(b.pool_root(), warm, "nullifier order must not matter");
+        let js = serde_json::to_string(&a).unwrap();
+        let j: ShieldedPool = serde_json::from_str(&js).unwrap();
+        assert_eq!(j.pool_root(), warm, "JSON round trip");
     }
 
     /// Ciphertexts must stay positionally aligned with notes, and a divergent ciphertext

@@ -187,6 +187,7 @@ pub fn build_genesis() -> Result<Block> {
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         // Genesis has no prior window to commit to.
         topology_commitment: None,
+        shielded_pool_root: None,
     };
 
     Ok(Block {

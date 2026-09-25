@@ -2659,7 +2659,7 @@ fn run_start() -> Result<()> {
                             // cache them as immutable (a stale 'P' would serve a stale anchor).
                             // codec=2 ('S') of a finalized range IS immutable (skeletons of
                             // finalized blocks never change) → cacheable like 'H'/'Z'.
-                            let immutable = hi >= lo && hi < wbase && req.codec < 3;
+                            let immutable = hi >= lo && hi < wbase && sigil_header::is_header_page_codec(req.codec);
                             // The zstd flag lives in the key: a compressed body replayed to a peer
                             // that asked for raw would be undecodable to it (and vice versa).
                             let ckey = (lo, hi, req.headers_only, req.codec as u32 | if req.zstd { 0x100 } else { 0 });
@@ -2729,7 +2729,7 @@ fn run_start() -> Result<()> {
                             // durably committed on this node (hi is clamped to chain.height()-1
                             // above) so a short-lived exact-range replay is always correct, not
                             // just fast.
-                            let hot_eligible = !immutable && hi >= lo && req.codec < 3;
+                            let hot_eligible = !immutable && hi >= lo && sigil_header::is_header_page_codec(req.codec);
                             if hot_eligible {
                                 if let Some((blob, at)) = hot_cache.get(&ckey) {
                                     if at.elapsed() < hot_cache_ttl {
@@ -2953,7 +2953,7 @@ fn run_start() -> Result<()> {
                             //
                             // Spawn rate is bounded by the per-peer expensive throttle right
                             // above, so this cannot become a task storm.
-                            if req.headers_only && req.codec < 3 && lo < wbase {
+                            if req.headers_only && sigil_header::is_header_page_codec(req.codec) && lo < wbase {
                                 let window_headers: Vec<sigil_header::SigilBlockHeaderV0> =
                                     (lo.max(wbase)..=hi)
                                         .filter_map(|h| chain.get(h).map(|b| b.header.clone()))
@@ -4440,6 +4440,9 @@ fn build_block_at(
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         // build_block_at has no live Braid/DAG context — informational field.
         topology_commitment: None,
+        // P0 helper (declared roots, stubbed crypto): never used at/after the fifth-root gate —
+        // `precheck` refuses a gated header without the root, so this stays honest.
+        shielded_pool_root: None,
     };
 
     Ok(Block { header, transition, events })

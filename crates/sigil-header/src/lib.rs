@@ -311,6 +311,25 @@ pub struct SigilBlockHeaderV0 {
     /// regression this second incident produced).
     #[serde(default)]
     pub topology_commitment: Option<[u8; 32]>,
+    /// Commitment over the SHIELDED POOL at the end of this block — notes root, note
+    /// count, nullifier multiset, value locked, epoch and every sealed epoch's root
+    /// (`sigil_state::ShieldedPool::pool_root`, the fifth root).
+    ///
+    /// Since transparent sends were retired the pool is where the money lives, and until
+    /// 2026-09-25 it was the one piece of consensus state NO header field covered: two
+    /// nodes could disagree on every note and nullifier and still carry identical
+    /// headers (`ShieldedPool::digest` existed for exactly this and had no caller).
+    ///
+    /// Height-gated: `None` below [`SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT`] and `Some`
+    /// REQUIRED from it — [`precheck`](Self::precheck) refuses a missing root at/after the
+    /// gate AND a premature one before it, so old and new binaries agree on every pre-gate
+    /// block. Hash/signature stability for the ~26 M historical blocks is the
+    /// `topology_commitment` recipe: plain `#[serde(default)]` (bincode stays uniform —
+    /// never `skip_serializing_if`, see the 2026-08-15 incident above) and the exact
+    /// `,"shielded_pool_root":null` fragment is stripped from the JSON that `hash()` and
+    /// `signing_bytes()` digest while the field is `None`.
+    #[serde(default)]
+    pub shielded_pool_root: Option<[u8; 32]>,
 }
 
 /// The exact JSON fragment `serde_json` emits for a `None`
@@ -332,6 +351,202 @@ fn strip_null_topology_commitment_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
         }
     }
     json
+}
+
+/// The exact JSON fragment `serde_json` emits for a `None` `shielded_pool_root`
+/// (same shape and same reasoning as [`NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT`]).
+const NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT: &str = ",\"shielded_pool_root\":null";
+/// Strip [`NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT`] from `json` — `hash()` /
+/// `signing_bytes()` only, while the field is `None`, so every block minted before the
+/// field existed keeps its hash and its producer signature byte-for-byte.
+fn strip_null_shielded_pool_root_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
+    if let Ok(s) = std::str::from_utf8(&json) {
+        if let Some(pos) = s.find(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT) {
+            json.drain(pos..pos + NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT.len());
+        }
+    }
+    json
+}
+/// Canonical bytes for `hash()` / `signing_bytes()`: the header's JSON with the `null`
+/// fragments of the two height-gated optional fields removed while they are `None`.
+fn canonical_json_for_hashing(json: Vec<u8>, topology_none: bool, pool_root_none: bool) -> Vec<u8> {
+    let json = if topology_none { strip_null_topology_commitment_for_hashing(json) } else { json };
+    if pool_root_none { strip_null_shielded_pool_root_for_hashing(json) } else { json }
+}
+/// From this height every header MUST carry `Some(shielded_pool_root)`; below it every
+/// header MUST carry `None` (both directions are refused by [`SigilBlockHeaderV0::precheck`]
+/// and by the follower's root check in `sigil-node`). Scheduled 2026-09-25 at tip ≈ 25.6 M:
+/// ~1.4 M blocks ahead — two days at the 8 blk/s floor, ~3.5 h at the 110 blk/s ceiling —
+/// so every `sigil-top` client can auto-update before the first gated block is minted.
+/// A producer cannot be rolled back out of its own blocks: if this must move, move it
+/// BEFORE the tip reaches it, never after.
+pub const SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT: u64 = 27_000_000;
+thread_local! {
+    // THREAD-LOCAL on purpose: a simulation lowers the gate on ITS thread only, so parallel
+    // test threads (the chronos library, the tourbillon and frontier soaks) never see each
+    // other's gate flip mid-run. Production never sets it; every thread reads the const.
+    static SHIELDED_POOL_ROOT_ACTIVATION_OVERRIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
+/// The live activation height: [`SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT`] unless a
+/// simulation lowered it on this thread via
+/// [`override_shielded_pool_root_activation_for_simulation`].
+pub fn shielded_pool_root_activation_height() -> u64 {
+    let o = SHIELDED_POOL_ROOT_ACTIVATION_OVERRIDE.with(|c| c.get());
+    if o == u64::MAX { SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT } else { o }
+}
+/// SIMULATION ONLY (chronos, integration tests): lower the gate so a chain built from
+/// genesis crosses it. Thread-local; never called by `sigil-node start`. `u64::MAX`
+/// restores the compiled-in height.
+#[doc(hidden)]
+pub fn override_shielded_pool_root_activation_for_simulation(height: u64) {
+    SHIELDED_POOL_ROOT_ACTIVATION_OVERRIDE.with(|c| c.set(height));
+}
+/// Does a header at `height` have to carry the shielded pool root?
+pub fn shielded_pool_root_required(height: u64) -> bool {
+    shielded_pool_root_required_with(height, shielded_pool_root_activation_height())
+}
+/// Pure form of [`shielded_pool_root_required`] (testable without the global).
+pub fn shielded_pool_root_required_with(height: u64, activation: u64) -> bool {
+    height >= activation
+}
+/// The gate rule as one pure function: present ⇔ required. Used by `precheck` and by
+/// the follower's root check, so the two can never drift.
+pub fn check_shielded_pool_root_gate(height: u64, present: bool, activation: u64) -> Result<(), HeaderError> {
+    let required = shielded_pool_root_required_with(height, activation);
+    match (required, present) {
+        (true, false) => Err(HeaderError::ShieldedPoolRootMissing { height, activation }),
+        (false, true) => Err(HeaderError::ShieldedPoolRootPremature { height, activation }),
+        _ => Ok(()),
+    }
+}
+// ─── The header-page WIRE: legacy layout vs the fifth-root layout ──────────────────
+//
+// Every header page on the backfill wire (`serve_read` codecs 0 `'H'` and 1 `'Z'`), every
+// client decoder (`sigil-top`, `sigil-serve`) and the client block store encode headers
+// with POSITIONAL bincode. Positional means a missing trailing field is `UnexpectedEof`,
+// never `#[serde(default)]` — so the moment a node serialized the fifth root under the
+// old codecs, every deployed client would misalign on every page, before any gate. The
+// rule here: the old codecs keep carrying the OLD byte layout (this view, byte-identical
+// to what was written before 2026-09-25 — pinned by `legacy_page_is_byte_identical…`),
+// and the full layout rides its own codec, [`HEADER_PAGE_CODEC_V1`] / tag `'V'`.
+// Below the activation height the two are lossless mirrors of each other. From the
+// gate, a client still on the legacy codecs receives headers WITHOUT the root, hashes
+// them differently, and parks — which is why clients ship before the gate.
+
+/// The pre-fifth-root bincode layout of [`SigilBlockHeaderV0`]: every field except
+/// `shielded_pool_root`, in the same order. Its bincode is byte-identical to what every
+/// node and client produced before the field existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigilBlockHeaderV0Legacy {
+    pub version: u16,
+    pub network_id: [u8; 8],
+    pub height: u64,
+    pub parent_hash: BlockHash,
+    #[serde(default)]
+    pub merge_parents: Vec<BlockHash>,
+    pub timestamp_ms: u64,
+    pub nonce_sqisign: SqiSignature,
+    pub vdf_input: [u8; 32],
+    pub vdf_proof: WesolowskiProof,
+    pub difficulty: u64,
+    pub wallet_state_root: Root,
+    pub dex_state_root: Root,
+    pub event_log_root: Root,
+    pub contract_state_root: Root,
+    pub state_transition_proof: StarkProof,
+    pub txs_merkle_root: Root,
+    #[serde(default)]
+    pub tx_count: u32,
+    pub fluxc_artifact_proof: ProofBundle,
+    pub sig_scheme: SigScheme,
+    pub producer: ValidatorId,
+    pub producer_sig: SignatureBytes,
+    #[serde(default)]
+    pub topology_commitment: Option<[u8; 32]>,
+}
+
+impl From<&SigilBlockHeaderV0> for SigilBlockHeaderV0Legacy {
+    /// Drops the fifth root. Lossless below the activation height (it is `None` there).
+    fn from(h: &SigilBlockHeaderV0) -> Self {
+        Self {
+            version: h.version, network_id: h.network_id, height: h.height, parent_hash: h.parent_hash,
+            merge_parents: h.merge_parents.clone(), timestamp_ms: h.timestamp_ms,
+            nonce_sqisign: h.nonce_sqisign.clone(), vdf_input: h.vdf_input, vdf_proof: h.vdf_proof.clone(),
+            difficulty: h.difficulty, wallet_state_root: h.wallet_state_root, dex_state_root: h.dex_state_root,
+            event_log_root: h.event_log_root, contract_state_root: h.contract_state_root,
+            state_transition_proof: h.state_transition_proof.clone(), txs_merkle_root: h.txs_merkle_root,
+            tx_count: h.tx_count, fluxc_artifact_proof: h.fluxc_artifact_proof.clone(), sig_scheme: h.sig_scheme,
+            producer: h.producer, producer_sig: h.producer_sig.clone(), topology_commitment: h.topology_commitment,
+        }
+    }
+}
+
+impl From<SigilBlockHeaderV0Legacy> for SigilBlockHeaderV0 {
+    /// A legacy-layout header has no fifth root: `None`, exactly what every pre-gate
+    /// block carries. (A gated block read through this path hashes differently — that
+    /// is the client's signal that it must speak codec 5.)
+    fn from(l: SigilBlockHeaderV0Legacy) -> Self {
+        Self {
+            version: l.version, network_id: l.network_id, height: l.height, parent_hash: l.parent_hash,
+            merge_parents: l.merge_parents, timestamp_ms: l.timestamp_ms, nonce_sqisign: l.nonce_sqisign,
+            vdf_input: l.vdf_input, vdf_proof: l.vdf_proof, difficulty: l.difficulty,
+            wallet_state_root: l.wallet_state_root, dex_state_root: l.dex_state_root,
+            event_log_root: l.event_log_root, contract_state_root: l.contract_state_root,
+            state_transition_proof: l.state_transition_proof, txs_merkle_root: l.txs_merkle_root,
+            tx_count: l.tx_count, fluxc_artifact_proof: l.fluxc_artifact_proof, sig_scheme: l.sig_scheme,
+            producer: l.producer, producer_sig: l.producer_sig, topology_commitment: l.topology_commitment,
+            shielded_pool_root: None,
+        }
+    }
+}
+
+/// Backfill header-page codecs (`BackfillReq.codec`). 0/1/2 are the frozen pre-fifth-root
+/// wires; 3/4 are the snapshot header/trailer and live elsewhere; **5 is the fifth-root
+/// layout** — `'V'` + zstd-1 of `bincode(Vec<SigilBlockHeaderV0>)`.
+pub const HEADER_PAGE_CODEC_LEGACY_RAW: u8 = 0;
+pub const HEADER_PAGE_CODEC_LEGACY_ZSTD: u8 = 1;
+pub const HEADER_PAGE_CODEC_SKELETON: u8 = 2;
+pub const HEADER_PAGE_CODEC_V1: u8 = 5;
+/// Frame tag of a codec-5 page.
+pub const HEADER_PAGE_TAG_V1: u8 = b'V';
+/// Is `codec` one of the header-page codecs a node answers with a header run
+/// (as opposed to the tip-dependent snapshot codecs 3/4)?
+pub fn is_header_page_codec(codec: u8) -> bool {
+    codec < 3 || codec == HEADER_PAGE_CODEC_V1
+}
+/// The body of a legacy (`'H'` / inside `'Z'`) page: `bincode(Vec<SigilBlockHeaderV0Legacy>)`.
+pub fn encode_legacy_header_page(headers: &[SigilBlockHeaderV0]) -> Vec<u8> {
+    let v: Vec<SigilBlockHeaderV0Legacy> = headers.iter().map(SigilBlockHeaderV0Legacy::from).collect();
+    bincode::serialize(&v).unwrap_or_default()
+}
+/// Decode a legacy page body into full headers (fifth root `None`).
+pub fn decode_legacy_header_page(body: &[u8]) -> Option<Vec<SigilBlockHeaderV0>> {
+    let v: Vec<SigilBlockHeaderV0Legacy> = bincode::deserialize(body).ok()?;
+    Some(v.into_iter().map(SigilBlockHeaderV0::from).collect())
+}
+/// The body of a codec-5 page (inside `'V'` + zstd): `bincode(Vec<SigilBlockHeaderV0>)`.
+pub fn encode_v1_header_page(headers: &[SigilBlockHeaderV0]) -> Vec<u8> {
+    bincode::serialize(&headers.to_vec()).unwrap_or_default()
+}
+/// Decode a codec-5 page body.
+pub fn decode_v1_header_page(body: &[u8]) -> Option<Vec<SigilBlockHeaderV0>> {
+    bincode::deserialize::<Vec<SigilBlockHeaderV0>>(body).ok()
+}
+/// Decode ONE stored header record of either layout, distinguished by a tag byte the
+/// writer prepends: [`STORED_HEADER_TAG_V1`] + `bincode(full)`, or (no tag — every record
+/// written before 2026-09-25) `bincode(legacy)`. Unambiguous because a legacy record
+/// begins with `version: u16 = 0` (byte `0x00`) and the tag is `0x01`.
+pub const STORED_HEADER_TAG_V1: u8 = 0x01;
+pub fn encode_stored_header(h: &SigilBlockHeaderV0) -> Vec<u8> {
+    let mut out = vec![STORED_HEADER_TAG_V1];
+    out.extend(bincode::serialize(h).unwrap_or_default());
+    out
+}
+pub fn decode_stored_header(bytes: &[u8]) -> Option<SigilBlockHeaderV0> {
+    match bytes.first()? {
+        &STORED_HEADER_TAG_V1 => bincode::deserialize::<SigilBlockHeaderV0>(&bytes[1..]).ok(),
+        _ => bincode::deserialize::<SigilBlockHeaderV0Legacy>(bytes).ok().map(SigilBlockHeaderV0::from),
+    }
 }
 
 /// Activation height for real enforcement of `topology_commitment` (e.g.
@@ -367,11 +582,9 @@ impl SigilBlockHeaderV0 {
         // because every dep is already pinned to serde_json. P1 swaps in
         // bincode for ~3× size reduction.
         if let Ok(bytes) = serde_json::to_vec(self) {
-            let bytes = if self.topology_commitment.is_none() {
-                strip_null_topology_commitment_for_hashing(bytes)
-            } else {
-                bytes
-            };
+            let bytes = canonical_json_for_hashing(
+                bytes, self.topology_commitment.is_none(), self.shielded_pool_root.is_none(),
+            );
             hasher.update(&bytes);
         }
         *hasher.finalize().as_bytes()
@@ -385,11 +598,7 @@ impl SigilBlockHeaderV0 {
         let mut clone = self.clone();
         clone.producer_sig = SignatureBytes(Vec::new());
         let bytes = serde_json::to_vec(&clone).unwrap_or_default();
-        if clone.topology_commitment.is_none() {
-            strip_null_topology_commitment_for_hashing(bytes)
-        } else {
-            bytes
-        }
+        canonical_json_for_hashing(bytes, clone.topology_commitment.is_none(), clone.shielded_pool_root.is_none())
     }
 
     /// Cheap pre-validation that catches obvious schema breakage before any
@@ -409,6 +618,10 @@ impl SigilBlockHeaderV0 {
                 got: self.network_id,
             });
         }
+        // The fifth root is present exactly from its activation height (see the field).
+        check_shielded_pool_root_gate(
+            self.height, self.shielded_pool_root.is_some(), shielded_pool_root_activation_height(),
+        )?;
         if self.producer_sig.0.len() != self.sig_scheme.expected_sig_len() {
             return Err(HeaderError::SigLengthMismatch {
                 scheme: self.sig_scheme,
@@ -550,6 +763,13 @@ pub enum HeaderError {
     /// internally inconsistent and any further validation is pointless.
     #[error("vdf_input != blake3(parent_hash || nonce_sqisign)")]
     VdfInputMismatch,
+    /// Height ≥ the shielded-pool-root activation, but the header carries no root.
+    #[error("shielded_pool_root missing at height {height} (required from {activation})")]
+    ShieldedPoolRootMissing { height: u64, activation: u64 },
+    /// Height < the activation, but the header already carries a root — would hash
+    /// differently on every node that has not activated yet.
+    #[error("shielded_pool_root present at height {height} before activation {activation}")]
+    ShieldedPoolRootPremature { height: u64, activation: u64 },
 
     /// `nonce_sqisign` was not exactly [`SQISIGN_L5_LEN`] bytes long.
     #[error("nonce_sqisign length wrong: expected {expected}, got {got}")]
@@ -612,6 +832,7 @@ mod tests {
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; 292]),
             topology_commitment: None,
+            shielded_pool_root: None,
         }
     }
 
@@ -725,6 +946,7 @@ mod tests {
             producer: [99u8; 32],
             producer_sig: SignatureBytes(vec![0xAB; 64]),
             topology_commitment: Some([111u8; 32]),
+            shielded_pool_root: None,
         };
 
         let hash_bytes = header.hash();
@@ -863,6 +1085,149 @@ mod tests {
         assert_eq!(back[1], some_h, "the header AFTER a None-topology header must not be corrupted by it");
     }
 
+    /// THE FIFTH ROOT keeps every historical hash: while the field is `None` the JSON
+    /// `hash()` / `signing_bytes()` digest is byte-identical to what a header without the
+    /// field produced (the fragment is emitted by serde and stripped before hashing).
+    #[test]
+    fn hash_and_signing_bytes_are_unaffected_by_a_none_shielded_pool_root() {
+        let h = fake_header();
+        assert!(h.shielded_pool_root.is_none() && h.topology_commitment.is_none());
+        let raw = serde_json::to_vec(&h).unwrap();
+        let raw_s = std::str::from_utf8(&raw).unwrap();
+        assert!(raw_s.contains(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT), "serde emits the null fragment (no skip_serializing_if)");
+        // the pre-field canonical bytes: strip BOTH null fragments by hand
+        let legacy: Vec<u8> = raw_s
+            .replacen(NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT, "", 1)
+            .replacen(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT, "", 1)
+            .into_bytes();
+        assert!(!std::str::from_utf8(&legacy).unwrap().contains("shielded_pool_root"));
+        let expected = *blake3::hash(&legacy).as_bytes();
+        assert_eq!(h.hash(), expected, "a None fifth root must not move the block hash");
+        let mut unsigned = h.clone();
+        unsigned.producer_sig = SignatureBytes(Vec::new());
+        let legacy_signing: Vec<u8> = std::str::from_utf8(&serde_json::to_vec(&unsigned).unwrap()).unwrap()
+            .replacen(NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT, "", 1)
+            .replacen(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT, "", 1)
+            .into_bytes();
+        assert_eq!(h.signing_bytes(), legacy_signing, "a None fifth root must not move the signed bytes");
+    }
+
+    /// And once the field is `Some`, it is committed: hash and signed bytes both move.
+    #[test]
+    fn hash_and_signing_bytes_commit_a_some_shielded_pool_root() {
+        let base = fake_header();
+        let mut a = base.clone();
+        a.shielded_pool_root = Some([0x5A; 32]);
+        let mut b = base.clone();
+        b.shielded_pool_root = Some([0x5B; 32]);
+        assert_ne!(base.hash(), a.hash());
+        assert_ne!(a.hash(), b.hash());
+        assert_ne!(base.signing_bytes(), a.signing_bytes());
+        assert_ne!(a.signing_bytes(), b.signing_bytes());
+        assert!(std::str::from_utf8(&a.signing_bytes()).unwrap().contains("\"shielded_pool_root\":["));
+    }
+
+    /// bincode is POSITIONAL: a record written before the field existed is the new encoding
+    /// minus its trailing `Option` byte, and `#[serde(default)]` does NOT rescue a missing
+    /// trailing element — it fails with `UnexpectedEof`. Pinned here so nobody assumes the
+    /// bincode header framings (`serve_read` codecs 0/1) are cross-version: the node serves
+    /// those codecs from the pre-field layout (`SigilBlockHeaderV0Legacy`) and the full
+    /// layout only under codec 5 (`'V'`). Same-version None/Some and mixed Vecs must
+    /// round-trip (the 2026-08-15 misalignment regression, for the fifth root); a NAMED
+    /// record without the key (msgpack `to_vec_named` / JSON — the chain log, gossip, block
+    /// backfill) decodes to `None`.
+    #[test]
+    fn bincode_is_not_cross_version_but_named_formats_are() {
+        let h = fake_header();
+        let full = bincode::serialize(&h).unwrap();
+        assert_eq!(full[full.len() - 1], 0u8, "trailing byte is the None discriminant of the last field");
+        let legacy = &full[..full.len() - 1];
+        assert!(bincode::deserialize::<SigilBlockHeaderV0>(legacy).is_err(), "positional bincode cannot default a missing trailing field");
+        let mut some = h.clone();
+        some.shielded_pool_root = Some([0x77; 32]);
+        let bytes = bincode::serialize(&some).unwrap();
+        let back: SigilBlockHeaderV0 = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, some);
+        let v = vec![h.clone(), some.clone(), h.clone()];
+        let bytes = bincode::serialize(&v).unwrap();
+        let back: Vec<SigilBlockHeaderV0> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, v, "a mixed None/Some Vec must not misalign");
+        // and the named (MessagePack-style) path: a JSON object WITHOUT the key decodes to None
+        let mut val: serde_json::Value = serde_json::to_value(&h).unwrap();
+        val.as_object_mut().unwrap().remove("shielded_pool_root");
+        let back: SigilBlockHeaderV0 = serde_json::from_value(val).unwrap();
+        assert_eq!(back, h);
+    }
+
+    /// The gate rule, pure: present ⇔ height ≥ activation; both violations are named.
+    #[test]
+    fn shielded_pool_root_gate_is_present_iff_required() {
+        let act = 1_000u64;
+        assert!(check_shielded_pool_root_gate(999, false, act).is_ok());
+        assert!(check_shielded_pool_root_gate(1_000, true, act).is_ok());
+        assert!(check_shielded_pool_root_gate(u64::MAX, true, act).is_ok());
+        assert!(matches!(
+            check_shielded_pool_root_gate(1_000, false, act),
+            Err(HeaderError::ShieldedPoolRootMissing { height: 1_000, activation: 1_000 })
+        ));
+        assert!(matches!(
+            check_shielded_pool_root_gate(999, true, act),
+            Err(HeaderError::ShieldedPoolRootPremature { height: 999, activation: 1_000 })
+        ));
+        assert!(!shielded_pool_root_required_with(SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT - 1, SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT));
+        assert!(shielded_pool_root_required_with(SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT, SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT));
+        // precheck itself: fake_header is height 1, far below the compiled-in gate
+        let mut h = fake_header();
+        assert!(h.precheck().is_ok());
+        h.shielded_pool_root = Some([1u8; 32]);
+        assert!(matches!(h.precheck(), Err(HeaderError::ShieldedPoolRootPremature { .. })));
+        let mut g = fake_header();
+        g.height = SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT;
+        assert!(matches!(g.precheck(), Err(HeaderError::ShieldedPoolRootMissing { .. })));
+        g.shielded_pool_root = Some([1u8; 32]);
+        assert!(g.precheck().is_ok());
+    }
+
+    /// The legacy page body is BYTE-IDENTICAL to what every deployed client decoded before
+    /// the fifth root: the full encoding minus its trailing `Option` byte, for every header
+    /// whose root is `None`. And the two decoders are each other's inverse.
+    #[test]
+    fn legacy_page_is_byte_identical_to_the_pre_field_encoding() {
+        let mut hs: Vec<SigilBlockHeaderV0> = (1u64..5).map(|i| { let mut h = fake_header(); h.height = i; h }).collect();
+        hs[2].topology_commitment = Some([3u8; 32]);
+        let legacy = encode_legacy_header_page(&hs);
+        // the pre-field bytes: full encoding with each element's trailing None byte removed
+        let mut expected = Vec::new();
+        expected.extend(bincode::serialize(&(hs.len() as u64)).unwrap());
+        for h in &hs {
+            let full = bincode::serialize(h).unwrap();
+            assert_eq!(full[full.len() - 1], 0u8);
+            expected.extend(&full[..full.len() - 1]);
+        }
+        assert_eq!(legacy, expected, "legacy page == the bytes every old client reads");
+        let back = decode_legacy_header_page(&legacy).unwrap();
+        assert_eq!(back, hs, "legacy decode restores the full header with root None");
+        let v1 = encode_v1_header_page(&hs);
+        assert_eq!(decode_v1_header_page(&v1).unwrap(), hs);
+        assert!(decode_v1_header_page(&legacy).is_none() || decode_v1_header_page(&legacy).unwrap() != hs,
+            "a legacy body must never silently decode as a v1 page");
+        // a gated header loses its root through the legacy view, by design
+        let mut gated = fake_header();
+        gated.shielded_pool_root = Some([9u8; 32]);
+        let round: SigilBlockHeaderV0 = SigilBlockHeaderV0Legacy::from(&gated).into();
+        assert!(round.shielded_pool_root.is_none());
+        assert_ne!(round.hash(), gated.hash());
+        // stored records: untagged legacy and tagged v1 both decode
+        let stored_legacy = bincode::serialize(&SigilBlockHeaderV0Legacy::from(&hs[0])).unwrap();
+        assert_eq!(stored_legacy[0], 0u8, "a legacy record starts with version=0");
+        assert_eq!(decode_stored_header(&stored_legacy).unwrap(), hs[0]);
+        let stored_v1 = encode_stored_header(&gated);
+        assert_eq!(stored_v1[0], STORED_HEADER_TAG_V1);
+        assert_eq!(decode_stored_header(&stored_v1).unwrap(), gated);
+        assert!(is_header_page_codec(0) && is_header_page_codec(1) && is_header_page_codec(2) && is_header_page_codec(5));
+        assert!(!is_header_page_codec(3) && !is_header_page_codec(4));
+    }
+
     #[test]
     fn signing_bytes_excludes_producer_sig() {
         let h = fake_header();
@@ -874,7 +1239,7 @@ mod tests {
         // (same as hash(), see its doc comment) applies here too.
         let mut clone = h.clone();
         clone.producer_sig = SignatureBytes(Vec::new());
-        let expected = strip_null_topology_commitment_for_hashing(serde_json::to_vec(&clone).unwrap());
+        let expected = canonical_json_for_hashing(serde_json::to_vec(&clone).unwrap(), true, true);
         assert_eq!(expected, bytes);
     }
 

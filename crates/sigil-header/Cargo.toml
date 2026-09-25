@@ -19,11 +19,11 @@ thiserror  = { workspace = true }
 # H1: producer-signature verification on block apply (height-gated, dormant by
 # default). Ed25519Hot producers carry their pubkey as the 32-byte ValidatorId.
 ed25519-dalek = { version = "2.2" }
+# The header-page wire (`serve_read` codecs 0/1/5, the client decoders, the client block
+# store) is positional bincode 1.3.3 — the SAME crate/version sigil-top encodes with, so
+# the legacy-layout (`SigilBlockHeaderV0Legacy`) bytes are exactly what every deployed
+# client wrote and read before the fifth root existed.
+bincode = "1"
 
 [dev-dependencies]
 serde_json = { workspace = true }
-# LANE 3 byte-identity proof (tests/byte_identity.rs): MUST match the exact encoder
-# sigil-top uses on the snapshot wire (`bincode = "1"` in crates/sigil-top/Cargo.toml,
-# resolves to 1.3.3 — default little-endian fixint). The proof is only sound if it
-# asserts against the *same* bincode that produces the on-wire bytes.
-bincode = "1"

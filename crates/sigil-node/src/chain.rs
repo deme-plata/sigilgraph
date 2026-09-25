@@ -220,6 +220,23 @@ impl ChainTip {
                 "STATE DIVERGENCE at height {} — local roots != header roots", expected_height
             ));
         }
+        // The fifth root — the shielded pool — height-gated (see `Block::check_shielded_pool_root`).
+        let local_pool_root = self.state.shielded_pool_root();
+        if !block.check_shielded_pool_root(local_pool_root) {
+            return Err(anyhow!(
+                "STATE DIVERGENCE at height {} — shielded pool root: header {} != local {}",
+                expected_height,
+                block.header.shielded_pool_root.map(hex::encode).unwrap_or_else(|| "none".into()),
+                hex::encode(local_pool_root)
+            ));
+        }
+        if expected_height == sigil_header::shielded_pool_root_activation_height() {
+            eprintln!(
+                "🔏 shielded pool root ACTIVE from height {} — header commits {} (notes {}, nullifiers {})",
+                expected_height, hex::encode(local_pool_root),
+                self.state.shielded().len(), self.state.shielded().nullifier_count()
+            );
+        }
 
         // Hash once, here, while the header is fresh — `parent_hash()` serves it from now on.
         self.tip_hash = Some(block.hash());

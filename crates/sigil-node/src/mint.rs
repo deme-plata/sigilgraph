@@ -124,7 +124,7 @@ pub fn mint_next_block_with_schedule(
             }
         }
     };
-    let (transition, roots, block_events, included_txs) =
+    let (transition, roots, block_events, included_txs, pool_root) =
         crate::coinbase::build_block_body_for_shares_with_schedule(&state, height, reward, txs, winner, &shares, schedule);
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
@@ -196,6 +196,9 @@ pub fn mint_next_block_with_schedule(
         },
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         topology_commitment,
+        // Height-gated fifth root (`sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT`):
+        // `None` below the gate keeps every pre-gate hash byte-identical, `Some` from it.
+        shielded_pool_root: if sigil_header::shielded_pool_root_required(height) { Some(pool_root) } else { None },
     };
     // Real signature if (and only if) the operator opted in AND this is the
     // self-mined path with a matching producer wallet — see

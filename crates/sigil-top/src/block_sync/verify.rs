@@ -236,22 +236,30 @@ pub(super) fn ingest_backfill_bytes(bytes: &[u8], store: &mut BlockStore) -> usi
 /// unparseable / oversized / bad-bincode body (logged, never panics, never zstd-bombs —
 /// see the 64 MiB cap in `zstd_decompress_body`); the caller treats that exactly like a
 /// benched peer. Byte-for-byte the same decode the inline path used before the split.
+/// ONE decoder for every tagged header page — the node's own layouts, imported
+/// (`sigil_header::{decode_v1_header_page, decode_legacy_header_page}`), never a local
+/// mirror. `'V'` (codec 5) is the fifth-root layout; `'Z'`/`'H'` (codecs 1/0) are the
+/// pre-fifth-root layout and decode with the root `None`.
+pub(super) fn decode_tagged_header_page(bytes: &[u8]) -> Option<Vec<SigilBlockHeaderV0>> {
+    match bytes.first()? {
+        &sigil_header::HEADER_PAGE_TAG_V1 => {
+            let body = zstd_decompress_body(&bytes[1..])?;
+            sigil_header::decode_v1_header_page(&body)
+        }
+        b'Z' => {
+            let body = zstd_decompress_body(&bytes[1..])?;
+            sigil_header::decode_legacy_header_page(&body)
+        }
+        b'H' => sigil_header::decode_legacy_header_page(&bytes[1..]),
+        _ => None,
+    }
+}
+
 pub(super) fn decode_backfill_headers(bytes: &[u8]) -> Vec<SigilBlockHeaderV0> {
     match bytes.first() {
-        // v0.33: 'Z' = zstd-compressed headers. Decompress (capped) → bincode Vec<Header>.
-        Some(&b'Z') => match zstd_decompress_body(&bytes[1..]) {
-            Some(body) => bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body).unwrap_or_else(|_| {
-                crate::tlog!("[p2p-sync] resp: bad zstd header bincode ({} B)", bytes.len());
-                Vec::new()
-            }),
-            None => {
-                crate::tlog!("[p2p-sync] resp: zstd decompress failed ({} B)", bytes.len());
-                Vec::new()
-            }
-        },
-        // v0.10.0: 'H' = raw bincode Vec<Header> (one batched write at the call site).
-        Some(&b'H') => bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]).unwrap_or_else(|_| {
-            crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len());
+        // 'V' (codec 5, fifth-root layout) / 'Z' (codec 1) / 'H' (codec 0): one shared decoder.
+        Some(&sigil_header::HEADER_PAGE_TAG_V1) | Some(&b'Z') | Some(&b'H') => decode_tagged_header_page(bytes).unwrap_or_else(|| {
+            crate::tlog!("[p2p-sync] resp: bad header page (tag {:?}, {} B)", bytes.first().map(|b| *b as char), bytes.len());
             Vec::new()
         }),
         // legacy full-block JSON envelope.
@@ -298,17 +306,8 @@ pub(super) fn decode_verify_backfill(bytes: &[u8]) -> Vec<SigilBlockHeaderV0> {
 /// reply to an open-ended `[frontier, u64::MAX]` request is a real lower bound on the
 /// peer's head, learnable without any gossip.
 pub(super) fn max_header_height(bytes: &[u8]) -> Option<u64> {
-    if bytes.first() == Some(&b'Z') {
-        // v0.33: zstd reply — decompress (capped) then scan like the 'H' body.
-        let body = zstd_decompress_body(&bytes[1..])?;
-        return bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body)
-            .ok()
-            .and_then(|hs| hs.iter().map(|h| h.height).max());
-    }
-    if bytes.first() == Some(&b'H') {
-        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..])
-            .ok()
-            .and_then(|hs| hs.iter().map(|h| h.height).max())
+    if matches!(bytes.first(), Some(&sigil_header::HEADER_PAGE_TAG_V1) | Some(&b'Z') | Some(&b'H')) {
+        decode_tagged_header_page(bytes).and_then(|hs| hs.iter().map(|h| h.height).max())
     } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
         resp.blocks
             .iter()
@@ -326,11 +325,8 @@ pub(super) fn max_header_height(bytes: &[u8]) -> Option<u64> {
 /// zstd codec=1 lane went live every chunk logged `h=[0..0]` and looked like a broken
 /// decode — a pure display bug; `ingest_backfill_bytes` always stored the blocks fine.)
 pub(super) fn header_height_range(bytes: &[u8]) -> Option<(u64, u64)> {
-    let heights: Vec<u64> = if bytes.first() == Some(&b'Z') {
-        let body = zstd_decompress_body(&bytes[1..])?;
-        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body).ok()?.iter().map(|h| h.height).collect()
-    } else if bytes.first() == Some(&b'H') {
-        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]).ok()?.iter().map(|h| h.height).collect()
+    let heights: Vec<u64> = if matches!(bytes.first(), Some(&sigil_header::HEADER_PAGE_TAG_V1) | Some(&b'Z') | Some(&b'H')) {
+        decode_tagged_header_page(bytes)?.iter().map(|h| h.height).collect()
     } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
         resp.blocks.iter()
             .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
@@ -664,6 +660,7 @@ mod fast_path_tests {
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
+            shielded_pool_root: None,
         }
     }
 
@@ -820,7 +817,8 @@ mod fast_path_tests {
     #[test]
     fn decode_backfill_roundtrips_and_precheck_filters() {
         let chain = mk_chain(8);
-        let body = bincode::serialize(&chain).unwrap();
+        // 'H'/'Z' carry the pre-fifth-root LEGACY layout (the node's own encoder, imported).
+        let body = sigil_header::encode_legacy_header_page(&chain);
 
         // 'H' raw-bincode codec.
         let mut h_frame = vec![b'H'];
@@ -835,6 +833,17 @@ mod fast_path_tests {
         let got_z = decode_backfill_headers(&z_frame);
         assert_eq!(got_z, chain, "'Z' decode round-trips to the same headers");
 
+        // 'V' codec-5 page: the FULL layout — a gated header keeps its fifth root, and the
+        // same header through a legacy page loses it (by design: that client must update).
+        let mut gated = chain.clone();
+        gated[5].shielded_pool_root = Some([0x5A; 32]);
+        let mut v_frame = vec![sigil_header::HEADER_PAGE_TAG_V1];
+        v_frame.extend_from_slice(&zstd::encode_all(&sigil_header::encode_v1_header_page(&gated)[..], 1).unwrap());
+        assert_eq!(decode_backfill_headers(&v_frame), gated, "'V' decode keeps the fifth root");
+        let mut z_lossy = vec![b'Z'];
+        z_lossy.extend_from_slice(&zstd::encode_all(&sigil_header::encode_legacy_header_page(&gated)[..], 1).unwrap());
+        assert!(decode_backfill_headers(&z_lossy)[5].shielded_pool_root.is_none());
+
         // decode_verify_backfill keeps all well-formed headers...
         assert_eq!(decode_verify_backfill(&z_frame).len(), 8);
 
@@ -842,7 +851,7 @@ mod fast_path_tests {
         let mut bad = chain.clone();
         bad[2].vdf_input = [0u8; 32]; // breaks vdf_input == BLAKE3(parent || nonce)
         let mut z_bad = vec![b'Z'];
-        z_bad.extend_from_slice(&zstd::encode_all(&bincode::serialize(&bad).unwrap()[..], 1).unwrap());
+        z_bad.extend_from_slice(&zstd::encode_all(&sigil_header::encode_legacy_header_page(&bad)[..], 1).unwrap());
         assert_eq!(decode_verify_backfill(&z_bad).len(), 7, "precheck-failing header is filtered out");
 
         // unparseable → empty, never panics.

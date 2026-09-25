@@ -202,7 +202,7 @@ pub fn producer_id_for(id: flux_chronos::NodeId) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots, producer: [u8; 32]) -> SigilBlockHeaderV0 {
+fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots, producer: [u8; 32], pool_root: Option<[u8; 32]>) -> SigilBlockHeaderV0 {
     let nonce = SqiSignature::from_array([0u8; SQISIGN_L5_LEN]);
     let mut h = blake3::Hasher::new();
     h.update(&parent_hash);
@@ -238,6 +238,7 @@ fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots, producer
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         // No Braid in the deterministic sim's header path — informational field.
         topology_commitment: None,
+        shielded_pool_root: pool_root,
     }
 }
 
@@ -286,7 +287,7 @@ impl GenesisSpec {
         let mut scratch = SigilState::new();
         let roots = commit_state_transition(&mut scratch, &transition, 0)
             .expect("genesis transition must commit");
-        let header = build_header(0, [0u8; 32], roots, [0u8; 32]);
+        let header = build_header(0, [0u8; 32], roots, [0u8; 32], None);
         Block { header, transition, events }
     }
 }
@@ -457,6 +458,15 @@ impl SigilSimNode {
             self.divergence_count += 1;
             return ApplyOutcome::Divergence;
         }
+        // The fifth root, gate-aware (mirrors `sigil_node::chain::ChainTip::apply`).
+        let pool_ok = match block.header.shielded_pool_root {
+            Some(r) => sigil_header::shielded_pool_root_required(block.header.height) && r == self.state.shielded_pool_root(),
+            None => !sigil_header::shielded_pool_root_required(block.header.height),
+        };
+        if !pool_ok {
+            self.divergence_count += 1;
+            return ApplyOutcome::Divergence;
+        }
         self.next_height += 1;
         self.parent_hash = block.hash();
         self.blocks_applied += 1;
@@ -501,7 +511,9 @@ impl SigilSimNode {
         };
         let mut events = coinbase.events;
         events.extend(result.events);
-        let header = build_header(height, self.parent_hash, roots, producer_id_for(self.my_id));
+        // THE FIFTH ROOT, height-gated exactly like the real producer (`mint.rs`).
+        let pool_root = if sigil_header::shielded_pool_root_required(height) { Some(self.state.shielded_pool_root()) } else { None };
+        let header = build_header(height, self.parent_hash, roots, producer_id_for(self.my_id), pool_root);
         let block = Block { header, transition, events };
         self.next_height += 1;
         self.parent_hash = block.hash();

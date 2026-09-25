@@ -123,7 +123,7 @@ fn run(heights: u64, per_height: u64, candidates: usize, n_senders: usize) -> Ru
         let mut winner: Option<(StateTransition, Vec<[u8; 32]>)> = None;
         for c in 0..candidates {
             let block_txs = bridge.snapshot_for_mint();
-            let (transition, _roots, _events, included) =
+            let (transition, _roots, _events, included, _pool_root) =
                 coinbase::build_block_body_for_shares(&state, h, None, &block_txs, producer, &shares);
             if c == candidates - 1 {
                 let hashes: Vec<[u8; 32]> = included.iter().map(|t| t.tx.hash()).collect();

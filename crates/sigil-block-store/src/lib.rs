@@ -59,6 +59,37 @@ pub struct StoredBlock {
     pub synced_at: u64,
 }
 
+/// The pre-fifth-root record layout (every record written before 2026-09-25): the same
+/// three fields with the legacy header. Positional bincode cannot default a missing
+/// trailing field, so an existing store is read through this and converted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredBlockLegacy {
+    header: sigil_header::SigilBlockHeaderV0Legacy,
+    hash_hex: String,
+    synced_at: u64,
+}
+
+/// Tag of a record written in the fifth-root layout. Unambiguous: a legacy record begins
+/// with `version: u16 = 0` (byte `0x00`).
+const STORED_BLOCK_TAG_V1: u8 = 0x01;
+
+/// Encode a record in the fifth-root layout (tagged).
+fn encode_stored_block(b: &StoredBlock) -> Result<Vec<u8>, bincode::Error> {
+    let mut out = vec![STORED_BLOCK_TAG_V1];
+    out.extend(bincode::serialize(b)?);
+    Ok(out)
+}
+
+/// Decode a record of EITHER layout.
+fn decode_stored_block(bytes: &[u8]) -> Option<StoredBlock> {
+    match bytes.first()? {
+        &STORED_BLOCK_TAG_V1 => bincode::deserialize::<StoredBlock>(&bytes[1..]).ok(),
+        _ => bincode::deserialize::<StoredBlockLegacy>(bytes).ok().map(|l| StoredBlock {
+            header: l.header.into(), hash_hex: l.hash_hex, synced_at: l.synced_at,
+        }),
+    }
+}
+
 pub struct BlockStore {
     db: flux_db::Database,
     best_height: u64,
@@ -410,7 +441,7 @@ impl BlockStore {
                 Some(&KEY_META) => continue,
                 _ => {}
             }
-            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+            if let Some(block) = decode_stored_block(&value) {
                 let h = block.header.height;
                 if h >= best_height {
                     best_height = h;
@@ -769,7 +800,7 @@ impl BlockStore {
                 .as_secs(),
         };
 
-        let value = bincode::serialize(&block).map_err(|e| format!("serialize: {}", e))?;
+        let value = encode_stored_block(&block).map_err(|e| format!("serialize: {}", e))?;
         self.db.put(hash_hex.as_bytes(), &value)?;
         self.db.put(&height_key(height), hash_hex.as_bytes())?; // height index
 
@@ -804,7 +835,7 @@ impl BlockStore {
             return Ok(());
         }
         let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
-        let value = bincode::serialize(&block).map_err(|e| format!("serialize: {}", e))?;
+        let value = encode_stored_block(&block).map_err(|e| format!("serialize: {}", e))?;
         self.db.put(hash_hex.as_bytes(), &value)?;
         self.db.put(&height_key(height), hash_hex.as_bytes())?;
         if height >= self.best_height {
@@ -845,7 +876,7 @@ impl BlockStore {
                         let block = StoredBlock {
                             header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0,
                         };
-                        if let Ok(value) = bincode::serialize(&block) {
+                        if let Ok(value) = encode_stored_block(&block) {
                             out.push((block.header.height, hash_hex, parent_hash_hex, value));
                         }
                     }
@@ -1009,7 +1040,7 @@ impl BlockStore {
                     for header in chunk {
                         let hash_hex = hex::encode(header.hash());
                         let block = StoredBlock { header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0 };
-                        if let Ok(value) = bincode::serialize(&block) {
+                        if let Ok(value) = encode_stored_block(&block) {
                             out.push((header.height, hash_hex, value));
                         }
                     }
@@ -1116,7 +1147,7 @@ impl BlockStore {
                     for header in chunk {
                         let hash_hex = hex::encode(header.hash());
                         let block = StoredBlock { header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0 };
-                        if let Ok(value) = bincode::serialize(&block) {
+                        if let Ok(value) = encode_stored_block(&block) {
                             out.push((header.height, hash_hex, value));
                         }
                     }
@@ -1261,7 +1292,7 @@ impl BlockStore {
 
     pub fn get_block(&self, hash_hex: &str) -> Option<StoredBlock> {
         self.db.get(hash_hex.as_bytes()).ok().flatten().and_then(|v| {
-            bincode::deserialize::<StoredBlock>(&v).ok()
+            decode_stored_block(&v)
         })
     }
 
@@ -1269,7 +1300,7 @@ impl BlockStore {
         let mut blocks: Vec<StoredBlock> = Vec::new();
         let iter = self.db.iter();
         for (_key, value) in iter {
-            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+            if let Some(block) = decode_stored_block(&value) {
                 blocks.push(block);
             }
         }
@@ -1297,7 +1328,7 @@ impl BlockStore {
         let hash_hex = hex::encode(header.hash());
         let height = header.height;
         let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
-        let value = bincode::serialize(&block).expect("serialize");
+        let value = encode_stored_block(&block).expect("serialize");
         self.db.put(hash_hex.as_bytes(), &value).expect("put block");
         self.db.put(&height_key(height), hash_hex.as_bytes()).expect("put index");
         if height >= self.best_height {
@@ -1449,7 +1480,7 @@ impl BlockReader {
     /// hold the full header and `header.hash()` re-derives to the stored hash hex.
     fn row_for_hash(&self, height_hint: Option<u64>, hash_hex: &str) -> Option<BlockRow> {
         let raw = self.db.get(hash_hex.as_bytes()).ok().flatten()?;
-        if let Ok(sb) = bincode::deserialize::<StoredBlock>(&raw) {
+        if let Some(sb) = decode_stored_block(&raw) {
             let recomputed = hex::encode(sb.header.hash());
             let verified = recomputed == sb.hash_hex;
             let prod = {
@@ -1695,7 +1726,7 @@ mod tests {
         let mut headers: Vec<SigilBlockHeaderV0> = Vec::with_capacity(4096);
         for (key, value) in s.db.iter() {
             if matches!(key.first(), Some(&KEY_HINDEX) | Some(&KEY_META)) { continue; }
-            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+            if let Some(block) = decode_stored_block(&value) {
                 headers.push(block.header);
                 if headers.len() >= 4096 { break; }
             }
@@ -1762,6 +1793,7 @@ mod tests {
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             }
         }
         let p = tmp("rollback-heal");
@@ -1825,6 +1857,7 @@ mod tests {
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             }
         }
         let p = tmp("bulk-trusted-poison");
@@ -1911,6 +1944,7 @@ mod tests {
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             }
         }
         let p = tmp("bulk-trusted-poison-self-heals");
@@ -1986,6 +2020,7 @@ mod tests {
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             }
         }
         let p = tmp("bulk-trusted-no-clobber");
@@ -2044,6 +2079,7 @@ mod tests {
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
+                shielded_pool_root: None,
             }
         }
         let p = tmp("base1-anchor");

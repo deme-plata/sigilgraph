@@ -386,6 +386,7 @@ mod tests {
         }
 
         let cfg = |fd: u64| BraidConfig {
+            final_quorum: None,
             final_depth: fd,
             max_window: 1 << 20,
             max_pending: 1 << 18,

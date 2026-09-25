@@ -293,6 +293,12 @@ pub fn read_blocks_range(dir: &Path, from: u64, to: u64) -> Vec<crate::block::Bl
 /// * `1` → `'Z'` + zstd-1 of the same body (falls back to `'H'` if zstd errors)
 /// * `2` → `'S'` + bincode `Vec<SkeletonRecord>` (the frozen 72 B/record wire)
 ///
+/// * `5` → `'V'` + zstd-1 of `bincode(Vec<SigilBlockHeaderV0>)` — the FIFTH-ROOT layout
+///   (`sigil_header::HEADER_PAGE_CODEC_V1`). Codecs 0/1 keep carrying the pre-fifth-root
+///   byte layout (`SigilBlockHeaderV0Legacy`): positional bincode cannot tolerate a new
+///   trailing field, so every client that has not learned codec 5 keeps decoding exactly
+///   the bytes it always did. Below the gate the two layouts are lossless mirrors.
+///
 /// Codecs 3 (`'P'`) and 4 (`'F'`) are deliberately NOT handled: both encode the
 /// CURRENT anchor/tip rather than just `[lo,hi]`, so they depend on live chain
 /// state and must stay on the caller's side.
@@ -304,7 +310,14 @@ pub fn encode_headers(headers: &[SigilBlockHeaderV0], codec: u8) -> Vec<u8> {
         o.extend(bincode::serialize(&recs).unwrap_or_default());
         return o;
     }
-    let body = bincode::serialize(&headers.to_vec()).unwrap_or_default();
+    if codec == sigil_header::HEADER_PAGE_CODEC_V1 {
+        let body = sigil_header::encode_v1_header_page(headers);
+        let mut o = vec![sigil_header::HEADER_PAGE_TAG_V1];
+        // never fall back to a legacy tag: the client asked for the fifth-root layout
+        o.extend(zstd::encode_all(&body[..], 1).unwrap_or_default());
+        return o;
+    }
+    let body = sigil_header::encode_legacy_header_page(headers);
     if codec == 1 {
         // v0.33 zstd wire. Measured 14.0× on a real chunk (~20 ms/4 MB — far
         // cheaper than the wire time it saves). Any compress error → plain 'H'.
@@ -383,6 +396,7 @@ mod tests {
                 settle_tx: None,
             },
             topology_commitment: None,
+            shielded_pool_root: None,
             sig_scheme: scheme,
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
@@ -561,19 +575,30 @@ mod tests {
         let hs: Vec<SigilBlockHeaderV0> = (0u64..4).map(mk_header).collect();
 
         let h = encode_headers(&hs, 0);
-        assert_eq!(h[0], b'H', "codec 0 is 'H' + bincode Vec<header>");
+        assert_eq!(h[0], b'H', "codec 0 is 'H' + bincode Vec<header> in the LEGACY layout");
         assert_eq!(
             h[1..],
-            bincode::serialize(&hs).unwrap()[..],
-            "codec 0 body must be the plain bincode encoding, unwrapped"
+            sigil_header::encode_legacy_header_page(&hs)[..],
+            "codec 0 body must be the legacy bincode encoding, unwrapped"
         );
+        // and that legacy encoding IS the pre-fifth-root bytes
+        let legacy_full: Vec<sigil_header::SigilBlockHeaderV0Legacy> = hs.iter().map(Into::into).collect();
+        assert_eq!(h[1..], bincode::serialize(&legacy_full).unwrap()[..]);
+        assert_eq!(sigil_header::decode_legacy_header_page(&h[1..]).unwrap(), hs);
 
         let z = encode_headers(&hs, 1);
         assert_eq!(z[0], b'Z', "codec 1 is 'Z' + zstd of the SAME body");
         assert_eq!(
             zstd::decode_all(&z[1..]).unwrap(),
-            bincode::serialize(&hs).unwrap(),
+            sigil_header::encode_legacy_header_page(&hs),
             "codec 1 must decompress to exactly the codec 0 body"
+        );
+
+        let v = encode_headers(&hs, sigil_header::HEADER_PAGE_CODEC_V1);
+        assert_eq!(v[0], sigil_header::HEADER_PAGE_TAG_V1, "codec 5 is 'V' + zstd of the FULL layout");
+        assert_eq!(
+            sigil_header::decode_v1_header_page(&zstd::decode_all(&v[1..]).unwrap()).unwrap(), hs,
+            "codec 5 carries the full header, fifth root included"
         );
 
         let s = encode_headers(&hs, 2);

@@ -17,7 +17,9 @@ set -euo pipefail
 VER="${1:?usage: release-sigil-top.sh <version> [note]}"
 NOTE="${2:-sigil-top v${VER}}"
 PINNED_PUB="150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402"
-REPO="/home/storage/deepseek-codewhale/sigil"
+# SIGIL_RELEASE_REPO (2026-09-25): a DETACHED worktree pinned at the tested commit, so a release
+# from a shared tree never ships another lane's uncommitted work under the signature.
+REPO="${SIGIL_RELEASE_REPO:-/home/storage/deepseek-codewhale/sigil}"
 FLUXC="${FLUXC:-/home/storage/deepseek-codewhale/flux/target/debug/fluxc}"
 DL="/home/orobit/q-narwhalknight/dist-fluxapp/downloads"
 # v9 (2026-09-11): artifact URLs inside the SIGNED manifest point at the canonical SIGIL home.

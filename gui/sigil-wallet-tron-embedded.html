@@ -2288,8 +2288,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(kind==='send'){
       if(icon) icon.textContent='🔒';
       if(head){ head.textContent='SENT PRIVATELY'; head.style.color='#c0a8fa'; }
-      if(foot) foot.innerHTML='<b style="color:#00e0c6">✓ Sent privately</b> — single-producer chain, '
-        +'so it finalizes at the next block (block inclusion is final here); deep settlement continues in the background.';
+      // 2026-09-25 rocky-help-0925: at submit the node has only ACCEPTED it. This line used to say "Sent …
+      // finalizes at the next block" before any block carried the tx — and 14 s later the same receipt read
+      // "✗ double-spend". The settle-watch rewrites it to "Settled — final" only after /wait reports applied.
+      if(foot) foot.innerHTML='<b style="color:#fbbf24">⏳ Accepted</b> — queued for the next block. This line becomes '
+        +'<b>Settled — final</b> the moment the node applies it, or says why it did not.';
     } else {
       if(icon) icon.textContent='🛡';
       if(head){ head.textContent='SHIELDED — NOT SENT YET'; head.style.color='#00e0c6'; }
@@ -2951,7 +2954,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
     if(!txid) return;
-    var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0;
+    var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0, dsUntil=0;
     // 2026-09-12: PUSH, not poll. /v1/transactions/:hash/wait holds the request open and
     // answers the instant the node retires the tx (applied / rejected) — the certificate
     // is ~1 block behind the tip, so 'final' now arrives when it happens, not on the
@@ -2978,6 +2981,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       try{ var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
            if(nl&&nl.nullifiers) seen=nl.nullifiers.map(function(h){return String(h).toLowerCase();}).indexOf(nf)>=0; }catch(_){}
       unknowns=(st==='unknown')?unknowns+1:0;
+      // 2026-09-25 rocky-help-0925: a "double-spend" verdict on OUR tx is, today, most often the braid
+      // re-offering a payment that ALREADY APPLIED (node journal: "evicted after 3 permanent refusals"),
+      // and the API's view of the pool (/shielded/has, /nullifiers) lagged that apply by minutes when
+      // measured (leaf 2365 → 2366/2367, 15:40 CEST). Before calling "not sent" on that reason, keep
+      // asking for our own output for up to 5 minutes; the verdict below then stands.
+      if(st==='rejected' && !seen && /double.?spend|already spent/i.test(reason||'')){
+        if(!dsUntil){ dsUntil=Date.now()+5*60*1000; privMsg('⏳ the node reports this input as already spent — checking whether the payment itself landed (up to a few minutes)…', '#fbbf24'); }
+        if(Date.now()<dsUntil){ await new Promise(function(r){ setTimeout(r,5000); }); continue; }
+      }
       // A refusal is authoritative (since the 2026-09-08 node fix a 'rejected' is real).
       // It must beat a seen nullifier: if the note was ALREADY spent by an older
       // transaction its nullifier is on chain and would read as 'our' success.
@@ -3093,7 +3105,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     // existed may not be visible to it, which is fine: that just falls through to the
     // manual flow beneath, exactly like every other failure here.
     var fastPrivBtn=document.getElementById('privGo');
+    // 2026-09-25 rocky-help-0925: the local fast path exists ONLY when this page is served by a local
+    // `sigil-top serve` (crates/sigil-top/src/mine_local_api.rs). On sigilgraph.org it 404'd on EVERY
+    // send — ~1.3 s and a console error before the real path ran (sibling lane measured it today).
+    var localFast = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) || location.port==='9800';
     try{
+      if(!localFast) throw new Error('no local node endpoint on this origin');
       if(fastPrivBtn)fastPrivBtn.disabled=true;
       privMsg('Building the private spend locally…', '#6df3ff');
       var candNotes=myNotes(from).filter(function(n){ return !n.spent; }).map(function(n){ return {index:n.index, value:String(n.value)}; });
@@ -3108,7 +3125,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
             fastUpdated.push({index:ffj.change_index, value:Number(ffj.change_value), ts:Date.now()});
           }
           saveMyNotes(from, fastUpdated);
-          privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(ffj.txid?String(ffj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
+          privMsg('✓ accepted — '+amtStr+' SIGIL private payment queued (txid '+(ffj.txid?String(ffj.txid).slice(0,10)+'…':'queued')+'). Waiting for the block…', '#6df3ff');
           var fastAmtEl=document.getElementById('privAmt'); if(fastAmtEl) fastAmtEl.value=''; sigilClearPrivMemo();
           if(fastPrivBtn)fastPrivBtn.disabled=false;
           // A receipt that says SENT (not SHIELDED), and an EXPLICIT success for the
@@ -3413,8 +3430,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // dead for good and nothing moved. Retire it and let the orchestrator pick another note for
         // THIS payment ('retry' = nothing submitted). Before today the same dead note was re-picked
         // on every press.
-        if(/already spent|double.?spend/i.test(sErr)){
-          try{ privRetire(from, pick, _retireTag, noteEp, [req.nullifier].concat(req.extra_nullifiers||[]), null); }catch(_){}
+        var sPerm = !!(sj && sj.permanent===true);   // sigil-api dfd1120c: door-check verdicts carry permanent:true
+        if(/already spent|double.?spend/i.test(sErr) || (sPerm && /spent/i.test(sErr))){
+          var sNf=(sErr.match(/nullifier\s+([0-9a-f]{64})/i)||[])[1]||null;   // the node names the dead input
+          try{ privRetire(from, pick, _retireTag, noteEp, [req.nullifier, sNf].concat(req.extra_nullifiers||[]), null); }catch(_){}
           privMsg('✗ '+sErr+' — that note is now retired; picking another note…', '#fbbf24');
           return 'retry';
         }
@@ -3437,7 +3456,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       }
       saveMyNotes(from, updated);
 
-      privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(sj.txid?String(sj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
+      privMsg('✓ accepted — '+amtStr+' SIGIL private payment queued (txid '+(sj.txid?String(sj.txid).slice(0,10)+'…':'queued')+'). Waiting for the block…', '#6df3ff'); // 2026-09-25 rocky-help-0925: 'sent' only after /wait says applied
       var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value=''; sigilClearPrivMemo();
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.

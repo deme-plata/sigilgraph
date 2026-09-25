@@ -116,6 +116,35 @@ struct Entry {
     shielded_payees: u32,
     /// Share of THIS block's reward, in weight terms, going to shielded payees.
     shielded_weight_pct: f32,
+    /// How many of `payees` hold a PUBLISHED shield key (`/v1/shielded/register`),
+    /// whether or not their cut minted as a note. On a chain whose coinbase is
+    /// transparent (`sigil_tx::coinbase_is_transparent`) this is > 0 while
+    /// `shielded_payees` is 0 — and that gap is the whole point of keeping both.
+    ///
+    /// 2026-09-25 (rocky): before this field existed, `shielded_payees` WAS this number.
+    /// Measured on g2 over 7,342 blocks: the endpoint reported 77 % of paid value "to
+    /// SHIELDED miners, invisible to /v1/balance by design" while the shielded pool did
+    /// not gain a single note and the miner's transparent balance rose 63 SIGIL. The
+    /// instrument was reading a registry flag and calling it money flow.
+    registered_payees: u32,
+}
+
+/// What the coinbase will ACTUALLY do with `registered` shield-registered payees at
+/// `height`: the split the producer records must follow the same rule the payout code
+/// follows (`coinbase.rs` takes `shielded_credit` only when
+/// `!sigil_tx::coinbase_is_transparent(height)`), or the ledger reports a privacy that
+/// never happened. Returns `(shielded_payees, shielded_weight_pct)`.
+///
+/// Residual honesty gap, stated: when the coinbase is NOT transparent, `shielded_credit`
+/// can still fall back to a transparent write for one payee (pool full, amount above the
+/// circuit range, commitment collision). This helper does not see those; it is exact on
+/// a transparent chain and an upper bound on a shielded one.
+pub fn shielded_split(height: u64, registered: u32, registered_weight_pct: f32) -> (u32, f32) {
+    if sigil_tx::coinbase_is_transparent(height) {
+        (0, 0.0)
+    } else {
+        (registered, registered_weight_pct.clamp(0.0, 100.0))
+    }
 }
 
 fn ring() -> &'static Mutex<VecDeque<Entry>> {
@@ -133,6 +162,7 @@ pub fn record(
     reward: u128,
     shielded_payees: u32,
     shielded_weight_pct: f32,
+    registered_payees: u32,
 ) {
     if let Ok(mut r) = ring().lock() {
         if r.len() == RING_CAP {
@@ -145,6 +175,7 @@ pub fn record(
             reward,
             shielded_payees,
             shielded_weight_pct: shielded_weight_pct.clamp(0.0, 100.0),
+            registered_payees: registered_payees.max(shielded_payees),
         });
     }
 }
@@ -178,6 +209,10 @@ pub struct Summary {
     /// transparent balance. **Read this before concluding a miner is unpaid**: a shielded
     /// miner's `/v1/balance` stays at 0 by design while it earns normally.
     pub shielded_value_pct: f64,
+    /// Blocks whose payout included at least one payee with a PUBLISHED shield key —
+    /// registration, not privacy. When this is > 0 and `blocks_with_shielded_payees` is 0
+    /// the chain's coinbase is transparent and those wallets were paid in the clear.
+    pub blocks_with_registered_payees: usize,
 }
 
 /// Summarise the last `window` blocks (clamped to what the ring holds). Pass 0
@@ -200,6 +235,9 @@ pub fn summary(window: usize) -> Summary {
         s.height_hi = s.height_hi.max(e.height);
         if e.shielded_payees > 0 {
             s.blocks_with_shielded_payees += 1;
+        }
+        if e.registered_payees > 0 {
+            s.blocks_with_registered_payees += 1;
         }
         if !matches!(e.source, PayoutSource::ProducerFallback) {
             paid_value += e.reward as f64;
@@ -257,19 +295,36 @@ pub fn verdict(s: &Summary) -> String {
             s.producer_fallback_pct, s.blocks
         )
     } else {
-        format!(
+        let base = format!(
             "{:.1}% of emitted value to the producer fallback over {} blocks \
-             ({} real-solve, {} share-pool, {} fallback; mean {:.1} payees when paid). \
-             {:.1}% of paid value went to SHIELDED miners — that share is invisible to \
-             /v1/balance by design, so do not read a shielded miner's zero balance as unpaid.",
+             ({} real-solve, {} share-pool, {} fallback; mean {:.1} payees when paid). ",
             s.producer_fallback_pct,
             s.blocks,
             s.real_solve_blocks,
             s.share_pool_blocks,
             s.producer_fallback_blocks,
             s.mean_payees_when_paid,
-            s.shielded_value_pct
-        )
+        );
+        // Three honest tails. The middle one is the 2026-09-25 lesson: a registered wallet
+        // on a transparent-coinbase chain is paid in the clear, and saying "invisible to
+        // /v1/balance" about it sends the reader to look for money in the wrong place.
+        let tail = if s.shielded_value_pct > 0.0 {
+            format!(
+                "{:.1}% of paid value went to SHIELDED miners — that share is invisible to \
+                 /v1/balance by design, so do not read a shielded miner's zero balance as unpaid.",
+                s.shielded_value_pct
+            )
+        } else if s.blocks_with_registered_payees > 0 {
+            format!(
+                "{} of {} blocks paid wallets REGISTERED for shielded rewards, but the coinbase is \
+                 TRANSPARENT at these heights, so every cut landed in /v1/balance and 0 private \
+                 notes were minted — `shielded: true` in /v1/mining/miners means registered, not hidden.",
+                s.blocks_with_registered_payees, s.blocks
+            )
+        } else {
+            "No shielded payouts in this window.".to_string()
+        };
+        base + &tail
     }
 }
 
@@ -310,9 +365,9 @@ mod tests {
         reset();
         for h in 0..1000u64 {
             if h % 50 == 0 {
-                record(h, PayoutSource::RealSolve, 3, 1_000_000, 0, 0.0);
+                record(h, PayoutSource::RealSolve, 3, 1_000_000, 0, 0.0, 0);
             } else {
-                record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
+                record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0, 0);
             }
         }
         let s = summary(0);
@@ -333,9 +388,9 @@ mod tests {
         reset();
         for h in 0..1000u64 {
             if h % 100 == 0 {
-                record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
+                record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0, 0);
             } else {
-                record(h, PayoutSource::SharePool, 5, 1_000_000, 0, 0.0);
+                record(h, PayoutSource::SharePool, 5, 1_000_000, 0, 0.0, 0);
             }
         }
         let s = summary(0);
@@ -352,10 +407,10 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..900u64 {
-            record(h, PayoutSource::SharePool, 4, 1, 0, 0.0); // many blocks, negligible value
+            record(h, PayoutSource::SharePool, 4, 1, 0, 0.0, 0); // many blocks, negligible value
         }
         for h in 900..1000u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0); // few blocks, all the money
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0, 0); // few blocks, all the money
         }
         let s = summary(0);
         assert_eq!(s.share_pool_blocks, 900, "miners were paid on 90% of BLOCKS");
@@ -386,7 +441,7 @@ mod tests {
         for h in 0..1000u64 {
             // Every block paid, every payee shielded: transparent balances would show
             // NOTHING moving anywhere.
-            record(h, PayoutSource::SharePool, 2, 1_000_000, 2, 100.0);
+            record(h, PayoutSource::SharePool, 2, 1_000_000, 2, 100.0, 2);
         }
         let s = summary(0);
         assert_eq!(s.producer_fallback_blocks, 0, "miners ARE being paid");
@@ -410,7 +465,7 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..1000u64 {
-            record(h, PayoutSource::SharePool, 2, 1_000_000, 1, 40.0);
+            record(h, PayoutSource::SharePool, 2, 1_000_000, 1, 40.0, 1);
         }
         let s = summary(0);
         assert!(
@@ -429,10 +484,10 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..500u64 {
-            record(h, PayoutSource::SharePool, 1, 1_000_000, 1, 100.0);
+            record(h, PayoutSource::SharePool, 1, 1_000_000, 1, 100.0, 1);
         }
         for h in 500..1000u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0, 0);
         }
         let s = summary(0);
         assert!(
@@ -448,7 +503,7 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..10u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0, 0);
         }
         let s = summary(0);
         assert!(
@@ -463,7 +518,7 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..(RING_CAP as u64 + 500) {
-            record(h, PayoutSource::RealSolve, 1, 1, 0, 0.0);
+            record(h, PayoutSource::RealSolve, 1, 1, 0, 0.0, 0);
         }
         let s = summary(0);
         assert_eq!(s.blocks, RING_CAP, "memory must stay bounded on a live node");
@@ -476,10 +531,10 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..600u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0, 0);
         }
         for h in 600..1000u64 {
-            record(h, PayoutSource::SharePool, 2, 1_000_000, 0, 0.0);
+            record(h, PayoutSource::SharePool, 2, 1_000_000, 0, 0.0, 0);
         }
         // The whole ring is mixed...
         assert!(summary(0).producer_fallback_pct > 50.0);
@@ -488,5 +543,48 @@ mod tests {
         assert_eq!(recent.blocks, 400);
         assert_eq!(recent.producer_fallback_pct, 0.0);
         assert!(!recent.alarm);
+    }
+
+    /// 2026-09-25 — the instrument lied on g2. `TRANSPARENT_COINBASE_HEIGHT` is 0, so every
+    /// registered wallet is paid in the clear; the split recorded for it must say 0, not
+    /// "2 shielded payees, 100 %".
+    #[test]
+    fn a_registered_wallet_on_a_transparent_coinbase_is_not_a_shielded_payee() {
+        // g2 heights: 0 and the height this was measured at.
+        for h in [0u64, 1, 25_800_671] {
+            assert!(sigil_tx::coinbase_is_transparent(h), "g2 coinbase is transparent at {h}");
+            assert_eq!(shielded_split(h, 2, 100.0), (0, 0.0), "at height {h}");
+        }
+    }
+
+    #[test]
+    fn registered_but_transparent_verdict_says_transparent_not_invisible() {
+        let _g = guard();
+        reset();
+        for h in 0..1000u64 {
+            // Two payees registered for shield keys; the coinbase rule paid both transparently.
+            let (sh, pct) = shielded_split(h, 2, 100.0);
+            record(h, PayoutSource::SharePool, 2, 1_000_000, sh, pct, 2);
+        }
+        let s = summary(0);
+        assert_eq!(s.blocks_with_shielded_payees, 0);
+        assert_eq!(s.blocks_with_registered_payees, 1000);
+        assert!((s.shielded_value_pct).abs() < f64::EPSILON, "got {:.2}%", s.shielded_value_pct);
+        let v = verdict(&s);
+        assert!(v.contains("TRANSPARENT"), "verdict must name the transparent coinbase: {v}");
+        assert!(v.contains("REGISTERED"), "and say these wallets are merely registered: {v}");
+        assert!(!v.contains("invisible"), "and never claim the money is invisible: {v}");
+    }
+
+    #[test]
+    fn no_registration_at_all_says_so_plainly() {
+        let _g = guard();
+        reset();
+        for h in 0..100u64 {
+            record(h, PayoutSource::SharePool, 3, 1_000_000, 0, 0.0, 0);
+        }
+        let s = summary(0);
+        assert_eq!(s.blocks_with_registered_payees, 0);
+        assert!(verdict(&s).contains("No shielded payouts"));
     }
 }

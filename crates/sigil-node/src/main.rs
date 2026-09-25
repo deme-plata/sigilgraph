@@ -2110,7 +2110,12 @@ fn run_start() -> Result<()> {
                     // Weight share is the right proxy for value share because the coinbase
                     // splits proportionally to these same weights. Costs one registry lookup
                     // per payee, and payees average <2.
-                    let (payees, shielded_payees, shielded_pct) = match weights {
+                    // 2026-09-25 (rocky): this counts REGISTRATION. Whether a cut actually mints
+                    // as a note is decided by the coinbase rule at the minted height
+                    // (`shielded_split` below), and on g2 the coinbase is transparent, so
+                    // recording the registry count as "shielded payees" reported 77 % of value
+                    // as hidden while every glyph landed in /v1/balance.
+                    let (payees, registered_payees, registered_pct) = match weights {
                         None => (1u32, 0u32, 0.0f32),
                         Some(w) if w.is_empty() => (1u32, 0u32, 0.0f32),
                         Some(w) => {
@@ -2157,6 +2162,8 @@ fn run_start() -> Result<()> {
                                     h
                                 );
                             }
+                            let (shielded_payees, shielded_pct) =
+                                sigil_api::attribution::shielded_split(h, registered_payees, registered_pct);
                             sigil_api::attribution::record(
                                 h,
                                 payout_source,
@@ -2164,6 +2171,7 @@ fn run_start() -> Result<()> {
                                 reward_override.unwrap_or(0),
                                 shielded_payees,
                                 shielded_pct,
+                                registered_payees,
                             );
                             // Fire ONLY on a real, sustained fairness failure. An alarm
                             // that shouts during normal operation is worse than no

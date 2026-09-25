@@ -95,11 +95,16 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
     if let Some(tip) = st.tip.as_ref() {
         let v = verify_tip(tip);
         let badge = if v.ok { format!("{GREEN}✓ VERIFIED{RESET}") } else { format!("{RED}✗ FAILED{RESET}") };
-        o.push_str(&mid_title(&format!("4 STATE ROOTS  {badge}  (tip-proof · {})", build_network_id())));
+        o.push_str(&mid_title(&format!("STATE ROOTS  {badge}  (tip-proof · {})", build_network_id())));
         o.push_str(&row("wallet", &short_hex(&tip.roots.wallet_state_root)));
         o.push_str(&row("dex", &short_hex(&tip.roots.dex_state_root)));
         o.push_str(&row("events", &short_hex(&tip.roots.event_log_root)));
         o.push_str(&row("contract", &short_hex(&tip.roots.contract_state_root)));
+        // 2026-09-25: the fifth root — live from /v1/integrity below the gate, committed above.
+        if let Some(e) = crate::integrity_ui::snapshot().pool_epsilon {
+            let short = hex::decode(&e.root).map(|b| short_hex(&b)).unwrap_or_else(|_| "—".into());
+            o.push_str(&row(if e.in_header { "pool (5th)" } else { "pool (5th, live)" }, &format!("{short}  @ {}", e.height)));
+        }
 
         o.push_str(&mid_title("TIP VERIFY  (verify-don't-trust · 0 bytes)"));
         if v.ok {

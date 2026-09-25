@@ -310,8 +310,17 @@ pub(crate) fn render_state_roots(app: &App) -> Paragraph<'static> {
         (short_hex(&t.roots.wallet_state_root), short_hex(&t.roots.dex_state_root),
          short_hex(&t.roots.event_log_root), short_hex(&t.roots.contract_state_root))
     } else { ("—".into(), "—".into(), "—".into(), "—".into()) };
+    // 2026-09-25: the FIFTH root. `pool*` = live from /v1/integrity, not yet in the header
+    // (below the 27,000,000 gate); `pool` = committed. Both are the same 32 bytes the
+    // producer will sign at the gate — see integrity_ui for the equal-height comparison.
+    let mut l1 = vec![badge, Span::styled(lat_str, Style::default().fg(C_DIM))];
+    if let Some(e) = crate::integrity_ui::snapshot().pool_epsilon {
+        let short = hex::decode(&e.root).map(|b| short_hex(&b)).unwrap_or_else(|_| "—".into());
+        l1.push(dim(if e.in_header { "  pool " } else { "  pool* " }));
+        l1.push(Span::raw(short));
+    }
     let lines = vec![
-        Line::from(vec![badge, Span::styled(lat_str, Style::default().fg(C_DIM))]),
+        Line::from(l1),
         Line::from(vec![ dim("wallet "), Span::raw(wallet), dim("  dex "), Span::raw(dex) ]),
         Line::from(vec![ dim("events "), Span::raw(event), dim("  contract "), Span::raw(contract) ]),
     ];

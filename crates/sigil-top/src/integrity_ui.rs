@@ -60,6 +60,119 @@ pub(crate) struct IntegrityState {
     pub certified: u64,
     /// Per node: every height at or below this has been counted.
     counted_to: BTreeMap<String, u64>,
+    // ── THE FIFTH ROOT (2026-09-25) ──
+    /// Epsilon's newest `/v1/integrity` reading of the shielded pool root.
+    pub pool_epsilon: Option<PoolObs>,
+    /// Our embedded node's reading (only when the operator runs one — F).
+    pub pool_ours: Option<PoolObs>,
+    pub pool_checked: u64,
+    pub pool_mismatches: u64,
+    /// Consecutive EQUAL-HEIGHT disagreements; ≥ [`POOL_PERSISTENT`] is a fork, less is a race.
+    pub pool_consecutive_mismatch: u32,
+    /// (height, ours, theirs) of the newest pool-root disagreement.
+    pub pool_last_mismatch: Option<(u64, String, String)>,
+    /// The height already compared once (a node answers the same height for ~1 s at 8 blk/s).
+    pool_compared_height: Option<u64>,
+    /// Epsilon's measured block rate (blocks per second), smoothed; 0 = unknown.
+    pub bps: f64,
+    bps_prev: Option<(Instant, u64)>,
+}
+
+// ── THE FIFTH ROOT (2026-09-25) ────────────────────────────────────────────────
+// `shielded_pool_root` is committed in the header from
+// `sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT` (27,000,000). Below the gate the
+// header does not carry it, so equal HASH at equal height says nothing about the pool:
+// two nodes could hold different note trees / nullifier sets, agree on every hash until
+// the gate, and fork AT it. `/v1/integrity` publishes the LIVE pool root on every node
+// today, so the client compares it at equal `applied_height` BEFORE the gate, while a
+// divergence is still cheap.
+//
+// 🪤 `/v1/integrity` reads its height and its roots separately (its own `caveat`), and for
+// ~2 min after a node boots `applied_height` runs ahead of the state it reports — so ONE
+// equal-height mismatch is a race, not a fork. Only a PERSISTENT one (`POOL_PERSISTENT`
+// consecutive equal-height disagreements) flips the verdict.
+pub(crate) const POOL_PERSISTENT: u32 = 3;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PoolObs {
+    /// `applied_height` — the height the reported roots belong to (modulo the caveat).
+    pub height: u64,
+    /// `roots.shielded_pool_root`, lowercase hex (64 chars).
+    pub root: String,
+    /// `shielded_pool_root_in_header` — is this tip past the gate?
+    pub in_header: bool,
+    /// `shielded_pool_root_activation_height`.
+    pub gate: u64,
+    pub notes: u64,
+    pub nullifiers: u64,
+}
+
+/// Parse one `/v1/integrity` body. `None` if it carries no pool root (a pre-fifth-root node).
+pub(crate) fn parse_integrity(body: &str) -> Option<PoolObs> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let d = v.get("data").unwrap_or(&v);
+    let root = d.get("roots")?.get("shielded_pool_root")?.as_str()?.to_ascii_lowercase();
+    if root.len() != 64 || !root.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let height = d.get("applied_height").and_then(|x| x.as_u64())
+        .or_else(|| d.get("height").and_then(|x| x.as_u64()))?;
+    let sh = d.get("shielded");
+    Some(PoolObs {
+        height,
+        root,
+        in_header: d.get("shielded_pool_root_in_header").and_then(|x| x.as_bool()).unwrap_or(false),
+        gate: d.get("shielded_pool_root_activation_height").and_then(|x| x.as_u64())
+            .unwrap_or(sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT),
+        notes: sh.and_then(|s| s.get("notes")).and_then(|x| x.as_u64()).unwrap_or(0),
+        nullifiers: sh.and_then(|s| s.get("nullifiers")).and_then(|x| x.as_u64()).unwrap_or(0),
+    })
+}
+
+fn fetch_integrity(base: &str) -> Option<PoolObs> {
+    let body = crate::HTTP.get(format!("{base}/v1/integrity")).timeout(Duration::from_secs(8)).send().ok()?.text().ok()?;
+    parse_integrity(&body)
+}
+
+/// Equal-height comparison. `None` = different heights (or height 0): no verdict, ever.
+pub(crate) fn pool_agree(a: &PoolObs, b: &PoolObs) -> Option<bool> {
+    (a.height == b.height && a.height > 0).then(|| a.root.eq_ignore_ascii_case(&b.root))
+}
+
+/// Blocks left to the gate at the measured block rate: "~41h" / "~12m" / "reached" / "—".
+pub(crate) fn gate_eta(blocks_left: u64, bps: f64) -> String {
+    if blocks_left == 0 { return "reached".into(); }
+    if !(bps > 0.0) || !bps.is_finite() { return "—".into(); }
+    let secs = blocks_left as f64 / bps;
+    if secs < 90.0 { format!("~{}s", secs.round() as u64) }
+    else if secs < 5_400.0 { format!("~{}m", (secs / 60.0).round() as u64) }
+    else if secs < 172_800.0 { format!("~{:.0}h", secs / 3600.0) }
+    else { format!("~{:.1}d", secs / 86_400.0) }
+}
+
+/// Fold one (ours, epsilon) pair into the state; a height is counted once. Returns this
+/// pass's verdict (`None` = not comparable).
+pub(crate) fn note_pool_compare(st: &mut IntegrityState, ours: &PoolObs, theirs: &PoolObs) -> Option<bool> {
+    let v = pool_agree(ours, theirs)?;
+    if st.pool_compared_height == Some(ours.height) { return Some(v); }
+    st.pool_compared_height = Some(ours.height);
+    st.pool_checked += 1;
+    if v {
+        st.pool_consecutive_mismatch = 0;
+    } else {
+        st.pool_mismatches += 1;
+        st.pool_consecutive_mismatch += 1;
+        st.pool_last_mismatch = Some((ours.height, ours.root.clone(), theirs.root.clone()));
+    }
+    Some(v)
+}
+
+pub(crate) fn pool_persistent_mismatch(st: &IntegrityState) -> bool {
+    st.pool_consecutive_mismatch >= POOL_PERSISTENT
+}
+
+/// Blend a new block-rate sample into the smoothed estimate (0 = no estimate yet).
+pub(crate) fn blend_bps(prev: f64, sample: f64) -> f64 {
+    if !(sample >= 0.0) || !sample.is_finite() { return prev; }
+    if prev > 0.0 { 0.7 * prev + 0.3 * sample } else { sample }
 }
 
 fn cell() -> &'static Mutex<IntegrityState> {
@@ -80,6 +193,15 @@ pub(crate) fn snapshot() -> IntegrityState {
         local_top: g.local_top,
         certified: g.certified,
         counted_to: BTreeMap::new(),
+        pool_epsilon: g.pool_epsilon.clone(),
+        pool_ours: g.pool_ours.clone(),
+        pool_checked: g.pool_checked,
+        pool_mismatches: g.pool_mismatches,
+        pool_consecutive_mismatch: g.pool_consecutive_mismatch,
+        pool_last_mismatch: g.pool_last_mismatch.clone(),
+        pool_compared_height: g.pool_compared_height,
+        bps: g.bps,
+        bps_prev: None,
     }
 }
 
@@ -207,8 +329,27 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
             let certified = fetch_certified(&api_base);
             let recent = fetch_recent(&api_base);
             let monitor = fetch_monitor();
+            // The fifth root: Epsilon's live pool root, and ours when an embedded node runs.
+            let pool_eps = fetch_integrity(&api_base);
+            #[cfg(feature = "producer")]
+            let pool_ours = if crate::producer::mining_api::local_mining_api_is_up() {
+                fetch_integrity(&crate::producer::mining_api::local_mining_api_url())
+            } else { None };
+            #[cfg(not(feature = "producer"))]
+            let pool_ours: Option<PoolObs> = None;
             {
                 let mut g = cell().lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(e) = pool_eps.as_ref() {
+                    let now = Instant::now();
+                    if let Some((t0, h0)) = g.bps_prev {
+                        let dt = now.duration_since(t0).as_secs_f64();
+                        if dt >= 5.0 && e.height >= h0 { g.bps = blend_bps(g.bps, (e.height - h0) as f64 / dt); }
+                    }
+                    g.bps_prev = Some((now, e.height));
+                    g.pool_epsilon = Some(e.clone());
+                }
+                if let Some(o) = pool_ours.as_ref() { g.pool_ours = Some(o.clone()); }
+                if let (Some(o), Some(e)) = (pool_ours.as_ref(), pool_eps.as_ref()) { note_pool_compare(&mut g, o, e); }
                 let (top, src) = local_top(&reader);
                 g.local_top = top;
                 if top > 0 { g.local_source = src; }
@@ -236,7 +377,9 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
                     }
                 }
                 g.last_run = Some(Instant::now());
-                g.last_err = if any { None } else { Some("no node answered (feed + monitor unreachable)".into()) };
+                g.last_err = if any { None }
+                    else if pool_eps.is_some() { Some("hash sources unreachable (recent + monitor); /v1/integrity answered".into()) }
+                    else { Some("no node answered (feed + monitor unreachable)".into()) };
             }
             // Once a minute, the same verdict in the logfile — evidence that outlives the screen.
             if last_log.elapsed() >= Duration::from_secs(60) {
@@ -244,10 +387,17 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
                 let s = snapshot();
                 if !s.nodes.is_empty() {
                     let per: Vec<String> = s.nodes.iter().map(|(n, c)| format!("{n}{}@{}", if c.agree { "✓" } else { "✗" }, c.height)).collect();
+                    let pool = match (s.pool_ours.as_ref(), s.pool_epsilon.as_ref()) {
+                        (Some(o), Some(e)) => format!("pool {}@{} ours {}@{} cmp {} mism {}{}",
+                            short(&e.root), e.height, short(&o.root), o.height, s.pool_checked, s.pool_mismatches,
+                            if pool_persistent_mismatch(&s) { " PERSISTENT" } else { "" }),
+                        (None, Some(e)) => format!("pool {}@{} ({})", short(&e.root), e.height, if e.in_header { "in header" } else { "pre-gate" }),
+                        _ => "pool —".into(),
+                    };
                     crate::tlog!(
-                        "[integrity] {} · {} · checked {} · mismatches {} · src {} · certified {}",
-                        if s.nodes.values().all(|c| c.agree) { "TRUE" } else { "FALSE" },
-                        per.join(" "), s.checked, s.mismatches, s.local_source, s.certified
+                        "[integrity] {} · {} · checked {} · mismatches {} · src {} · certified {} · {}",
+                        if s.nodes.values().all(|c| c.agree) && !pool_persistent_mismatch(&s) { "TRUE" } else { "FALSE" },
+                        per.join(" "), s.checked, s.mismatches, s.local_source, s.certified, pool
                     );
                 }
             }
@@ -268,7 +418,7 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
     let total = s.nodes.len();
     let verdict = if total == 0 {
         badge("WAITING", C_DIM)
-    } else if s.nodes.values().any(|n| !n.agree) {
+    } else if s.nodes.values().any(|n| !n.agree) || pool_persistent_mismatch(&s) {
         badge("FALSE", C_RED)
     } else if s.mismatches > 0 {
         badge("TRUE NOW", C_GOLD)
@@ -282,11 +432,21 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
     ];
     if let Some(e) = s.last_err.as_ref() { l1.push(Span::styled(format!("  {e}"), Style::default().fg(C_RED))); }
 
-    let l2 = Line::from(vec![
+    let mut l2v = vec![
         dim("you  "),
         Span::styled(if s.local_top > 0 { format!("h {}", group(s.local_top)) } else { "no local chain yet".into() }, Style::default().fg(C_NEON_CYAN)),
         dim(format!("  src {}   certified ≤ {}", if s.local_source.is_empty() { "—" } else { s.local_source }, if s.certified > 0 { group(s.certified) } else { "—".into() })),
-    ]);
+    ];
+    // The gate countdown: every client must decode the 5-root header before the tip gets there.
+    if let Some(e) = s.pool_epsilon.as_ref() {
+        if e.in_header || e.height >= e.gate {
+            l2v.push(Span::styled("  5th root in header ✓", Style::default().fg(C_GREEN)));
+        } else {
+            let left = e.gate.saturating_sub(e.height);
+            l2v.push(dim(format!("  gate {} in {} blk {}", group(e.gate), group(left), gate_eta(left, s.bps))));
+        }
+    }
+    let l2 = Line::from(l2v);
 
     let mut l3: Vec<Span<'static>> = Vec::new();
     for (name, n) in &s.nodes {
@@ -296,12 +456,37 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
     }
     if l3.is_empty() { l3.push(dim("comparing our hash against Epsilon, happysrv, node3 at equal height…")); }
 
-    let l4 = match s.last_mismatch.as_ref() {
-        Some((node, h, ours, theirs)) => Line::from(vec![
+    let l4 = if let Some((node, h, ours, theirs)) = s.last_mismatch.as_ref() {
+        Line::from(vec![
             Span::styled("last mismatch ", Style::default().fg(C_RED)),
             dim(format!("{node} @ {}: ours {} theirs {}", group(*h), short(ours), short(theirs))),
-        ]),
-        None => Line::from(vec![dim("equal hash at equal height ⇒ equal header ⇒ equal state roots (exact, no race)")]),
+        ])
+    } else if let (true, Some((h, ours, theirs))) = (pool_persistent_mismatch(&s), s.pool_last_mismatch.as_ref()) {
+        Line::from(vec![
+            Span::styled("5th root DIFFERS ", Style::default().fg(C_RED)),
+            dim(format!("@ {} ×{}: ours {} epsilon {} — the pool forks at the gate", group(*h), s.pool_consecutive_mismatch, short(ours), short(theirs))),
+        ])
+    } else if let Some(e) = s.pool_epsilon.as_ref() {
+        // The fifth root, compared at equal height when we run a node; shown live otherwise.
+        let mut v = vec![
+            Span::styled("5th root ", Style::default().fg(C_GOLD)),
+            dim(format!("pool {} @ {} {}", short(&e.root), group(e.height), if e.in_header { "committed" } else { "live·pre-gate" })),
+        ];
+        match s.pool_ours.as_ref() {
+            Some(o) => {
+                let (mark, col) = match pool_agree(o, e) {
+                    Some(true) => ("✓ ours equal", C_GREEN),
+                    Some(false) => ("✗ ours differ", C_RED),
+                    None => ("· ours at another height", C_DIM),
+                };
+                v.push(Span::styled(format!("  {mark}"), Style::default().fg(col)));
+                if s.pool_checked > 0 { v.push(dim(format!(" ({} cmp · {} mism)", group(s.pool_checked), group(s.pool_mismatches)))); }
+            }
+            None => v.push(dim("  ours — (F runs a node and compares)")),
+        }
+        Line::from(v)
+    } else {
+        Line::from(vec![dim("equal hash at equal height ⇒ equal header ⇒ equal state roots (exact, no race)")])
     };
 
     Paragraph::new(vec![Line::from(l1), l2, Line::from(l3), l4]).block(card_block(" ◈ DATA INTEGRITY", C_NEON_CYAN))
@@ -312,6 +497,84 @@ mod tests {
     use super::*;
 
     fn reader_none() -> Arc<OnceLock<sigil_block_store::BlockReader>> { Arc::new(OnceLock::new()) }
+
+    /// Fixture = the live producer's `/v1/integrity` on 2026-09-25 (h 25,818,771), trimmed.
+    const LIVE_INTEGRITY: &str = r#"{"ok":true,"applied_height":25818771,"height":25818771,"finalized_height":null,
+      "roots":{"contract_state_root":"0000000000000000000000000000000000000000000000000000000000000000",
+      "dex_state_root":"0000000000000000000000000000000000000000000000000000000000000000",
+      "event_log_root":"0000000000000000000000000000000000000000000000000000000000000000",
+      "shielded_pool_root":"1110A57B6F649C09BC84354E4531A8BE112949F9711F1C72BEA3041A7C5F5AC6",
+      "wallet_state_root":"b29db47b88cfc1c43bace40901cf6b70d168c40035426cb174a77a3606a2c7a6"},
+      "shielded":{"anchor":"1752afe868dc265e000000000000000000000000000000000000000000000000","notes":2364,"nullifiers":2575},
+      "shielded_pool_root_activation_height":27000000,"shielded_pool_root_in_header":false,"ts_ms":1790342591598}"#;
+
+    fn obs(h: u64, root: &str) -> PoolObs {
+        PoolObs { height: h, root: root.repeat(32), in_header: false, gate: 27_000_000, notes: 0, nullifiers: 0 }
+    }
+
+    #[test]
+    fn parses_the_live_integrity_body_lowercasing_the_root() {
+        let p = parse_integrity(LIVE_INTEGRITY).expect("parse");
+        assert_eq!(p.height, 25_818_771);
+        assert_eq!(p.root, "1110a57b6f649c09bc84354e4531a8be112949f9711f1c72bea3041a7c5f5ac6");
+        assert!(!p.in_header);
+        assert_eq!(p.gate, 27_000_000);
+        assert_eq!((p.notes, p.nullifiers), (2364, 2575));
+        // A pre-fifth-root node (no `shielded_pool_root` key) parses to None — nothing to compare.
+        assert!(parse_integrity(r#"{"ok":true,"applied_height":5,"roots":{"wallet_state_root":"00"}}"#).is_none());
+        // A malformed root is refused, not compared as a string.
+        assert!(parse_integrity(r#"{"applied_height":5,"roots":{"shielded_pool_root":"zz"}}"#).is_none());
+    }
+
+    /// The comparison is exact and only ever at EQUAL height — two readings a block apart
+    /// legitimately differ and must produce no verdict at all.
+    #[test]
+    fn pool_agree_is_equal_height_only() {
+        assert_eq!(pool_agree(&obs(10, "aa"), &obs(10, "aa")), Some(true));
+        assert_eq!(pool_agree(&obs(10, "aa"), &obs(10, "AA")), Some(true));
+        assert_eq!(pool_agree(&obs(10, "aa"), &obs(10, "bb")), Some(false));
+        assert_eq!(pool_agree(&obs(10, "aa"), &obs(11, "aa")), None);
+        assert_eq!(pool_agree(&obs(0, "aa"), &obs(0, "aa")), None);
+    }
+
+    /// One equal-height disagreement is a race (`/v1/integrity` reads height and roots
+    /// separately); the verdict flips only after POOL_PERSISTENT consecutive ones, and a
+    /// single agreement resets the streak. A height is counted once.
+    #[test]
+    fn persistent_rule_and_count_once() {
+        let mut st = IntegrityState::default();
+        assert_eq!(note_pool_compare(&mut st, &obs(100, "aa"), &obs(100, "bb")), Some(false));
+        assert_eq!(note_pool_compare(&mut st, &obs(100, "aa"), &obs(100, "bb")), Some(false)); // same height again
+        assert_eq!((st.pool_checked, st.pool_mismatches, st.pool_consecutive_mismatch), (1, 1, 1));
+        assert!(!pool_persistent_mismatch(&st));
+        note_pool_compare(&mut st, &obs(101, "aa"), &obs(101, "bb"));
+        assert!(!pool_persistent_mismatch(&st));
+        note_pool_compare(&mut st, &obs(102, "aa"), &obs(102, "bb"));
+        assert!(pool_persistent_mismatch(&st));
+        assert_eq!(st.pool_last_mismatch.as_ref().map(|m| m.0), Some(102));
+        // One agreement at a new height ends the streak; the cumulative count stays.
+        assert_eq!(note_pool_compare(&mut st, &obs(103, "cc"), &obs(103, "cc")), Some(true));
+        assert!(!pool_persistent_mismatch(&st));
+        assert_eq!((st.pool_checked, st.pool_mismatches), (4, 3));
+        // Different heights: nothing counted.
+        assert_eq!(note_pool_compare(&mut st, &obs(104, "cc"), &obs(105, "cc")), None);
+        assert_eq!(st.pool_checked, 4);
+    }
+
+    /// 1,181,148 blocks at the 8 blk/s measured 2026-09-25 14:03 CEST ≈ 41 h.
+    #[test]
+    fn gate_eta_is_derived_from_the_measured_rate() {
+        assert_eq!(gate_eta(1_181_148, 8.0), "~41h");
+        assert_eq!(gate_eta(0, 8.0), "reached");
+        assert_eq!(gate_eta(1_000, 0.0), "—");
+        assert_eq!(gate_eta(1_000, f64::NAN), "—");
+        assert_eq!(gate_eta(80, 8.0), "~10s");
+        assert_eq!(gate_eta(4_800, 8.0), "~10m");
+        assert_eq!(gate_eta(2_000_000, 8.0), "~2.9d");
+        assert_eq!(blend_bps(0.0, 8.0), 8.0);
+        assert!((blend_bps(8.0, 4.0) - 6.8).abs() < 1e-9);
+        assert_eq!(blend_bps(8.0, f64::NAN), 8.0);
+    }
 
     /// With no local chain there is nothing to compare: nothing counted, no verdict.
     #[test]

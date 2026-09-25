@@ -2864,6 +2864,26 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      the payment for a minute — rolls back the local booking, so this wallet does not
      keep a note marked spent for money that never moved. */
   function privFoot(html){ try{ var p=document.getElementById('sendReceipt'); var f=document.getElementById('rcFoot'); if(p&&f&&p.getAttribute('data-kind')==='send') f.innerHTML=html; }catch(e){} }
+  // ── 2026-09-25 rocky-help-0925: retire-not-restore ──────────────────────────────────────
+  // "nullifier already spent" is a PERMANENT verdict from the chain: that input is gone whatever
+  // this browser's bookkeeping says. Remember it under a hash of the seed (never the seed) so
+  // input selection never offers it again — the Android wallet did the same on 2026-09-24.
+  function privRetireKey(tag){ return 'sigil-refused-notes-'+tag; }
+  function privRetired(tag){ try{ return tag ? new Set(JSON.parse(localStorage.getItem(privRetireKey(tag))||'[]')) : new Set(); }catch(_){ return new Set(); } }
+  function privRetire(from, pick, tag, noteEp, nfs, changeIndex){
+    try{
+      var ins = pick && pick.kind==='multi' ? pick.notes : [pick];
+      var keys=[];
+      for(var ri=0; ri<ins.length; ri++){ var p=ins[ri]; if(p && p.position!==undefined && p.position!==null) keys.push(String(noteEp)+':'+p.position); }
+      (nfs||[]).forEach(function(x){ if(x) keys.push('nf:'+String(x).toLowerCase()); });
+      if(tag){ var cur=Array.from(privRetired(tag)); keys.forEach(function(k){ if(cur.indexOf(k)<0) cur.push(k); }); localStorage.setItem(privRetireKey(tag), JSON.stringify(cur.slice(-256))); }
+      var arr=myNotes(from);
+      for(var pi=0; pi<ins.length; pi++){ var q=ins[pi]; if(q && q.kind!=='recv' && q.note){ for(var k=0;k<arr.length;k++){ if(arr[k].index===q.note.index) arr[k].spent=true; } } }
+      if(changeIndex!==null && changeIndex!==undefined){ arr=arr.filter(function(n){ return n.index!==changeIndex; }); }
+      saveMyNotes(from, arr);
+      try{ console.warn('sigil: retired spent note(s)', keys); }catch(_){}
+    }catch(e){}
+  }
   function privRollback(from, pick, changeIndex){
     try{
       var arr=myNotes(from);
@@ -2962,7 +2982,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // It must beat a seen nullifier: if the note was ALREADY spent by an older
       // transaction its nullifier is on chain and would read as 'our' success.
       if(st==='rejected'){
-        privRollback(from, pick, changeIndex);
+        // 2026-09-25 rocky-help-0925: retire-not-restore — a double-spend verdict means the input IS spent.
+        if(/already spent|double.?spend/i.test(reason||'')) privRetire(from, pick, pick&&pick._retireTag, pick&&pick._noteEp, [nf], changeIndex);
+        else privRollback(from, pick, changeIndex);
         privMsg('✗ not sent — the network refused it: '+(reason||'no reason given')+'. Nothing moved; your note is yours again.', '#ff8a8a');
         privFoot('<b style="color:#ff8a8a">✗ Not sent</b> — the network refused it: '+(reason||'no reason given')+'.');
         return;
@@ -2979,7 +3001,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         return;
       }
       if(st==='rejected' || unknowns>=12){
-        privRollback(from, pick, changeIndex);
+        // 2026-09-25 rocky-help-0925: retire-not-restore — a double-spend verdict means the input IS spent.
+        if(/already spent|double.?spend/i.test(reason||'')) privRetire(from, pick, pick&&pick._retireTag, pick&&pick._noteEp, [nf], changeIndex);
+        else privRollback(from, pick, changeIndex);
         var why = st==='rejected' ? ('the network refused it: '+(reason||'no reason given')) : 'the node no longer knows it (it may have restarted) and it never landed';
         privMsg('✗ not sent — '+why+'. Nothing moved; your note is yours again.', '#ff8a8a');
         privFoot('<b style="color:#ff8a8a">✗ Not sent</b> — '+why+'. Nothing moved; your note is spendable again.');
@@ -3134,18 +3158,76 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // has done this since 1.8.0; this page could not pay more than its largest note).
       var small=[];
 
+      // ── 2026-09-25 rocky-help-0925: epoch-scoped spent check — ONE spent-set for BOTH passes ──
+      // The chain keys its spent-set per epoch: scoped_nullifier(epoch, raw) (epoch 0 = identity).
+      // Measured today: a 20 SIGIL self-send refused 3x with "nullifier b2c6eb12… already spent" —
+      // the node was right (it holds the epoch-1 key dae7ea3f…); this page offered the note anyway.
+      // Two holes: pass (a) below (self-made notes) never asked the chain at all, and pass (b) fell
+      // back to a raw-only test whenever the JS shield module was missing. Now the live epoch comes
+      // from /v1/shielded/anchor (fresh), the leaves page's epoch is the notes' OWN epoch, both passes
+      // share one test, and when no scoped test is possible on an epoch>=1 chain the send does NOT
+      // proceed silently. Notes the node has refused as spent are retired for good (privRetire).
+      var spentSet=null, spendKey=null, M=window.__sigilShield, liveEp=null, spentEpochs=[];
+      try{ var anj=await fetch('/v1/shielded/anchor',{cache:'no-store'}).then(function(r){return r.json();});
+           if(anj && typeof anj.epoch==='number') liveEp=anj.epoch; }catch(_){}
+      if(liveEp===null) liveEp=(typeof lj.live_epoch==='number')?lj.live_epoch:((typeof lj.epoch==='number')?lj.epoch:null);
+      var noteEp=(typeof lj.epoch==='number')?lj.epoch:liveEp;      // the epoch THESE leaves live in
+      [liveEp, noteEp, (typeof lj.live_epoch==='number'?lj.live_epoch:null)].forEach(function(e){ if(typeof e==='number' && spentEpochs.indexOf(e)<0) spentEpochs.push(e); });
+      try{
+        var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
+        if(nl && nl.ok && nl.nullifiers){
+          spentSet=new Set(nl.nullifiers.map(function(h){return String(h).toLowerCase();}));
+          if(M){ try{ spendKey=M.deriveField(seedHex,'spend-key',0); }catch(_){ spendKey=null; } }
+        }
+      }catch(_){}
+      if(!spentSet){ privMsg('\u26a0 could not load the chain\'s spent-note list — cannot pick a safe note yet, retrying…', '#fbbf24'); return 'retry'; }
+      if(liveEp===null){ privMsg('\u26a0 the node did not report the shielded epoch — cannot verify spent notes; reload the page and try again.', '#fbbf24'); return 'retry'; }
+      var canScope = !!(M && M.blake3);
+      if(!canScope && spentEpochs.some(function(e){ return e>0; })){
+        privMsg('\u26a0 cannot verify spent notes (crypto module not loaded) — reload the page and try again.', '#fbbf24'); return 'retry';
+      }
+      var _retireTag=null;
+      try{ _retireTag = (canScope && typeof _bytesToHex==='function') ? _bytesToHex(M.blake3(new TextEncoder().encode('sigil-refused-notes-v1|'+seedHex))).slice(0,32)
+                                                                       : String(wasm.shieldPublicKey(seedHex)).toLowerCase().slice(0,32); }catch(_){ _retireTag=null; }
+      var retired=privRetired(_retireTag);
+      var rawNfAt=function(pos){
+        try{ if(wasm.noteNullifier) return String(wasm.noteNullifier(seedHex, pos)).toLowerCase(); }catch(_){}
+        try{ if(M && spendKey) return M.toWireHex(M.compress2(spendKey, BigInt(pos))).toLowerCase(); }catch(_){}
+        return null;
+      };
+      // Dead = must not be offered: retired after a node refusal, or its nullifier is in the chain's
+      // spent-set under the RAW key, the LIVE epoch's key, or the NOTE's own epoch's key.
+      var noteIsDead=function(pos){
+        if(retired.has(String(noteEp)+':'+pos)) return true;
+        var raw=rawNfAt(pos); if(!raw) return true;            // cannot derive its nullifier → cannot verify → do not offer
+        if(retired.has('nf:'+raw) || spentSet.has(raw)) return true;
+        for(var se=0; se<spentEpochs.length; se++){ if(spentEpochs[se]>0 && canScope && spentSet.has(_scopedNullifier(M, spentEpochs[se], raw))) return true; }
+        return false;
+      };
+      // The authoritative form only (the note's own epoch) — used to book a self-made note as spent locally.
+      var noteSpentOnChain=function(pos){
+        var raw=rawNfAt(pos); if(!raw) return false;
+        if(!noteEp) return spentSet.has(raw);
+        return canScope && spentSet.has(_scopedNullifier(M, noteEp, raw));
+      };
+
       // ── (a) SELF-CREATED notes, from this browser's own bookkeeping ──────────
       // Addressed by derivation index: the blinding is blinding(seed, index), so the
       // index is the whole record, and only this browser can know it.
       var notes=myNotes(from).filter(function(n){ return !n.spent; });
+      var deadSelf=[];
       for(var i=0;i<notes.length;i++){
         var n=notes[i];
         var cm; try{ cm=wasm.shieldNoteCommitment(seedHex, n.index, String(n.value)); }catch(e){ continue; }
         var pos=leaves.indexOf(cm);
         if(pos<0){ unlanded++; continue; } // not landed yet (still finalizing) — skip, don't fail the whole send
+        // 2026-09-25 rocky-help-0925: epoch-scoped spent check for SELF-MADE notes too (there was none —
+        // a copy of this seed elsewhere, or a wrong rollback, leaves `spent:false` on a note the chain burned).
+        if(noteIsDead(pos)){ if(noteSpentOnChain(pos)) deadSelf.push(n.index); continue; }
         if(BigInt(n.value) < amountRaw+FEE){ small.push({note:n, position:pos, value:BigInt(n.value), kind:'self'}); continue; } // alone it can't cover it
         candidates.push({note:n, position:pos, value:BigInt(n.value), kind:'self'});
       }
+      if(deadSelf.length){ try{ var updD=myNotes(from); for(var dk=0;dk<updD.length;dk++){ if(deadSelf.indexOf(updD[dk].index)>=0) updD[dk].spent=true; } saveMyNotes(from, updD); }catch(_){} }
 
       // ── (b) RECEIVED / MINED notes, from the CHAIN ───────────────────────────
       //
@@ -3163,19 +3245,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var cts = lj.ciphertexts || [];
       var seenPos = {};
       for(var sp=0; sp<candidates.length; sp++) seenPos[candidates[sp].position]=1;
+      for(var sp2=0; sp2<small.length; sp2++) seenPos[small[sp2].position]=1; // 2026-09-25 rocky-help-0925: a self note in `small` must not reappear as a recv note
       if(cts.length && wasm.buildPrivateSendReceived){
         // Which of ours are already spent? Nullifiers are public; derive ours the way the
         // balance scan does. If that helper is not loaded we simply do not net — the node
         // then refuses with "nullifier already spent", a loud honest failure rather than
         // a silently wrong balance.
-        var spentSet=null, spendKey=null, M=window.__sigilShield;
-        try{
-          var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
-          if(nl && nl.ok && nl.nullifiers){
-            spentSet=new Set(nl.nullifiers.map(function(h){return String(h).toLowerCase();}));
-            if(M){ try{ spendKey=M.deriveField(seedHex,'spend-key',0); }catch(_){ spendKey=null; } }
-          }
-        }catch(_){}
+        // 2026-09-25 rocky-help-0925: spentSet / spendKey / M / epochs are built ONCE above, for both passes.
         for(var ci=0; ci<cts.length; ci++){
           if(!cts[ci] || seenPos[ci]) continue;
           var op=null;
@@ -3183,14 +3259,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           catch(_){ continue; }              // not ours — the AEAD tag IS the ownership proof
           if(!op || op.blinding_hex==null) continue;
           var rv; try{ rv=BigInt(op.value); }catch(_){ continue; }
-          if(spentSet){
-            try{
-              // The crate's nullifier (see the balance scan): the JS port's disagreed
-              // with the chain, so this filter passed spent notes straight to the node.
-              var rawNf = (wasm.noteNullifier ? String(wasm.noteNullifier(seedHex, ci)) : M.toWireHex(M.compress2(spendKey, BigInt(ci)))).toLowerCase();
-              if(spentSet.has(rawNf)) continue;   // live epoch is 0, where scoping is the identity
-            }catch(_){}
-          }
+          if(noteIsDead(ci)) continue;   // 2026-09-25 rocky-help-0925: raw + scoped(live epoch) + scoped(note epoch) + retired set
           if(rv < amountRaw+FEE){ small.push({recv:{value:String(op.value), blinding:op.blinding_hex}, position:ci, value:rv, kind:'recv'}); continue; }
           candidates.push({recv:{value:String(op.value), blinding:op.blinding_hex}, position:ci, value:rv, kind:'recv'});
         }
@@ -3246,7 +3315,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           var mr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},
             body:JSON.stringify({anchor:mreq.anchor, nullifier:mreq.nullifier, extra_nullifiers:mreq.extra_nullifiers||[], cm_outs:mreq.cm_outs, fee:mreq.fee, proof:mreq.proof, note_ciphertexts:mreq.note_ciphertexts})});
           var mj=null; try{ mj=await mr.json(); }catch(_){}
-          if(!mr.ok||!mj||!mj.ok){ privMsg('✗ the network refused the combine: '+((mj&&(mj.error||mj.message))||('HTTP '+mr.status)), '#ff8a8a'); return; }
+          if(!mr.ok||!mj||!mj.ok){ var mErr=String((mj&&(mj.error||mj.message))||('HTTP '+mr.status)); if(/already spent|double.?spend/i.test(mErr)){ try{ privRetire(from, {kind:'multi', notes:[mx,my]}, _retireTag, noteEp, [mreq.nullifier].concat(mreq.extra_nullifiers||[]), null); }catch(_){} } privMsg('✗ the network refused the combine: '+mErr, '#ff8a8a'); return; } // 2026-09-25 rocky-help-0925: retire refused inputs
           // book the two inputs as spent locally (self-made ones; received ones are netted by the chain's nullifiers)
           try{ var upd=myNotes(from); [mx,my].forEach(function(sn){ if(sn.kind==='recv'||!sn.note) return; for(var k=0;k<upd.length;k++){ if(upd[k].index===sn.note.index) upd[k].spent=true; } }); saveMyNotes(from, upd); }catch(_){}
           // wait for it to land — pushed by the node the instant it settles
@@ -3273,8 +3342,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var pick=candidates[0];
       var infoEl=document.getElementById('privNoteInfo');
       if(infoEl) infoEl.textContent = pick.kind==='multi'
-        ? ('combining two notes — '+glyphStr(pick.notes[0].value.toString())+' + '+glyphStr(pick.notes[1].value.toString())+' SIGIL (pool leaves #'+pick.notes[0].position+' + #'+pick.notes[1].position+')')
-        : ('spending a '+glyphStr(pick.value.toString())+' SIGIL '+(pick.kind==='recv'?'received/mined':'self-made')+' note (pool leaf #'+pick.position+')');
+        ? ('combining two notes — '+glyphStr(pick.notes[0].value.toString())+' + '+glyphStr(pick.notes[1].value.toString())+' SIGIL (pool leaves #'+pick.notes[0].position+' + #'+pick.notes[1].position+', epoch '+noteEp+')')
+        : ('spending a '+glyphStr(pick.value.toString())+' SIGIL '+(pick.kind==='recv'?'received/mined':'self-made')+' note (pool leaf #'+pick.position+', epoch '+noteEp+')');
 
       privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
       var reqJson;
@@ -3337,7 +3406,20 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           fee:req.fee, proof:req.proof, note_ciphertexts:req.note_ciphertexts
         })});
       var sj=null; try{ sj=await sr.json(); }catch(_){}
-      if(!sr.ok || !sj || !sj.ok){ privMsg('✗ '+((sj&&(sj.error||sj.message))||('HTTP '+sr.status)), '#ff8a8a'); return; }
+      if(!sr.ok || !sj || !sj.ok){
+        var sErr=String((sj&&(sj.error||sj.message))||('HTTP '+sr.status));
+        // 2026-09-25 rocky-help-0925: retire-not-restore. The node's "already spent" is its door check
+        // (refuse_if_spent) against the COMMITTED spent-set — "nothing was queued" — so this input is
+        // dead for good and nothing moved. Retire it and let the orchestrator pick another note for
+        // THIS payment ('retry' = nothing submitted). Before today the same dead note was re-picked
+        // on every press.
+        if(/already spent|double.?spend/i.test(sErr)){
+          try{ privRetire(from, pick, _retireTag, noteEp, [req.nullifier].concat(req.extra_nullifiers||[]), null); }catch(_){}
+          privMsg('✗ '+sErr+' — that note is now retired; picking another note…', '#fbbf24');
+          return 'retry';
+        }
+        privMsg('✗ '+sErr, '#ff8a8a'); return;
+      }
 
       // Book the spend + the change note locally: mark the spent note so this wallet
       // never tries to reuse it, and record the change so it becomes spendable —
@@ -3360,7 +3442,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.
       try{ showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
-      try{ sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, req.change_index, amtStr); }catch(e){}
+      try{ pick._retireTag=_retireTag; pick._noteEp=noteEp; sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, req.change_index, amtStr); }catch(e){}
       return true;
     }catch(e){
       privMsg('✗ network error — node unreachable.', '#ff8a8a');

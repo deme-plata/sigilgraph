@@ -1042,9 +1042,18 @@ fn run_start() -> Result<()> {
             && std::env::var("SIGIL_RATE_ADAPTIVE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
         {
             let cap = if txgen > 0 { txgen as f64 } else { 256.0 };
-            let g = rate_governor::RateGovernor::from_env(cap);
+            let depth = sigil_dagknight::BraidConfig::from_env().final_depth;
+            let f_star = std::env::var("SIGIL_RATE_TARGET_FINALITY_MS").ok().and_then(|v| v.parse::<f64>().ok());
+            let g = rate_governor::RateGovernor::from_env(cap).with_settlement(depth, f_star);
             eprintln!("\u{1f39a} ADAPTIVE RATE governor ON — floor {:.0}/s · ceiling {:.0}/s · target latency {:.1}s · cap {:.0} tx/blk",
                 g.rate_min, g.rate_max, g.target_latency_s, g.tx_capacity);
+            match g.settle.as_ref() {
+                Some(b) => eprintln!("\u{23f1} SETTLEMENT BOOST ON — a new payment runs the chain at {:.1} blk/s for up to {} blocks, \
+                    so it is buried {depth} deep in ~{:.1} s instead of {:.0} s at the floor",
+                    b.rate, b.budget_blocks, depth as f64 / b.rate, depth as f64 / g.rate_min),
+                None => eprintln!("\u{23f1} settlement boost OFF (SIGIL_RATE_TARGET_FINALITY_MS unset) — a payment settles in ~{:.0} s at the floor",
+                    depth as f64 / g.rate_min),
+            }
             Some(g)
         } else { None };
         if txgen > 0 {
@@ -2243,6 +2252,27 @@ fn run_start() -> Result<()> {
                                     &shielded_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
                                 if a > 0 { publish_money!(); }
+                                // Tip proof on the DEPTH-RULE line (2026-09-26). The signer used to be
+                                // fed only by a certificate raise, so with the committee dark it never
+                                // signed and light clients had no attested final tip at all. The settled
+                                // tip IS final under the depth rule; attest it, labelled as such. The
+                                // signer rate-limits (5 s), coalesces to the newest job and refuses to go
+                                // backwards, so a certified tip always wins when certificates return.
+                                if a > 0 {
+                                    if let (Some(signer), Some(tb)) = (tip_signer.as_ref(), chain.tip_block()) {
+                                        signer.offer(tip_proof_signer::TipJob {
+                                            height: tb.header.height,
+                                            hash: tb.hash(),
+                                            roots: sigil_state::StateRoots {
+                                                wallet_state_root: tb.header.wallet_state_root,
+                                                dex_state_root: tb.header.dex_state_root,
+                                                event_log_root: tb.header.event_log_root,
+                                                contract_state_root: tb.header.contract_state_root,
+                                            },
+                                            basis: "depth_rule",
+                                        });
+                                    }
+                                }
                                 // THE LIVE FOLLOW PATH. Instrumenting the backfill apply sites
                                 // alone left a follower's reported height frozen at the last
                                 // BACKFILLED block: happysrv caught up, tracked the tip at 17 ms
@@ -2293,6 +2323,22 @@ fn run_start() -> Result<()> {
                                     produced += 1;
                                     // adaptive rate: retune the tick from mempool backlog every 16 blocks
                                     if let Some(g) = rate_gov.as_mut() {
+                                        // Settlement boost (2026-09-26): checked EVERY block, because a
+                                        // payment's 5 s budget cannot wait for the 16-block cadence
+                                        // (2 s of it at the 8 blk/s floor). `pending_len` counts what is
+                                        // submitted and not yet settled — exactly "in flight".
+                                        if g.settle.is_some() {
+                                            let inflight = shielded_bridge.pending_len()
+                                                + send_bridge.pending_len()
+                                                + dex_bridge.pending_len()
+                                                + usds_bridge.pending_len();
+                                            if let Some(iv) = g.on_block(inflight) {
+                                                if iv != produce_tick.period() {
+                                                    produce_tick = tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
+                                                    produce_tick.set_missed_tick_behavior(missed);
+                                                }
+                                            }
+                                        }
                                         if produced % 16 == 0 {
                                             // 2026-09-13: the governor was fed `mempool.len()` alone —
                                             // the TRANSPARENT mempool, retired since g2 (SHIELDED_ONLY_HEIGHT
@@ -5518,7 +5564,7 @@ fn apply_finality_gate(
                         event_log_root: body.header.event_log_root,
                         contract_state_root: body.header.contract_state_root,
                     };
-                    signer.offer(tip_proof_signer::TipJob { height: h, hash, roots });
+                    signer.offer(tip_proof_signer::TipJob { height: h, hash, roots, basis: "certificate" });
                 }
             }
         }

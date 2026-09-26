@@ -38,6 +38,12 @@ pub struct TipJob {
     pub height: u64,
     pub hash: BlockHash,
     pub roots: StateRoots,
+    /// What makes this tip final, published verbatim so a light client can tell a
+    /// committee-certified tip from one the producer attests under the 512-block
+    /// depth rule alone: `"certificate"` or `"depth_rule"` (2026-09-26 — until then
+    /// the proof was only signed on a certificate, so with the committee dark since
+    /// 09-21 `/v1/finality/tip-proof` served null).
+    pub basis: &'static str,
 }
 
 /// Handle owned by the produce loop. Cheap to clone; `offer` never blocks.
@@ -91,6 +97,10 @@ fn signer_loop(
     view: Arc<RwLock<Option<serde_json::Value>>>,
 ) {
     let mut signed: u64 = 0;
+    // Never publish a LOWER tip than the last one: the certificate line runs ahead of
+    // the depth line, and a depth-rule job arriving after a certified one must not
+    // pull the published proof backwards.
+    let mut last_height: Option<u64> = None;
     let mut total_ms: u128 = 0;
     // A signature every 1–3 s back-to-back pinned a full core on a 48-core box that
     // runs at load ~100 (MEASURED 20:0x: the signer thread at 99.9%). The view is a
@@ -111,6 +121,9 @@ fn signer_loop(
         while let Ok(newer) = rx.try_recv() {
             job = newer;
         }
+        if last_height.map_or(false, |h| job.height <= h) {
+            continue;
+        }
         let t0 = Instant::now();
         match sigil_tip_proof::TipProof::new_sqisign(job.height, job.roots, &sk, &pk) {
             Ok(tp) => {
@@ -129,7 +142,9 @@ fn signer_loop(
                     "signed_at_ms": now,
                     "sign_ms": took,
                     "off_loop": true,
+                    "basis": job.basis,
                 });
+                last_height = Some(job.height);
                 if let Ok(mut w) = view.write() {
                     *w = Some(v);
                 }
@@ -168,7 +183,7 @@ mod tests {
         // No real key: exercise the channel discipline with a fake consumer.
         let (tx, rx) = sync_channel::<TipJob>(1);
         let s = TipProofSigner { tx };
-        let job = |h: u64| TipJob { height: h, hash: [0u8; 32], roots: zero_roots() };
+        let job = |h: u64| TipJob { height: h, hash: [0u8; 32], roots: zero_roots(), basis: "certificate" };
         assert!(s.offer(job(1)));
         // Slot full, signer hasn't drained: offer must still return promptly.
         assert!(s.offer(job(2)));
@@ -188,6 +203,6 @@ mod tests {
         let (tx, rx) = sync_channel::<TipJob>(1);
         let s = TipProofSigner { tx };
         drop(rx);
-        assert!(!s.offer(TipJob { height: 9, hash: [1u8; 32], roots: zero_roots() }));
+        assert!(!s.offer(TipJob { height: 9, hash: [1u8; 32], roots: zero_roots(), basis: "certificate" }));
     }
 }

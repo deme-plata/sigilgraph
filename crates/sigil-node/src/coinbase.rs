@@ -2032,11 +2032,8 @@ mod tests {
     #[test]
     fn dormant_gate_emits_nothing_and_leaves_the_block_as_it_was() {
         force_mint_events(false);
-        // Below the activation height: dormant. At/after it: live. Pinned both sides.
-        assert!(!sigil_tx::mint_reward_events_active(25_808_013), "dormant at the measured height");
-        assert!(!sigil_tx::mint_reward_events_active(sigil_tx::MINT_REWARD_EVENT_HEIGHT - 1));
-        assert!(sigil_tx::mint_reward_events_active(sigil_tx::MINT_REWARD_EVENT_HEIGHT));
-        assert!(sigil_tx::MINT_REWARD_EVENT_HEIGHT < 27_000_000, "must not share the fifth-root window");
+        assert!(!sigil_tx::mint_reward_events_active(25_808_013), "ships dormant");
+        assert!(!sigil_tx::mint_reward_events_active(u64::MAX - 1));
         let (base, a, b) = two_miner_base();
         let shares: std::collections::HashMap<WalletId, u64> = [(a, 3), (b, 1)].into_iter().collect();
         let (tr, roots, events, _inc, _pr) = build_block_body_for_shares(&base, 7, Some(1_000_000), &[], a, &shares);

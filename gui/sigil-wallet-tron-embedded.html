@@ -2227,7 +2227,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // 2026-09-08: seal the note to OUR OWN delivery key so every client of this seed
           // (phone, MCP, sigil-top, this page) finds the deposit by trial-decryption —
           // no more index guessing that left each client blind to the others' deposits.
-          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,fee:String(fee),sig:sig,req_nonce:reqNonce,
+          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,blinding:S.toWireHex(slot.blinding),pk_shield:S.toWireHex(pk),fee:String(fee),sig:sig,req_nonce:reqNonce,
             note_ciphertext:(function(){ try{ var W=window.sigilShieldWasm; if(!W||!W.sealNoteToSelf) return undefined; var sh=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); return W.sealNoteToSelf(sh, index, value.toString()); }catch(_){ return undefined; } })()})});
         var j=null; try{ j=await r.json(); }catch(_){}
         if(r.ok && j && j.ok){ noteRecord(from,index,Number(value)); bookedIndices.push(index); landed.push({txid:j.txid,value:value}); }

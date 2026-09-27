@@ -98,6 +98,49 @@ fn serve_loop(
     }
 }
 
+/// The only web origins allowed to drive the local signing endpoints (mine-sign, shield,
+/// private send, pay). One list, used by both the preflight and the POST guard.
+const LOCAL_SIGNING_ORIGINS: &[&str] = &[
+    "https://sigilgraph.org",
+    "https://www.sigilgraph.org",
+    "https://sigilgraph.quillon.xyz",
+    "http://127.0.0.1:9800",
+    "http://localhost:9800",
+];
+
+/// First value of header `name` (case-insensitive) in a raw HTTP request head.
+fn request_header(req: &str, name: &str) -> Option<String> {
+    let head = req.split("\r\n\r\n").next().unwrap_or(req);
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+    })
+}
+
+/// Why a POST to a local signing endpoint must be refused, or `None` to let it through.
+///
+/// Origin: absent is allowed (curl, the CLI, and same-origin navigations that send none);
+/// present must be allowlisted. Host: must name the loopback (any port), which is what stops
+/// a DNS-rebound hostname — its Origin would also fail, but the signer should not depend on
+/// a single check.
+fn refuse_local_signing(req: &str) -> Option<&'static str> {
+    if let Some(origin) = request_header(req, "origin") {
+        if !LOCAL_SIGNING_ORIGINS.contains(&origin.as_str()) {
+            return Some("origin not allowed to use the local signer");
+        }
+    }
+    let host = request_header(req, "host").unwrap_or_default().to_ascii_lowercase();
+    let hostname = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host)
+    };
+    if !matches!(hostname, "127.0.0.1" | "localhost" | "::1") {
+        return Some("host is not the loopback");
+    }
+    None
+}
+
 fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Option<&LocalApi>) {
     let mut buf = [0u8; 4096];
     let n = match stream.read(&mut buf) {
@@ -146,18 +189,8 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     // known SIGIL origins and refuses the rest, and the allowance is granted ONLY on the
     // `mine_local_api` signing paths, never on the generic proxy below.
     fn pna_allowed_origin(req: &str) -> Option<String> {
-        const ALLOWED: &[&str] = &[
-            "https://sigilgraph.org",
-            "https://www.sigilgraph.org",
-            "https://sigilgraph.quillon.xyz",
-            "http://127.0.0.1:9800",
-            "http://localhost:9800",
-        ];
-        let origin = req
-            .lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("origin:"))
-            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))?;
-        ALLOWED.contains(&origin.as_str()).then_some(origin)
+        let origin = request_header(req, "origin")?;
+        LOCAL_SIGNING_ORIGINS.contains(&origin.as_str()).then_some(origin)
     }
 
     // Preflight for the signing endpoints. Answered before anything else so the generic
@@ -187,6 +220,24 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     // the three `mine_local_api` signing endpoints, and must: it spends with the mining
     // seed, so it needs exactly that protection and no less.
     if method == "POST" && (mine_local_api::is_local_path(path) || pay::is_local_path(path)) {
+        // 🔒 ENFORCE, don't just decorate (2026-09-27). Until this guard the allowlist above
+        // only chose which CORS header came BACK — the handler below ran for every caller. A
+        // "simple" cross-origin POST (text/plain, no preflight) from any web page the user had
+        // open still spent with the mining seed; the browser merely hid the answer from the
+        // attacker afterwards. Two checks, both before any handler runs:
+        //   1. Origin, when present, must be allowlisted. Browsers always send it on a
+        //      cross-origin POST; local tools (curl, the CLI) send none and stay allowed.
+        //   2. Host must name the loopback, so a DNS-rebound hostname cannot reach the signer.
+        if let Some(reason) = refuse_local_signing(&req) {
+            let body = format!("{{\"ok\":false,\"error\":\"{reason}\"}}");
+            let resp = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nVary: Origin\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+            return;
+        }
         let (status, resp_body) = if pay::is_local_path(path) {
             pay::handle(path, &req_body)
         } else {
@@ -1628,6 +1679,36 @@ pub mod pay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ══ LOCAL SIGNER GUARD (2026-09-27) ═════════════════════════════════════════════
+
+    fn post(host: &str, origin: Option<&str>) -> String {
+        let o = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
+        format!("POST /api/v1/pay HTTP/1.1\r\nHost: {host}\r\n{o}Content-Type: text/plain\r\n\r\n{{\"to\":\"x\",\"amount\":\"1\"}}")
+    }
+
+    #[test]
+    fn a_foreign_page_cannot_drive_the_local_signer() {
+        // The drive-by: a "simple" text/plain POST from an arbitrary site.
+        assert!(refuse_local_signing(&post("127.0.0.1:9800", Some("https://evil.example"))).is_some());
+        // DNS rebinding: attacker hostname resolved to loopback; Origin AND Host both fail.
+        assert!(refuse_local_signing(&post("evil.example:9800", Some("http://evil.example:9800"))).is_some());
+        // Rebinding with no Origin at all still fails on Host.
+        assert!(refuse_local_signing(&post("evil.example:9800", None)).is_some());
+        // Header-name case must not open a bypass.
+        let shouty = "POST /api/v1/pay HTTP/1.1\r\nHOST: 127.0.0.1:9800\r\nORIGIN: https://evil.example\r\n\r\n{}";
+        assert!(refuse_local_signing(shouty).is_some());
+    }
+
+    #[test]
+    fn the_real_callers_still_reach_the_local_signer() {
+        assert_eq!(refuse_local_signing(&post("127.0.0.1:9800", Some("https://sigilgraph.org"))), None);
+        assert_eq!(refuse_local_signing(&post("127.0.0.1:9800", Some("http://127.0.0.1:9800"))), None);
+        assert_eq!(refuse_local_signing(&post("localhost:9800", Some("http://localhost:9800"))), None);
+        assert_eq!(refuse_local_signing(&post("[::1]:9800", None)), None);
+        // curl / the CLI: no Origin, loopback Host.
+        assert_eq!(refuse_local_signing(&post("127.0.0.1:9800", None)), None);
+    }
 
     // ══ ONE-ACTION SEND (/api/v1/pay) ═══════════════════════════════════════════════
 

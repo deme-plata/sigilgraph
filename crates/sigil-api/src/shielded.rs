@@ -184,6 +184,23 @@ pub enum ShieldedSubmitError {
     /// signed acceptance receipt and "✓ sent", and the builder's refusal arrived ~14 s
     /// later as a reversal. Carries the RAW nullifier, as the chain's own error does.
     AlreadySpent([u8; 32]),
+    /// Transparent → shielded deposits are paused by the operator (2026-09-27).
+    ///
+    /// Nothing on the deposit path proves that `cm` commits to `amount`: the chokepoint's
+    /// `Shield` arm checks the denomination and the balance, never the note. A deposit of
+    /// the smallest denomination could therefore carry a note worth far more, and the later
+    /// spend proof is honest about the NOTE, so the pool would pay it out, bounded only by
+    /// `value_locked`. Until the deposit carries its own binding (a height-gated consensus
+    /// change), this door refuses every deposit. The operator reopens it with
+    /// `SIGIL_SHIELD_DEPOSITS=open`; any other value, or none, means paused. Spends and
+    /// withdrawals of existing notes are unaffected.
+    DepositsPaused,
+}
+
+/// Whether transparent → shielded deposits are paused. Fail-closed: only the exact value
+/// `open` reopens the door, so a rebuilt node or a forgotten env line stays safe.
+pub fn shield_deposits_paused() -> bool {
+    !matches!(std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref(), Ok("open"))
 }
 
 impl ShieldedSubmitError {
@@ -237,6 +254,10 @@ impl ShieldedSubmitError {
                  rescan your notes and pick an unspent one (nothing was queued)",
                 hex::encode(nf)
             ),
+            Self::DepositsPaused => "deposits into the private pool are paused for maintenance; \
+                 your transparent balance was not touched and existing private notes can still \
+                 be spent (nothing was queued)"
+                .into(),
         }
     }
 }
@@ -583,6 +604,9 @@ impl ShieldedBridge {
         sig: &str,
         req_nonce: u64,
     ) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
+        if shield_deposits_paused() {
+            return Err(ShieldedSubmitError::DepositsPaused);
+        }
         if parts.is_empty() {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
@@ -1157,6 +1181,16 @@ pub struct UnshieldRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pause is fail-closed: with no operator env line, deposits are refused. Reading
+    /// only (never `set_var`), so it cannot race the rest of the suite.
+    #[test]
+    fn shield_deposits_are_paused_unless_explicitly_opened() {
+        if std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref() != Ok("open") {
+            assert!(shield_deposits_paused());
+        }
+        assert!(ShieldedSubmitError::DepositsPaused.message().contains("paused"));
+    }
 
     /// A tx the builder refuses for a permanent reason is evicted after `REJECT_AFTER`
     /// verdicts, its nullifier is released, and the reason is answerable afterwards.

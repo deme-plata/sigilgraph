@@ -777,6 +777,16 @@ pub async fn shield_handler(
     State(st): State<AppState>,
     Json(req): Json<shielded::ShieldRequest>,
 ) -> Json<serde_json::Value> {
+    // Door guard, not a library guard: every public deposit path (this handler, sigil-top's
+    // embedded API, and `dandelion_relay::apply_locally` for relayed deposits) checks it,
+    // while the bridge's own tests keep exercising the queue. See `DepositsPaused`.
+    if shielded::shield_deposits_paused() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "paused": true,
+            "error": shielded::ShieldedSubmitError::DepositsPaused.message(),
+        }));
+    }
     match st.shielded.submit_shield_with_delivery(&req.from, req.amount, &req.cm, req.fee, &req.sig, req.req_nonce, req.note_ciphertext.as_deref()) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),

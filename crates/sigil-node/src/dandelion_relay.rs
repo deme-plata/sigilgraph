@@ -261,6 +261,9 @@ fn apply_shielded_op(shielded: &ShieldedBridge, op: ShieldedOp) -> Result<[u8; 3
                 r.pk_sqi.as_deref(), r.sqi_pop.as_deref(),
             )
             .map_err(|_| ()),
+        // Relayed deposits obey the same operator pause as the HTTP door, or a paused
+        // producer would still take deposits that entered at any other node.
+        ShieldedOp::Shield(_) if sigil_api::shielded::shield_deposits_paused() => Err(()),
         ShieldedOp::Shield(r) => shielded
             .submit_shield(&r.from, r.amount, &r.cm, r.fee, &r.sig, r.req_nonce)
             .map_err(|_| ()),

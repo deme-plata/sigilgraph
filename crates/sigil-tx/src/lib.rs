@@ -1762,7 +1762,16 @@ pub fn coinbase_is_transparent(height: u64) -> bool {
 /// 27,000,000 — two consensus activations must never share a window, or a failure cannot be
 /// attributed. Producer-only rule: followers apply the leaves as ordinary mutations and need
 /// no upgrade.
-pub const MINT_REWARD_EVENT_HEIGHT: u64 = 26_950_000;
+///
+/// BACK TO DORMANT 2026-09-27 (phase 0 of the field-map roadmap). The 26,950,000 activation
+/// (cc548d1c) never reached the producer: the live binary was cut from dfd1120c, which does
+/// not contain it, and the chain passed 26,950,000 with `event_log_root` still all-zero. A
+/// constant that names a height the chain already crossed WITHOUT the rule describes history
+/// falsely, and deploying it would have started emission at deploy height while claiming
+/// 26,950,000. Re-arm it with a real future height, in its own window, at the deploy that
+/// carries it — and note in the court/attribution docs that blocks before that height carry
+/// no MintReward events.
+pub const MINT_REWARD_EVENT_HEIGHT: u64 = u64::MAX;
 
 /// Does the coinbase at `height` carry `MintReward` events? The one place the rule is asked.
 pub fn mint_reward_events_active(height: u64) -> bool {

@@ -2036,7 +2036,13 @@ mod tests {
         assert!(!sigil_tx::mint_reward_events_active(25_808_013), "dormant at the measured height");
         assert!(!sigil_tx::mint_reward_events_active(sigil_tx::MINT_REWARD_EVENT_HEIGHT - 1));
         assert!(sigil_tx::mint_reward_events_active(sigil_tx::MINT_REWARD_EVENT_HEIGHT));
-        assert!(sigil_tx::MINT_REWARD_EVENT_HEIGHT < 27_000_000, "must not share the fifth-root window");
+        // Either dormant, or armed at least 50,000 blocks away from the fifth-root gate:
+        // two activations must never share a window.
+        assert!(
+            sigil_tx::MINT_REWARD_EVENT_HEIGHT == u64::MAX
+                || sigil_tx::MINT_REWARD_EVENT_HEIGHT.abs_diff(27_000_000) >= 50_000,
+            "must not share the fifth-root window"
+        );
         let (base, a, b) = two_miner_base();
         let shares: std::collections::HashMap<WalletId, u64> = [(a, 3), (b, 1)].into_iter().collect();
         let (tr, roots, events, _inc, _pr) = build_block_body_for_shares(&base, 7, Some(1_000_000), &[], a, &shares);

@@ -184,23 +184,63 @@ pub enum ShieldedSubmitError {
     /// signed acceptance receipt and "✓ sent", and the builder's refusal arrived ~14 s
     /// later as a reversal. Carries the RAW nullifier, as the chain's own error does.
     AlreadySpent([u8; 32]),
-    /// Transparent → shielded deposits are paused by the operator (2026-09-27).
-    ///
-    /// Nothing on the deposit path proves that `cm` commits to `amount`: the chokepoint's
-    /// `Shield` arm checks the denomination and the balance, never the note. A deposit of
-    /// the smallest denomination could therefore carry a note worth far more, and the later
-    /// spend proof is honest about the NOTE, so the pool would pay it out, bounded only by
-    /// `value_locked`. Until the deposit carries its own binding (a height-gated consensus
-    /// change), this door refuses every deposit. The operator reopens it with
-    /// `SIGIL_SHIELD_DEPOSITS=open`; any other value, or none, means paused. Spends and
-    /// withdrawals of existing notes are unaffected.
+    /// Transparent → shielded deposits are paused by the operator
+    /// (`SIGIL_SHIELD_DEPOSITS=pause`). An emergency brake; off by default since the door
+    /// checks every deposit's opening (see `DepositOpeningMissing`).
     DepositsPaused,
+    /// The deposit did not carry its opening (`blinding` + `pk_shield`).
+    ///
+    /// Why the door insists (2026-09-27/28): nothing on the deposit path used to prove that
+    /// `cm` commits to `amount`. The chokepoint's `Shield` arm checks the denomination and
+    /// the balance, never the note, so a deposit of the smallest denomination could carry a
+    /// note worth far more, and the later spend proof — honest about the NOTE — would pay it
+    /// out of the pool, bounded only by `value_locked`. The opening costs no privacy on a
+    /// deposit: the amount is already public here, the key is the owner's published one,
+    /// and a spend's nullifier `compress2(spend_key, position)` involves neither.
+    DepositOpeningMissing,
+    /// The opening does not reproduce `cm`: the note is not worth `amount` (or is not owned
+    /// by `pk_shield`).
+    DepositOpeningMismatch,
 }
 
-/// Whether transparent → shielded deposits are paused. Fail-closed: only the exact value
-/// `open` reopens the door, so a rebuilt node or a forgotten env line stays safe.
+/// Whether transparent → shielded deposits are paused by the operator. Opt-in brake:
+/// `SIGIL_SHIELD_DEPOSITS=pause`. Deposits are otherwise open, each one opening-checked.
 pub fn shield_deposits_paused() -> bool {
-    !matches!(std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref(), Ok("open"))
+    matches!(std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref(), Ok("pause"))
+}
+
+/// Recompute a deposit's leaf from its opening and require it to equal `cm`.
+///
+/// `cm = compress2(compress2(amount, blinding), pk_shield)` — `note_v1::Note::commitment`.
+/// Every input goes through the strict `from_wire`, so a second spelling of the same field
+/// element cannot slip past the comparison.
+pub fn check_deposit_opening(
+    amount: u128,
+    cm: &[u8; 32],
+    blinding_hex: Option<&str>,
+    pk_hex: Option<&str>,
+) -> Result<(), ShieldedSubmitError> {
+    use sigil_shield::mimc::compress2;
+    use sigil_shield::note_v1::{from_wire, to_wire, RANGE_BITS};
+    let (Some(b), Some(pk)) = (blinding_hex, pk_hex) else {
+        return Err(ShieldedSubmitError::DepositOpeningMissing);
+    };
+    let amount = u64::try_from(amount)
+        .ok()
+        .filter(|a| *a < (1u64 << RANGE_BITS))
+        .ok_or(ShieldedSubmitError::DepositOpeningMismatch)?;
+    let mut amount_wire = [0u8; 32];
+    amount_wire[..8].copy_from_slice(&amount.to_le_bytes());
+    let fe = |w: &[u8; 32]| from_wire(w).map_err(|_| ShieldedSubmitError::DepositOpeningMismatch);
+    let value = fe(&amount_wire)?;
+    let blinding = fe(&hex32(b, "blinding")?)?;
+    let owner = fe(&hex32(pk, "pk_shield")?)?;
+    let expected = to_wire(compress2(compress2(value, blinding), owner));
+    if &expected == cm {
+        Ok(())
+    } else {
+        Err(ShieldedSubmitError::DepositOpeningMismatch)
+    }
 }
 
 impl ShieldedSubmitError {
@@ -257,6 +297,13 @@ impl ShieldedSubmitError {
             Self::DepositsPaused => "deposits into the private pool are paused for maintenance; \
                  your transparent balance was not touched and existing private notes can still \
                  be spent (nothing was queued)"
+                .into(),
+            Self::DepositOpeningMissing => "this wallet version cannot deposit into the private \
+                 pool any more: the deposit must carry its note's blinding and owner key. Update \
+                 the wallet (nothing was queued, your balance was not touched)"
+                .into(),
+            Self::DepositOpeningMismatch => "the deposit's note does not match its amount and \
+                 owner key, so it was refused (nothing was queued)"
                 .into(),
         }
     }
@@ -545,6 +592,10 @@ impl ShieldedBridge {
     /// Not signed into the wallet signature (every existing client keeps working); a
     /// tampered ciphertext can only make the owner's own note harder to FIND, never move it.
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// UNCHECKED: no opening, so nothing here proves `cm` is worth `amount`. In-process
+    /// callers and tests only — every public door (HTTP, relay, sigil-top's embedded API)
+    /// must use [`Self::submit_shield_opened`].
     pub fn submit_shield_with_delivery(
         &self,
         from: &str,
@@ -554,6 +605,45 @@ impl ShieldedBridge {
         sig: &str,
         req_nonce: u64,
         note_ciphertext: Option<&str>,
+    ) -> Result<[u8; 32], ShieldedSubmitError> {
+        self.submit_shield_core(from, amount, cm, fee, sig, req_nonce, note_ciphertext, None, None)
+    }
+
+    /// The door path for a deposit: `submit_shield_with_delivery` plus the OPENING check
+    /// (`check_deposit_opening`) and the operator brake. The opening rides the relay so the
+    /// next hop re-checks it rather than trusting this node's word.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_shield_opened(
+        &self,
+        from: &str,
+        amount: u128,
+        cm: &str,
+        fee: u128,
+        sig: &str,
+        req_nonce: u64,
+        note_ciphertext: Option<&str>,
+        blinding: Option<&str>,
+        pk_shield: Option<&str>,
+    ) -> Result<[u8; 32], ShieldedSubmitError> {
+        if shield_deposits_paused() {
+            return Err(ShieldedSubmitError::DepositsPaused);
+        }
+        check_deposit_opening(amount, &hex32(cm, "cm")?, blinding, pk_shield)?;
+        self.submit_shield_core(from, amount, cm, fee, sig, req_nonce, note_ciphertext, blinding, pk_shield)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_shield_core(
+        &self,
+        from: &str,
+        amount: u128,
+        cm: &str,
+        fee: u128,
+        sig: &str,
+        req_nonce: u64,
+        note_ciphertext: Option<&str>,
+        blinding: Option<&str>,
+        pk_shield: Option<&str>,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
         if let Some(ct) = note_ciphertext {
             let limit = sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN;
@@ -577,6 +667,8 @@ impl ShieldedBridge {
         self.fire_relay_hook(id, ShieldedOp::Shield(ShieldRequest {
             from: from.to_string(), amount, cm: cm.to_string(), fee, sig: sig.to_string(), req_nonce,
             note_ciphertext: note_ciphertext.map(|s| s.to_string()),
+            blinding: blinding.map(|s| s.to_string()),
+            pk_shield: pk_shield.map(|s| s.to_string()),
         }));
         Ok(id)
     }
@@ -598,48 +690,16 @@ impl ShieldedBridge {
     #[allow(clippy::too_many_arguments)]
     pub fn submit_shield_split(
         &self,
-        from: &str,
-        parts: &[(u128, String)],
-        fee: u128,
-        sig: &str,
-        req_nonce: u64,
+        _from: &str,
+        _parts: &[(u128, String)],
+        _fee: u128,
+        _sig: &str,
+        _req_nonce: u64,
     ) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
-        if shield_deposits_paused() {
-            return Err(ShieldedSubmitError::DepositsPaused);
-        }
-        if parts.is_empty() {
-            return Err(ShieldedSubmitError::ZeroAmount);
-        }
-        let from_b = hex32(from, "from")?;
-        let mut msg = format!("sigil-rpc/v1|shield-split|{from}");
-        for (amount, cm) in parts {
-            msg.push('|');
-            msg.push_str(&amount.to_string());
-            msg.push('|');
-            msg.push_str(cm);
-        }
-        msg.push_str(&format!("|{fee}|nonce={req_nonce}"));
-        verify_wallet_sig(&from_b, &msg, sig)?;
-        self.check_nonce(&from_b, req_nonce)?;
-        // Validate EVERY part before enqueuing any, so a bad tail cannot leave a
-        // half-shielded balance queued.
-        let mut prepared = Vec::with_capacity(parts.len());
-        for (amount, cm) in parts {
-            if *amount == 0 {
-                return Err(ShieldedSubmitError::ZeroAmount);
-            }
-            check_denomination(*amount)?;
-            prepared.push((*amount, hex32(cm, "cm")?));
-        }
-        Ok(prepared
-            .into_iter()
-            .enumerate()
-            .map(|(i, (amount, cm))| {
-                // the fee is charged once, on the first part
-                let f = if i == 0 { fee } else { 0 };
-                self.enqueue(SigilTx::Shield { from: from_b, amount, cm, fee: f, note_ciphertext: None }, None)
-            })
-            .collect())
+        // Refused since 2026-09-28: this request shape carries no per-part opening, so no
+        // part's note can be checked against its amount (see `DepositOpeningMissing`). No
+        // route calls it; wallets split client-side and send one opened `/v1/shield` each.
+        Err(ShieldedSubmitError::DepositOpeningMissing)
     }
 
     /// Queue a shielded → shielded transfer. No signature: the proof authorizes it.
@@ -1137,6 +1197,15 @@ pub struct ShieldRequest {
     /// pinned by `dandelion_relay::wire_tests`. A JSON `null` here costs 22 bytes.
     #[serde(default)]
     pub note_ciphertext: Option<String>,
+    /// The deposit's OPENING (2026-09-28): the note's blinding, wire hex. With `pk_shield`
+    /// it lets the door recompute `cm = compress2(compress2(amount, blinding), pk_shield)`
+    /// and refuse a deposit whose note is worth more than the amount it debits. Same
+    /// bincode rule as `note_ciphertext`: `default` only, never `skip_serializing_if`.
+    #[serde(default)]
+    pub blinding: Option<String>,
+    /// The note owner's published circuit key (`GET /v1/shielded/address`), wire hex.
+    #[serde(default)]
+    pub pk_shield: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1182,14 +1251,78 @@ pub struct UnshieldRequest {
 mod tests {
     use super::*;
 
-    /// The pause is fail-closed: with no operator env line, deposits are refused. Reading
+    /// The brake is opt-in: only `SIGIL_SHIELD_DEPOSITS=pause` pauses deposits. Reading
     /// only (never `set_var`), so it cannot race the rest of the suite.
     #[test]
-    fn shield_deposits_are_paused_unless_explicitly_opened() {
-        if std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref() != Ok("open") {
-            assert!(shield_deposits_paused());
+    fn the_deposit_brake_is_opt_in() {
+        if std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref() != Ok("pause") {
+            assert!(!shield_deposits_paused());
         }
         assert!(ShieldedSubmitError::DepositsPaused.message().contains("paused"));
+    }
+
+    fn opening(value: u64, index: u64) -> ([u8; 32], String, String) {
+        use sigil_shield::note_v1::to_wire;
+        let acct = sigil_shield::wallet::ShieldedAccount::from_seed([7u8; 32]);
+        let note = acct.note(index, value).expect("value in range");
+        (
+            to_wire(note.commitment()),
+            hex::encode(to_wire(acct.blinding(index))),
+            hex::encode(to_wire(acct.public_key())),
+        )
+    }
+
+    /// The wallet's own derivation (`ShieldedAccount::note`, what `shieldNoteCommitment`
+    /// exports to the browser) must satisfy the door, byte for byte.
+    #[test]
+    fn an_honest_deposit_opens_to_its_own_commitment() {
+        let (cm, b, pk) = opening(10_000_000_000, 3);
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&b), Some(&pk)), Ok(()));
+    }
+
+    /// THE hole: debit the smallest amount while the note says far more. The spend proof
+    /// would later be honest about the note and pay the difference out of the pool.
+    #[test]
+    fn a_small_deposit_carrying_a_big_note_is_refused() {
+        let (cm_big, b, pk) = opening(1u64 << 57, 0);
+        assert_eq!(
+            check_deposit_opening(100_000, &cm_big, Some(&b), Some(&pk)),
+            Err(ShieldedSubmitError::DepositOpeningMismatch)
+        );
+    }
+
+    #[test]
+    fn a_deposit_owned_by_another_key_or_blinding_is_refused() {
+        let (cm, b, _pk) = opening(10_000_000_000, 1);
+        let other_b = opening(10_000_000_000, 2).1;
+        let other = hex::encode(sigil_shield::note_v1::to_wire(
+            sigil_shield::wallet::ShieldedAccount::from_seed([9u8; 32]).public_key(),
+        ));
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&b), Some(&other)), Err(ShieldedSubmitError::DepositOpeningMismatch));
+        let pk = opening(10_000_000_000, 1).2;
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&other_b), Some(&pk)), Err(ShieldedSubmitError::DepositOpeningMismatch));
+    }
+
+    /// Old wallets send no opening: refused with an "update your wallet" message, never
+    /// silently accepted. Non-canonical spellings are refused, not normalised.
+    #[test]
+    fn a_deposit_without_a_canonical_opening_is_refused() {
+        let (cm, b, pk) = opening(10_000_000_000, 4);
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, None, Some(&pk)), Err(ShieldedSubmitError::DepositOpeningMissing));
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&b), None), Err(ShieldedSubmitError::DepositOpeningMissing));
+        let dirty = format!("{}01", &b[..62]); // non-zero padding byte
+        assert!(check_deposit_opening(10_000_000_000, &cm, Some(&dirty), Some(&pk)).is_err());
+        assert!(ShieldedSubmitError::DepositOpeningMissing.message().contains("Update"));
+    }
+
+    /// The split shape has no per-part opening, so it is refused outright.
+    #[test]
+    fn the_unopened_split_path_is_closed() {
+        let b = ShieldedBridge::new();
+        assert_eq!(
+            b.submit_shield_split(&"aa".repeat(32), &[(100_000, "bb".repeat(32))], 0, "", 1),
+            Err(ShieldedSubmitError::DepositOpeningMissing)
+        );
     }
 
     /// A tx the builder refuses for a permanent reason is evicted after `REJECT_AFTER`

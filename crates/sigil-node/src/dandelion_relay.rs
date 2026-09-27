@@ -261,11 +261,13 @@ fn apply_shielded_op(shielded: &ShieldedBridge, op: ShieldedOp) -> Result<[u8; 3
                 r.pk_sqi.as_deref(), r.sqi_pop.as_deref(),
             )
             .map_err(|_| ()),
-        // Relayed deposits obey the same operator pause as the HTTP door, or a paused
-        // producer would still take deposits that entered at any other node.
-        ShieldedOp::Shield(_) if sigil_api::shielded::shield_deposits_paused() => Err(()),
+        // Relayed deposits take the same checked door as `/v1/shield`: the opening is
+        // re-verified here, never trusted from the origin, and the operator brake applies.
         ShieldedOp::Shield(r) => shielded
-            .submit_shield(&r.from, r.amount, &r.cm, r.fee, &r.sig, r.req_nonce)
+            .submit_shield_opened(
+                &r.from, r.amount, &r.cm, r.fee, &r.sig, r.req_nonce,
+                r.note_ciphertext.as_deref(), r.blinding.as_deref(), r.pk_shield.as_deref(),
+            )
             .map_err(|_| ()),
         ShieldedOp::ShieldedSend(r) => {
             let proof = hex::decode(r.proof.trim_start_matches("0x")).map_err(|_| ())?;
@@ -307,6 +309,8 @@ mod wire_tests {
             sig: "cd".repeat(64),
             req_nonce: 7,
             note_ciphertext,
+            blinding: Some("11".repeat(8) + &"00".repeat(24)),
+            pk_shield: None,
         }
     }
 
@@ -328,6 +332,10 @@ mod wire_tests {
             let RelayedTx::Shielded(ShieldedOp::Shield(r)) = back else { panic!("wrong variant") };
             assert_eq!(r.note_ciphertext, ct);
             assert_eq!(r.req_nonce, 7);
+            // The deposit opening (2026-09-28) must survive the hop, Some AND None alike,
+            // or the next node cannot re-check the note against its amount.
+            assert_eq!(r.blinding.as_deref(), Some(&*("11".repeat(8) + &"00".repeat(24))));
+            assert_eq!(r.pk_shield, None);
         }
     }
 

@@ -40,6 +40,18 @@ pub struct Rejection {
 
 static REJECTIONS: std::sync::Mutex<Vec<Rejection>> = std::sync::Mutex::new(Vec::new());
 
+/// True when a shielded spend's outputs are ALL already in the pool — i.e. this very
+/// transaction has already landed on the frontier and a re-offer must not be scored as a
+/// refusal. Needs at least one output: an empty `cm_outs` proves nothing.
+pub(crate) fn spend_already_landed(tx: &sigil_tx::SigilTx, held: impl Fn(&[u8; 32]) -> bool) -> bool {
+    match tx {
+        sigil_tx::SigilTx::ShieldedSend { cm_outs, .. } | sigil_tx::SigilTx::Unshield { cm_outs, .. } => {
+            !cm_outs.is_empty() && cm_outs.iter().all(|c| held(c))
+        }
+        _ => false,
+    }
+}
+
 fn record_rejection(hash: [u8; 32], reason: String, permanent: bool) {
     if let Ok(mut g) = REJECTIONS.lock() {
         // Bounded: the mint loop drains this after every candidate; if it ever stops
@@ -503,6 +515,18 @@ pub fn build_block_body_for_shares_with_schedule(
                 continue;
             }
         }
+        // The SAME lesson for spends (2026-09-28, measured end to end from the Android app).
+        // A ShieldedSend is included in a candidate within ~0.1 s but stays pending until the
+        // 512-deep settlement (~64 s at 8 blk/s), so every later candidate re-offers it — and
+        // its OWN nullifier is already in `work`, so it fails as NullifierAlreadySpent. Three
+        // such "permanent refusals" evicted tx d465843e… and published `rejected: double-spend`
+        // for a payment that had in fact landed (nullifier + both outputs in the pool). The
+        // wallet believed it, retired the note and PAID AGAIN. A real double-spend by another
+        // transaction has different outputs, so "all my outputs are already held" can only
+        // mean "this exact transaction already landed": skip it quietly, exactly like Shield.
+        if spend_already_landed(&tx.tx, |cm| work.shielded().has_ever_held(cm)) {
+            continue;
+        }
         let res = match sigil_tx::apply_tx_at(&work, tx, height) {
             Ok(res) => res,
             Err(e) => {
@@ -902,6 +926,27 @@ pub fn save_controller(dir: &std::path::Path, c: &EmissionController) {
 
 #[cfg(test)]
 mod tests {
+    /// 2026-09-28, the Android double-pay: a spend re-offered after it landed must be
+    /// recognised by its outputs, and a genuine double-spend (different outputs) must not.
+    #[test]
+    fn a_landed_spend_is_recognised_by_its_outputs_not_mistaken_for_a_double_spend() {
+        use sigil_tx::SigilTx;
+        let send = |outs: Vec<[u8; 32]>| SigilTx::ShieldedSend {
+            anchor: [0; 32], nullifier: [7; 32], extra_nullifiers: vec![], cm_outs: outs,
+            fee: 0, proof: vec![], note_ciphertexts: vec![],
+        };
+        let pool = [[1u8; 32], [2u8; 32]];
+        let held = |c: &[u8; 32]| pool.contains(c);
+        assert!(super::spend_already_landed(&send(vec![[1; 32], [2; 32]]), held),
+            "both outputs in the pool = this very tx already landed");
+        assert!(!super::spend_already_landed(&send(vec![[1; 32], [9; 32]]), held),
+            "one output missing = not this tx; a real double-spend must still be refused");
+        assert!(!super::spend_already_landed(&send(vec![[3; 32], [4; 32]]), held),
+            "same nullifier, different outputs = a genuine double-spend");
+        assert!(!super::spend_already_landed(&send(vec![]), held),
+            "no outputs proves nothing");
+    }
+
     use super::*;
 
     fn set_master(st: &mut SigilState, master: WalletId) {

@@ -389,6 +389,13 @@ struct FeedBlock {
     tip_ms: u64,
 }
 
+/// Newest height first, one entry per height (a later duplicate of the same height is dropped), capped.
+fn merge_block_stream(blocks: &mut Vec<FeedBlock>, cap: usize) {
+    blocks.sort_by(|a, b| b.height.cmp(&a.height));
+    blocks.dedup_by_key(|b| b.height);
+    blocks.truncate(cap);
+}
+
 /// v0.7.0: A node in the AI operator's fleet. Tracked for uptime and version compliance.
 #[derive(Debug, Clone)]
 struct FleetNode {
@@ -3301,7 +3308,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         }
                     }
                 }
+                let mut drained_any = false;
                 for block in p2p.drain_new_blocks() {
+                    drained_any = true;
                     app.p2p_blocks_synced += 1;
                     // Also feed into the block stream display
                     let fb = FeedBlock {
@@ -3313,11 +3322,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     };
                     app.blocks.push(fb);
                 }
-                // Keep blocks list bounded
-                if app.blocks.len() > 500 {
-                    app.blocks.sort_by(|a, b| b.height.cmp(&a.height));
-                    app.blocks.truncate(500);
-                }
+                // Newest first, one row per height, bounded. Appending gossip blocks at the END and only
+                // sorting past 500 froze the stream panel on the FIRST 14 blocks received.
+                if drained_any || app.blocks.len() > 500 { merge_block_stream(&mut app.blocks, 500); }
             }
             // v0.7.0: Fleet health check every 60s — AIs worry about their nodes
             if app.fleet_last_check.elapsed() >= Duration::from_secs(60) {
@@ -3765,6 +3772,24 @@ mod pure_helpers_tests {
     //! Coverage for the pure money/format/version helpers (Tier 3 — sigil-top
     //! was the worst-density crate at 581 loc/test). All deterministic, no I/O.
     use super::*;
+
+    fn fb(h: u64) -> FeedBlock { FeedBlock { height: h, hash: format!("{h:x}"), producer: String::new(), txs: 0, tip_ms: 0 } }
+
+    #[test]
+    fn block_stream_is_newest_first_one_row_per_height_and_capped() {
+        let mut v = vec![fb(5), fb(9), fb(7), fb(9), fb(1), fb(7)];
+        merge_block_stream(&mut v, 3);
+        assert_eq!(v.iter().map(|b| b.height).collect::<Vec<_>>(), vec![9, 7, 5]);
+    }
+
+    #[test]
+    fn block_stream_keeps_a_late_arrival_that_is_newer_than_everything() {
+        // The bug: gossip blocks were appended at the END, so the panel (first 14) never showed them.
+        let mut v: Vec<FeedBlock> = (1..=20).map(fb).collect();
+        v.push(fb(500));
+        merge_block_stream(&mut v, 500);
+        assert_eq!(v[0].height, 500);
+    }
 
     /// How many samples the rate filter needs to cross the bulk→frontier cliff.
     ///

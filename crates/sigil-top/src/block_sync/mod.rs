@@ -2432,6 +2432,9 @@ impl P2PBlockSync {
                         s.fetched_total = fetched_session;
                         let peer_count_now = net.peer_count();
                         s.peer_count = peer_count_now;
+                        // One truth: the two counters are the same network.peer_count(); the connect/disconnect
+                        // events alone left `mesh_peer_count` (node card, sync panel) stale between events.
+                        s.mesh_peer_count = peer_count_now;
                         if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
                         // v0.22: a MONITOR displays the VERIFIED LIVE TIP, not the contiguous
                         // backfill frontier. The newest blocks aren't reliably range-served in

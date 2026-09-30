@@ -478,7 +478,7 @@ pub(crate) fn render_block_stream(app: &App) -> Paragraph<'static> {
                 Span::styled(format!("{:>10} ", group(b.height)), Style::default().fg(C_GOLD)),
                 Span::styled(format!("{}… ", hash_pref), Style::default().fg(C_DIM)),
                 Span::styled(producer, Style::default().fg(C_CYAN)),
-                dim(format!("  {}ms", b.tip_ms)),
+                dim(if b.tip_ms == 0 { "  —".to_string() } else { format!("  {}ms", b.tip_ms) }),
             ])
         }).collect()
     };

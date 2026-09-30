@@ -54,7 +54,7 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let frac = if light { if fold_ok { 1.0 } else { 0.0 } }
         else if snap_mode && fold_ok && caught { 1.0 }
         else { frac };
-    let synced = caught && fold_ok && s.verify_break.is_none();
+    let synced = is_synced(caught, settled_gap, fold_ok, s.verify_break.is_some());
     let connecting = s.fetched_total == 0 && spine == 0 && !following;
     let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
     // v0.58: the kalman feed (app.p2p_rate) can read 0 mid-sync while the REAL contiguous
@@ -319,6 +319,15 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
 /// Display-only: it does NOT cause a timeout, it just makes a range that is
 /// aging toward one visible before it fails.
 const WAIT_FULL_MS: u64 = 8_000;
+
+/// "SYNCED" needs the SETTLED gap small, not just `gap < 16_384`: at ~8 blk/s that is 34 minutes of
+/// chain, and a node that far behind used to read "◆ SYNCED" with no ETA. `settled_gap` already
+/// discounts the ~512-block probation window, so caught-up reads near zero.
+const SYNCED_MAX_SETTLED_GAP: u64 = 1024;
+
+fn is_synced(caught: bool, settled_gap: u64, fold_ok: bool, broken: bool) -> bool {
+    caught && settled_gap < SYNCED_MAX_SETTLED_GAP && fold_ok && !broken
+}
 
 fn fmt_eta_secs(secs: u64) -> String {
     if secs >= 3600 { format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60) }
@@ -915,5 +924,26 @@ fn zero_peer_reason(s: &crate::block_sync::P2PSyncState) -> String {
         }
     } else {
         "   … dialling bootstrap (retry 1/2/4s)".to_string()
+    }
+}
+
+#[cfg(test)]
+mod synced_tests {
+    use super::*;
+
+    #[test]
+    fn a_node_thousands_of_blocks_behind_is_not_synced() {
+        // Old rule: caught = gap < 16_384 → "SYNCED". 10,000 settled blocks behind is ~21 minutes.
+        assert!(!is_synced(true, 10_000, true, false));
+        assert!(!is_synced(true, SYNCED_MAX_SETTLED_GAP, true, false), "the bound itself is not synced");
+    }
+
+    #[test]
+    fn caught_up_needs_every_condition() {
+        assert!(is_synced(true, 0, true, false));
+        assert!(is_synced(true, SYNCED_MAX_SETTLED_GAP - 1, true, false));
+        assert!(!is_synced(false, 0, true, false), "not following the network");
+        assert!(!is_synced(true, 0, false, false), "no valid tip-proof");
+        assert!(!is_synced(true, 0, true, true), "a verify break outranks everything");
     }
 }

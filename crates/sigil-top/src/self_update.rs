@@ -125,15 +125,22 @@ pub(crate) fn self_update(rel: &Release) -> Result<String, String> {
     // version passes pre-flight but then crash-loops in real operation, `crashloop_guard()`
     // reverts to this on the next boot (self-healing updater). Best-effort.
     if let (Ok(cur), Some(prev)) = (std::env::current_exe(), prev_binary_path()) {
-        let _ = std::fs::copy(&cur, &prev);
+        // No rollback image means the crash-loop guard has nothing to revert to — say so.
+        if let Err(e) = std::fs::copy(&cur, &prev) {
+            crate::tlog!("[update] ⚠ could not save the rollback image to {}: {e} — continuing without one", prev.display());
+        }
     }
     let mb = bytes.len() as f64 / 1.048576e6;
     // Common fast path (both platforms): atomic in-place self-replace. On Windows the
     // self_replace crate does the "rename the running .exe out of the way" trick itself.
-    if self_replace::self_replace(&beside).is_ok() {
-        let _ = std::fs::remove_file(&beside);
-        return Ok(format!("swapped v{VERSION} -> v{} ({mb:.1} MB){prov} — restart to run", rel.version));
-    }
+    let swap_err = match self_replace::self_replace(&beside) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&beside);
+            return Ok(format!("swapped v{VERSION} -> v{} ({mb:.1} MB){prov} — restart to run", rel.version));
+        }
+        Err(e) => e.to_string(),
+    };
+    crate::tlog!("[update] ⚠ in-place swap failed: {swap_err}");
     // self_replace FAILED.
     // Windows: the running .exe was locked (AV / image map / dir perms) and the old code
     // silently fell through to "saved … beside" — the install path kept the OLD binary, the
@@ -145,7 +152,7 @@ pub(crate) fn self_update(rel: &Release) -> Result<String, String> {
     // Unix: self_replace almost never fails; keep the staged versioned binary beside us and let
     // relaunch_new_binary fall back to it.
     #[cfg(not(windows))]
-    Ok(format!("saved v{} ({mb:.1} MB){prov} -> {}", rel.version, beside.display()))
+    Ok(format!("saved v{} ({mb:.1} MB){prov} -> {} (in-place swap failed: {swap_err})", rel.version, beside.display()))
 }
 
 /// Windows lock-failure fallback for [`self_update`]. `self_replace` could not swap the running

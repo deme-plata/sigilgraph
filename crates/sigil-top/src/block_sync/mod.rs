@@ -106,6 +106,18 @@ pub struct BackfillReq {
 /// enough to reject a post-genesis-reset ghost (a 1.4M claim while the oracle is at 0.88M).
 const SANE_LEAD: u64 = 65_536;
 
+/// The node's 8-byte "not now" backfill reply (`sigil-node/src/serve_read.rs`, 2026-09-13).
+/// Mirrored, not imported: this light-sync path builds without the optional `sigil-node`
+/// dep (Windows/non-producer). A pinned test below keeps the bytes honest.
+const BACKFILL_BUSY_MAGIC: &[u8; 8] = b"SIGILB1\0";
+
+/// A throttled peer says "ask again later" in exactly these 8 bytes. It is NOT an empty
+/// range and NOT a rejected chunk — treating it as either benched an honest, healthy peer
+/// for 10 s and marked its top below `start` (11,728 times in one live client log).
+fn is_busy_reply(b: &[u8]) -> bool {
+    b == BACKFILL_BUSY_MAGIC
+}
+
 /// v0.39/v0.59: bounded-raise guard for PEER-claimed tips. peer_best only-raises, so a single
 /// bogus gossip claim (the 26.8M / post-reset 1.4M phantom) used to poison the sync target. The
 /// signed `sigil-tip-live.json` oracle is the AUTHORITY: once it has answered (`oracle > 0`), a
@@ -847,6 +859,7 @@ impl P2PBlockSync {
                 const REQ_TIMEOUT: Duration = Duration::from_secs(10); // v0.15.1: 15→10s — free a stuck slot faster (4 MB chunk lands well under 10s); still tolerant of slow WAN serves
                 const PROBE_EVERY: Duration = Duration::from_millis(500); // pull-height probe cadence
                 const BENCH: Duration = Duration::from_secs(4); // v0.15.1: 8→4s — faster peer recovery so the pool doesn't thin out
+                const BUSY_BENCH: Duration = Duration::from_secs(1); // throttled peer: back off briefly, keep it in the pool
                 const EMPTY_BENCH: Duration = Duration::from_secs(10); // v0.15.1: 45→10s — THE stall fix: 45s drained the 4-peer pool to ~0 on empty ranges → 2 blk/s. 10s rotates away yet keeps peers available.
                 let _ = resume_h; // frontier is read live from the store each cycle (anchored, not cursored)
                 // Completed request results flow back from the spawned tasks here.
@@ -1482,6 +1495,7 @@ impl P2PBlockSync {
                         match bytes {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
+                                let busy = is_busy_reply(&b);          // "not now", not "no such range"
                                 let headers = headers_precomputed.unwrap_or_default();
                                 let got = headers.len();
                                 delivered = got;
@@ -1498,7 +1512,7 @@ impl P2PBlockSync {
                                     s.turbo_continuity.record_success(b.len() as u64, dt);
                                     let chunk_rate = if dt.as_secs_f64() > 0.0 { (b.len() as f64 / dt.as_secs_f64()) * 8.0 } else { 0.0 };
                                     s.turbo_continuity.update_for_continuity(chunk_rate, None, 0, 5);
-                                } else { empty_n += 1; }
+                                } else if !busy { empty_n += 1; }
                                 // v0.31.6: learn this peer's TOP. LEAD → its served max height;
                                 // EMPTY at the frontier → it's BEHIND `start`, so cap its known top
                                 // just below start. The refill uses this to stop sending the head to
@@ -1507,7 +1521,7 @@ impl P2PBlockSync {
                                     if let Some(mx) = max_header_height(&b) {
                                         peer_top.insert(peer.clone(), (mx, Instant::now()));
                                     }
-                                } else if start >= (store.synced_to() / CHUNK) * CHUNK {
+                                } else if !busy && start >= (store.synced_to() / CHUNK) * CHUNK {
                                     // behind the frontier — record a fresh "top < start" marker
                                     peer_top.insert(peer.clone(), (start.saturating_sub(1), Instant::now()));
                                 }
@@ -1589,7 +1603,10 @@ impl P2PBlockSync {
                                 // job; only a genuinely header-less reply benches the peer.
                                 let had_headers = header_height_range(&b)
                                     .map_or(false, |(_, mx)| mx >= start);
-                                if got == 0 && start >= fc && !had_headers {
+                                if busy {
+                                    // Throttled, not empty: short back-off, no EMPTY_BENCH, no top marker.
+                                    peer_bench.insert(peer, Instant::now() + BUSY_BENCH);
+                                } else if got == 0 && start >= fc && !had_headers {
                                     // EMPTY over a needed range = this peer doesn't HAVE this range
                                     // (e.g. a still-catching-up local node above its own height).
                                     // Bench it LONG so the frontier routes to full peers; the
@@ -3107,7 +3124,7 @@ impl Drop for P2PBlockSync {
 mod sync_math_tests {
     //! Pure sync arithmetic + wire-tip extraction (Tier 3). A bug here makes the
     //! fast-snap probe target the wrong height or fail to learn a peer's tip.
-    use super::{align_base, max_header_height, BackfillResp};
+    use super::{align_base, is_busy_reply, max_header_height, BackfillResp};
 
     #[test]
     fn align_base_snaps_below_h_and_clamps_to_floor() {
@@ -3134,6 +3151,15 @@ mod sync_math_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn busy_reply_is_recognised_and_nothing_else_is() {
+        assert!(is_busy_reply(b"SIGILB1\0"));
+        assert!(!is_busy_reply(b""));
+        assert!(!is_busy_reply(b"SIGILB1"));
+        assert!(!is_busy_reply(b"SIGILM1\0"));
+        assert!(!is_busy_reply(b"SIGILB1\0x"));
     }
 
     #[test]

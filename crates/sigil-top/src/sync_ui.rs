@@ -141,6 +141,7 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let fleet_total = app.fleet_nodes.len();
     let fleet_on = app.fleet_nodes.iter().filter(|n| n.online).count();
     let mesh = s.mesh_peer_count;
+    let mesh_started = app.p2p_sync.is_some();
     let pid = std::process::id();
     let proof = if s.verify_break.is_some() { Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)) }
         else if fold_ok { Span::styled("fold ✓ attests rest".to_string(), Style::default().fg(C_NEON_GREEN)) }
@@ -218,7 +219,13 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         },
         Line::from(vec![
             dim("fleet "), Span::styled(format!("{}/{}", fleet_on, fleet_total), Style::default().fg(if fleet_total > 0 && fleet_on == fleet_total { C_NEON_GREEN } else { C_GOLD })),
-            dim("   mesh "), Span::styled(format!("{} peers", mesh), Style::default().fg(if mesh >= 4 { C_NEON_GREEN } else if mesh >= 1 { C_GOLD } else { C_RED })),
+            dim("   mesh "), if mesh_started {
+                Span::styled(format!("{} peers", mesh), Style::default().fg(if mesh >= 4 { C_NEON_GREEN } else if mesh >= 1 { C_GOLD } else { C_RED }))
+            } else {
+                // Not joined on purpose: the light monitor follows the tip over HTTPS and only dials
+                // the peer network after [F] (or SIGIL_SPINE_SYNC=1). "0 peers" in red said "broken".
+                Span::styled("off — light monitor (F joins)".to_string(), Style::default().fg(C_GOLD))
+            },
             dim("   "),
             Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
             Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
@@ -278,13 +285,14 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         {
             let live = kf_rate >= 1.0 || s.commit_rate >= 1.0 || (following && s.verify_break.is_none());
             let obs = s.peer_count.max(mesh); // THIS node's own connected peers, not network-wide producer count
-            let (phase, pcol) = if obs >= 8 { ("WIDE MESH", C_NEON_GREEN) }
+            let (phase, pcol) = if !mesh_started && obs == 0 { ("MESH OFF · LIGHT MONITOR", C_GOLD) }
+                else if obs >= 8 { ("WIDE MESH", C_NEON_GREEN) }
                 else if obs >= 3 { ("GROWING MESH", C_GOLD) }
                 else { ("LOW PEER VISIBILITY", C_NEON_PINK) };
             Line::from(vec![
                 Span::styled("◈ NETWORK HEALTH ", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled(phase, Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
-                dim("   peers "), Span::styled(format!("{}", obs), Style::default().fg(if obs >= 1 { C_NEON_GREEN } else { C_RED })),
+                dim("   peers "), if !mesh_started && obs == 0 { Span::styled("— (not joined)".to_string(), Style::default().fg(C_GOLD)) } else { Span::styled(format!("{}", obs), Style::default().fg(if obs >= 1 { C_NEON_GREEN } else { C_RED })) },
                 dim("   "), Span::styled(if live { "● live" } else { "○ stalled" }, Style::default().fg(if live { C_NEON_GREEN } else { C_RED }).add_modifier(Modifier::BOLD)),
             ])
         },

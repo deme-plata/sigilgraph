@@ -60,6 +60,20 @@ pub(crate) fn build_network_id() -> String {
     String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string()
 }
 
+/// A verify break proved the store holds blocks from ANOTHER chain (`wrong network id`) although its `.netid`
+/// sidecar claimed this one — e.g. a database copied from another machine or written by an older build. The boot-time
+/// reset trusts that sidecar, so nothing ever cleared it and the client sat at "SPINE BREAK — STUCK" for good.
+/// Invalidate the sidecar: the NEXT launch's `reset_store_on_network_change` then clears the store and re-syncs.
+/// (Deleting a store that is open right now is not safe, so this only marks it.)
+pub(crate) fn mark_store_foreign(path: &str) {
+    let _ = std::fs::write(format!("{path}.netid"), "foreign-chain-detected");
+}
+
+/// True when a verify-break reason is the "store from another chain" case.
+pub(crate) fn is_foreign_chain_break(reason: &str) -> bool {
+    reason.contains("wrong network id")
+}
+
 pub(crate) fn reset_store_on_network_change(path: &str) {
     let current = String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string();
     let netid_path = format!("{path}.netid");
@@ -353,4 +367,37 @@ fn open_store_with_fallbacks_inner(
         }
     }
     Ok((store, note))
+}
+
+#[cfg(test)]
+mod foreign_store_tests {
+    use super::*;
+
+    #[test]
+    fn the_break_reason_is_recognised_and_ordinary_breaks_are_not() {
+        assert!(is_foreign_chain_break("precheck failed: wrong network id: expected [115], got [116]"));
+        assert!(!is_foreign_chain_break("parent linkage: hash mismatch"));
+    }
+
+    #[test]
+    fn a_marked_store_is_cleared_on_the_next_launch_and_stamped_with_this_chain() {
+        let dir = std::env::temp_dir().join(format!("sigil-foreign-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("blocks.db");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("data"), b"blocks of another chain").unwrap();
+        let path = store.to_string_lossy().to_string();
+        let current = String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string();
+        // the sidecar claims THIS chain (so the boot check alone would leave the store alone)…
+        std::fs::write(format!("{path}.netid"), &current).unwrap();
+        reset_store_on_network_change(&path);
+        assert!(store.exists(), "a store that matches its sidecar is left completely alone");
+        // …until a verify break proves otherwise:
+        mark_store_foreign(&path);
+        reset_store_on_network_change(&path);
+        assert!(!store.exists(), "the foreign store must be cleared");
+        assert_eq!(std::fs::read_to_string(format!("{path}.netid")).unwrap().trim(), current);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

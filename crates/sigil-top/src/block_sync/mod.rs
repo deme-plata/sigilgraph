@@ -2889,7 +2889,16 @@ impl P2PBlockSync {
                                 // Corruption (parent-linkage / precheck / corrupt-hash): surface
                                 // immediately + forever — retrying can't fix forged/inconsistent headers.
                                 crate::gap_sync::BreakClass::Fatal(h, reason) => {
-                                    s.verify_break = Some(format!("h={h}: {reason}"));
+                                    if crate::store_lifecycle::is_foreign_chain_break(&reason) {
+                                        // Not corruption: the store belongs to another chain and can never verify here.
+                                        // Mark it so the next launch clears it (see mark_store_foreign), and say so.
+                                        crate::store_lifecycle::mark_store_foreign(&crate::sigil_top_db_path());
+                                        s.verify_break = Some(format!(
+                                            "h={h}: {reason} — this store holds blocks from another chain; restart sigil-top and it clears itself"
+                                        ));
+                                    } else {
+                                        s.verify_break = Some(format!("h={h}: {reason}"));
+                                    }
                                     s.sync_failure = Some((h, reason.clone()));
                                     if !failure_announced {
                                         failure_announced = true;

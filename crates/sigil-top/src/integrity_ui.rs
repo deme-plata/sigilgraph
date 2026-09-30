@@ -376,7 +376,10 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
                         compare(&mut g, &reader, node, map, ceiling);
                     }
                 }
-                g.last_run = Some(Instant::now());
+                // `last_run` means "the last time a LIVE source answered" — not "the last time this loop
+                // ran". Stamping every pass made a dead monitor / unreachable Epsilon read "3s ago" and
+                // keep a green TRUE on data that had stopped moving.
+                if recent.is_some() || pool_eps.is_some() { g.last_run = Some(Instant::now()); }
                 g.last_err = if any { None }
                     else if pool_eps.is_some() { Some("hash sources unreachable (recent + monitor); /v1/integrity answered".into()) }
                     else { Some("no node answered (feed + monitor unreachable)".into()) };
@@ -407,6 +410,14 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
         .ok();
 }
 
+/// No live source has answered for this long: the verdict is a memory, not a reading.
+const STALE_SECS: u64 = 60;
+
+/// `None` (never answered) is not stale — the card says WAITING / has no nodes yet.
+fn is_stale(age_secs: Option<u64>) -> bool {
+    age_secs.map_or(false, |a| a > STALE_SECS)
+}
+
 fn short(h: &str) -> String {
     if h.len() >= 8 { format!("{}…", &h[..8]) } else { h.to_string() }
 }
@@ -420,6 +431,8 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
         badge("WAITING", C_DIM)
     } else if s.nodes.values().any(|n| !n.agree) || pool_persistent_mismatch(&s) {
         badge("FALSE", C_RED)
+    } else if is_stale(s.last_run.map(|t| t.elapsed().as_secs())) {
+        badge("STALE", C_GOLD)
     } else if s.mismatches > 0 {
         badge("TRUE NOW", C_GOLD)
     } else {
@@ -495,6 +508,14 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staleness_is_a_measured_silence_not_a_default() {
+        assert!(!is_stale(None), "never answered is WAITING, not STALE");
+        assert!(!is_stale(Some(0)));
+        assert!(!is_stale(Some(STALE_SECS)), "the boundary itself is still fresh");
+        assert!(is_stale(Some(STALE_SECS + 1)));
+    }
 
     fn reader_none() -> Arc<OnceLock<sigil_block_store::BlockReader>> { Arc::new(OnceLock::new()) }
 

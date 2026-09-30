@@ -106,6 +106,22 @@ pub struct BackfillReq {
 /// enough to reject a post-genesis-reset ghost (a 1.4M claim while the oracle is at 0.88M).
 const SANE_LEAD: u64 = 65_536;
 
+/// Sent-request errors (connection reset, protocol negotiation, stream closed) used to fold into
+/// `None` and be benched as a plain timeout with no trace. A timeout stays quiet (it is the common
+/// case and already counted); an ERROR is logged on the first occurrence and every 64th.
+static REQUEST_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn reply_bytes<E: std::fmt::Display, T>(r: Result<Result<Vec<u8>, E>, T>, what: &str) -> Option<Vec<u8>> {
+    match r {
+        Ok(Ok(b)) => Some(b),
+        Ok(Err(e)) => {
+            let n = REQUEST_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n == 1 || n % 64 == 0 { crate::tlog!("[sync] {what} request failed: {e} ({n} so far)"); }
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 /// The node's 8-byte "not now" backfill reply (`sigil-node/src/serve_read.rs`, 2026-09-13).
 /// Mirrored, not imported: this light-sync path builds without the optional `sigil-node`
 /// dep (Windows/non-producer). A pinned test below keeps the bytes honest.
@@ -1893,7 +1909,7 @@ impl P2PBlockSync {
                             let tx = recent_tx.clone();
                             tokio::spawn(async move {
                                 let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
-                                let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                let bytes = reply_bytes(r, "probe");
                                 let _ = tx.send((rbase, bytes));
                             });
                         }
@@ -2159,7 +2175,7 @@ impl P2PBlockSync {
                                     req_n += 1;
                                     tokio::spawn(async move {
                                         let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
-                                        let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                        let bytes = reply_bytes(r, "chunk");
                                         let _ = tx.send((start, peer_str, bytes));
                                     });
                                 }

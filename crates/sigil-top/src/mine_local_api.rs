@@ -102,7 +102,7 @@ mod shield_ops {
     use sigil_shield::wallet::{build_spend, NoteStore, OwnedNote, ShieldedAccount};
     use winterfell::math::fields::f64::BaseElement;
 
-    use super::{bad_request, not_available, ok_json};
+    use super::{bad_request, not_available, ok_json, outcome_unknown};
 
     fn now_ms() -> u64 {
         std::time::SystemTime::now()
@@ -855,13 +855,14 @@ mod shield_ops {
             "note_ciphertexts": [ct.0, change_ct],
         });
         let send_url = format!("{}/v1/shielded_send", node.trim_end_matches('/'));
+        let sent_nf = hex::encode(bundle.nullifier);
         let resp = match client.post(&send_url).json(&payload).send() {
             Ok(r) => r,
-            Err(e) => return bad_request(format!("network error submitting the private send: {e}")),
+            Err(e) => return outcome_unknown(format!("network error submitting the private send: {e}"), &sent_nf),
         };
         let parsed: serde_json::Value = match resp.json() {
             Ok(v) => v,
-            Err(e) => return bad_request(format!("bad response from node: {e}")),
+            Err(e) => return outcome_unknown(format!("bad response from node: {e}"), &sent_nf),
         };
         if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let reason = parsed
@@ -1490,6 +1491,23 @@ fn not_available(reason: &str) -> (&'static str, String) {
     (
         "404 Not Found",
         serde_json::json!({ "ok": false, "error": reason }).to_string(),
+    )
+}
+
+/// The POST left this box but no readable answer came back (timeout, reset, torn reply): the
+/// node may or may not have accepted it. `ok:false` so a direct caller still sees an error, plus
+/// `outcome_unknown` and the nullifier so the payment job can WATCH the chain instead of retrying
+/// (a retry builds a new proof — with another covering note, a second payment).
+fn outcome_unknown(reason: String, nullifier_hex: &str) -> (&'static str, String) {
+    (
+        "200 OK",
+        serde_json::json!({
+            "ok": false,
+            "error": format!("{reason} — the payment MAY have been submitted; do not send it again until the chain has been checked"),
+            "outcome_unknown": true,
+            "nullifier": nullifier_hex,
+        })
+        .to_string(),
     )
 }
 

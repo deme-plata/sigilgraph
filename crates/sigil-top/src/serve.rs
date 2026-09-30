@@ -686,6 +686,16 @@ const ONE_ACTION_SEND_JS: &str = r##"
         done();
         return;
       }
+      if(sj.stage === 'unconfirmed'){
+        step(2,'fail','could not confirm');
+        receipt('failed', fmt(amountRaw),
+          row('to', short(addr))
+          + (sj.shield_txid ? row('shield txid', short(sj.shield_txid), '#00e0c6') : '')
+          + row('why', sj.error || 'unknown', '#fbbf24'),
+          'This payment MAY have gone through. Do NOT press SEND again — check your balance first.');
+        done();
+        return;
+      }
       if(sj.stage === 'failed'){
         step(2,'fail','payment could not be built');
         receipt('failed', fmt(amountRaw),
@@ -699,7 +709,7 @@ const ONE_ACTION_SEND_JS: &str = r##"
       }
     }
     step(2,'fail','still confirming');
-    msg('Still waiting for the DAG. Your funds are in your private balance — press SEND again in a moment.', '#fbbf24');
+    msg('Still waiting for the DAG. Do NOT press SEND again until this shows paid or your balance changes — the payment may still land.', '#fbbf24');
     done();
   };
 
@@ -1350,6 +1360,13 @@ pub mod pay {
             Ok(v) => v,
             Err(e) => return SendOutcome::Retryable(format!("bad local response: {e}")),
         };
+        classify_reply(&v)
+    }
+
+    /// Map the local send endpoint's JSON reply to what the payment job must do next. Pure, so
+    /// the money rules are pinned by tests: only a reply that says the POST NEVER left
+    /// (`submitted` absent, `outcome_unknown` absent) is safe to retry.
+    fn classify_reply(v: &serde_json::Value) -> SendOutcome {
         let txid = v.get("txid").and_then(|x| x.as_str()).unwrap_or_default().to_string();
         let nf = v.get("nullifier").and_then(|x| x.as_str()).unwrap_or_default().to_string();
         if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
@@ -1364,6 +1381,12 @@ pub mod pay {
             .and_then(|x| x.as_str())
             .unwrap_or("unknown error")
             .to_string();
+        // The POST may have LANDED even though we never got a readable answer (timeout, torn reply).
+        // Retrying would rebuild the proof — with another covering note that is a SECOND payment.
+        // Hand the nullifier to the watch, which asks the chain instead of guessing.
+        if v.get("outcome_unknown").and_then(|x| x.as_bool()) == Some(true) && !nf.is_empty() {
+            return SendOutcome::Pending { nf, txid };
+        }
         if v.get("submitted").and_then(|x| x.as_bool()) == Some(true) {
             SendOutcome::Terminal(reason)
         } else {
@@ -1372,24 +1395,96 @@ pub mod pay {
     }
 
     /// Is this nullifier in the chain's spent set? The one authoritative "did it settle".
-    fn nullifier_is_spent(nf_hex: &str) -> bool {
+    ///
+    /// `Err` means the chain could NOT be asked (no client, connect error, non-JSON reply, no
+    /// `nullifiers` key). It used to fold into `false` = "not spent", so a node that was merely
+    /// unreachable for six minutes turned a PAID payment into stage `failed`, and the wallet then
+    /// told the user "Press SEND again" — a second payment. "Could not ask" is not "no".
+    fn nullifier_check(nf_hex: &str) -> Result<bool, String> {
+        nullifier_check_at(&crate::engine_node_url(), nf_hex)
+    }
+
+    fn nullifier_check_at(node: &str, nf_hex: &str) -> Result<bool, String> {
         if nf_hex.is_empty() {
-            return false;
+            return Ok(false);
         }
-        let node = crate::engine_node_url();
         let url = format!("{}/v1/shielded/nullifiers", node.trim_end_matches('/'));
-        let Ok(c) = client() else { return false };
-        c.get(&url)
+        let c = client()?;
+        let v: serde_json::Value = c
+            .get(&url)
             .send()
-            .ok()
-            .and_then(|r| r.json::<serde_json::Value>().ok())
-            .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str())
-                    .any(|s| s.eq_ignore_ascii_case(nf_hex))
-            })
-            .unwrap_or(false)
+            .map_err(|e| format!("node unreachable: {e}"))?
+            .json()
+            .map_err(|e| format!("unreadable reply from node: {e}"))?;
+        let list = v
+            .get("nullifiers")
+            .and_then(|n| n.as_array())
+            .ok_or_else(|| "node reply had no nullifier list".to_string())?;
+        Ok(list.iter().filter_map(|x| x.as_str()).any(|s| s.eq_ignore_ascii_case(nf_hex)))
+    }
+
+    #[cfg(test)]
+    mod nullifier_tests {
+        use super::*;
+        use std::io::{Read, Write};
+
+        /// One-shot HTTP stub: answers the first request with `body`.
+        fn stub(body: &'static str) -> String {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = l.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut c, _)) = l.accept() {
+                    let mut buf = [0u8; 2048];
+                    let _ = c.read(&mut buf);
+                    let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                }
+            });
+            format!("http://{addr}")
+        }
+
+        #[test]
+        fn spent_and_not_spent_are_answers() {
+            assert_eq!(nullifier_check_at(&stub(r#"{"nullifiers":["aa","BB"]}"#), "bb"), Ok(true));
+            assert_eq!(nullifier_check_at(&stub(r#"{"nullifiers":["aa"]}"#), "cc"), Ok(false));
+        }
+
+        #[test]
+        fn an_unreachable_or_unreadable_node_is_an_error_never_not_spent() {
+            let dead = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); format!("http://{}", l.local_addr().unwrap()) };
+            assert!(nullifier_check_at(&dead, "aa").is_err(), "connection refused must not read as 'not spent'");
+            assert!(nullifier_check_at(&stub("not json"), "aa").is_err());
+            assert!(nullifier_check_at(&stub(r#"{"other":1}"#), "aa").is_err());
+        }
+    }
+
+    #[cfg(test)]
+    mod classify_tests {
+        use super::*;
+        fn j(s: &str) -> serde_json::Value { serde_json::from_str(s).unwrap() }
+
+        #[test]
+        fn a_timeout_with_a_nullifier_is_watched_not_retried() {
+            let o = classify_reply(&j(r#"{"ok":false,"error":"timed out","outcome_unknown":true,"nullifier":"ab12"}"#));
+            assert!(matches!(o, SendOutcome::Pending { ref nf, .. } if nf == "ab12"), "must hand the nullifier to the watch");
+        }
+
+        #[test]
+        fn a_pre_submission_failure_is_still_retryable() {
+            assert!(matches!(classify_reply(&j(r#"{"ok":false,"error":"no covering note yet"}"#)), SendOutcome::Retryable(_)));
+        }
+
+        #[test]
+        fn an_unknown_outcome_without_a_nullifier_is_not_treated_as_pending() {
+            // No nullifier = nothing to watch; falls through to the ordinary rules.
+            assert!(matches!(classify_reply(&j(r#"{"ok":false,"error":"x","outcome_unknown":true}"#)), SendOutcome::Retryable(_)));
+        }
+
+        #[test]
+        fn submitted_then_rejected_is_terminal_and_settled_is_paid() {
+            assert!(matches!(classify_reply(&j(r#"{"ok":false,"error":"bad proof","submitted":true}"#)), SendOutcome::Terminal(_)));
+            assert!(matches!(classify_reply(&j(r#"{"ok":true,"settled":true,"txid":"t"}"#)), SendOutcome::Paid(_)));
+            assert!(matches!(classify_reply(&j(r#"{"ok":true,"txid":"t","nullifier":"n"}"#)), SendOutcome::Pending { .. }));
+        }
     }
 
     /// WATCH an already-submitted spend to settlement. Polls the nullifier, never resubmits.
@@ -1399,19 +1494,36 @@ pub mod pay {
             job.txid = txid.clone();
             job.error = None;
             put_job(&id, job.clone());
+            let mut last_err: Option<String> = None;
             for _ in 0..WATCH_MAX_ATTEMPTS {
-                if nullifier_is_spent(&nf) {
-                    job.stage = "paid".into();
-                    job.txid = txid;
-                    job.error = None;
-                    job.mark_final();
-                    put_job(&id, job);
-                    return;
+                match nullifier_check(&nf) {
+                    Ok(true) => {
+                        job.stage = "paid".into();
+                        job.txid = txid;
+                        job.error = None;
+                        job.mark_final();
+                        put_job(&id, job);
+                        return;
+                    }
+                    Ok(false) => last_err = None,
+                    Err(e) => last_err = Some(e),
                 }
                 std::thread::sleep(WATCH_EVERY);
             }
-            // Never settled within the ceiling. Honest failure — but the nullifier is public
-            // in flight, so the operator can still confirm it later; we do NOT resubmit.
+            if let Some(e) = last_err {
+                // The chain could not be ASKED at the end of the window. That is not "not paid":
+                // the wallet must not invite a resend.
+                job.stage = "unconfirmed".into();
+                job.error = Some(format!(
+                    "could not reach the node to confirm ({e}) — this payment MAY have gone \
+                     through. Do NOT send it again; check your balance or /v1/shielded/nullifiers first"
+                ));
+                put_job(&id, job);
+                return;
+            }
+            // The chain answered every time and never carried the nullifier within the ceiling.
+            // Honest failure — but the nullifier is public in flight, so the operator can still
+            // confirm it later; we do NOT resubmit.
             job.stage = "failed".into();
             job.error = Some(
                 "submitted, but the chain did not carry this nullifier to a block within the \

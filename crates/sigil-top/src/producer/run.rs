@@ -29,6 +29,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+/// Gossip frames `decode_gossip_block` could not read (logged on the first and every 256th).
+static GOSSIP_UNDECODABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 use anyhow::Result;
 use sigil_dagknight::{BlockView, Braid};
 use sigil_header::BlockHash;
@@ -618,7 +621,15 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
                     ingested += 1;
                     match decode_gossip_block(&data) {
                         Some(b) => state.ingest_foreign_block(b),
-                        None => continue, // malformed gossip — drop, same as the light client does
+                        None => {
+                            // Malformed / undecodable gossip: still dropped, but no longer silently — the
+                            // 2026-09-17 codec drift was exactly this drop with no log line for weeks.
+                            let n = GOSSIP_UNDECODABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if n == 1 || n % 256 == 0 {
+                                crate::tlog!("[producer] ⚠ undecodable gossip block dropped ({} B, head {:02x?}) — {n} so far", data.len(), &data[..data.len().min(8)]);
+                            }
+                            continue;
+                        }
                     }
                 }
                 // Connection bookkeeping only for now — nothing this loop needs to react to yet

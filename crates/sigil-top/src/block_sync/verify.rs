@@ -256,6 +256,8 @@ pub(super) fn decode_tagged_header_page(bytes: &[u8]) -> Option<Vec<SigilBlockHe
 }
 
 pub(super) fn decode_backfill_headers(bytes: &[u8]) -> Vec<SigilBlockHeaderV0> {
+    // The node's 8-byte BUSY reply is a valid answer ("ask again soon"), not an unparseable body.
+    if bytes == b"SIGILB1\0" { return Vec::new(); }
     match bytes.first() {
         // 'V' (codec 5, fifth-root layout) / 'Z' (codec 1) / 'H' (codec 0): one shared decoder.
         Some(&sigil_header::HEADER_PAGE_TAG_V1) | Some(&b'Z') | Some(&b'H') => decode_tagged_header_page(bytes).unwrap_or_else(|| {

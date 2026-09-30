@@ -220,7 +220,10 @@ async fn fetch_chunk_with_retry(
     };
 
     for attempt in 1..=CHUNK_RETRIES {
-        let peer = match net.connected_peers().first().cloned() {
+        // Rotate through the connected peers: attempt N asks peer N-1 (mod count). A throttled or
+        // slow first peer no longer eats the whole retry budget while others sit idle.
+        let peers = net.connected_peers();
+        let peer = match peers.get((attempt as usize).saturating_sub(1) % peers.len().max(1)).cloned() {
             Some(p) => p,
             None => {
                 crate::tlog!("[producer-sync] ⚠ tail replay: no connected peers (attempt {attempt}/{CHUNK_RETRIES}) at height={from}");

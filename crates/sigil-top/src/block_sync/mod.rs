@@ -980,6 +980,7 @@ impl P2PBlockSync {
                 let mut failure_announced = false;
                 // v0.31 DEEP DEBUG: session counters + a periodic comprehensive [DBG] snapshot.
                 let (mut lead_n, mut timeout_n, mut empty_n, mut req_n): (u64, u64, u64, u64) = (0, 0, 0, 0);
+                let mut busy_n: u64 = 0; // throttled replies (SIGILB1): so lead+empty+timeout+busy adds up to reqs
                 let mut bytes_session: u64 = 0;
                 let mut last_rate_time = Instant::now();
                 let mut last_rate_bytes: u64 = 0;
@@ -1496,6 +1497,11 @@ impl P2PBlockSync {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
                                 let busy = is_busy_reply(&b);          // "not now", not "no such range"
+                                if busy { busy_n += 1; }
+                                // Real headers arrived for this range? Then a got==0 means OUR precheck refused
+                                // them (self-heal's job), not that the peer lacks the range.
+                                let had_headers = header_height_range(&b)
+                                    .map_or(false, |(_, mx)| mx >= start);
                                 let headers = headers_precomputed.unwrap_or_default();
                                 let got = headers.len();
                                 delivered = got;
@@ -1512,7 +1518,7 @@ impl P2PBlockSync {
                                     s.turbo_continuity.record_success(b.len() as u64, dt);
                                     let chunk_rate = if dt.as_secs_f64() > 0.0 { (b.len() as f64 / dt.as_secs_f64()) * 8.0 } else { 0.0 };
                                     s.turbo_continuity.update_for_continuity(chunk_rate, None, 0, 5);
-                                } else if !busy { empty_n += 1; }
+                                } else if !busy && !had_headers { empty_n += 1; }
                                 // v0.31.6: learn this peer's TOP. LEAD → its served max height;
                                 // EMPTY at the frontier → it's BEHIND `start`, so cap its known top
                                 // just below start. The refill uses this to stop sending the head to
@@ -1521,7 +1527,7 @@ impl P2PBlockSync {
                                     if let Some(mx) = max_header_height(&b) {
                                         peer_top.insert(peer.clone(), (mx, Instant::now()));
                                     }
-                                } else if !busy && start >= (store.synced_to() / CHUNK) * CHUNK {
+                                } else if !busy && !had_headers && start >= (store.synced_to() / CHUNK) * CHUNK {
                                     // behind the frontier — record a fresh "top < start" marker
                                     peer_top.insert(peer.clone(), (start.saturating_sub(1), Instant::now()));
                                 }
@@ -1601,8 +1607,6 @@ impl P2PBlockSync {
                                 // single-peer mesh that starved sync completely (bench 10s →
                                 // re-request → reject → bench …). Rejects are the self-heal's
                                 // job; only a genuinely header-less reply benches the peer.
-                                let had_headers = header_height_range(&b)
-                                    .map_or(false, |(_, mx)| mx >= start);
                                 if busy {
                                     // Throttled, not empty: short back-off, no EMPTY_BENCH, no top marker.
                                     peer_bench.insert(peer, Instant::now() + BUSY_BENCH);
@@ -2495,7 +2499,10 @@ impl P2PBlockSync {
                             pass2_inflight = false;
                             if let (Some(b), Some(sk)) = (bytes, skel.as_mut()) {
                                 let bodies = decode_verify_backfill(&b);
-                                if bodies.is_empty() && b.len() > 1 {
+                                if is_busy_reply(&b) {
+                                    // Throttled, not oversized: keep the window, the same gap is re-asked later.
+                                    crate::tlog!("[pass2] gap@{} peer busy (throttled) — keeping pass2_chunk={}", gap_from, pass2_chunk);
+                                } else if bodies.is_empty() && b.len() > 1 {
                                     // Non-empty reply but nothing decoded/precheck'd — most likely the
                                     // 64 MiB decode cap (see pass2_chunk's doc comment above). Requesting
                                     // this exact gap again at the same width would fail identically
@@ -2619,7 +2626,7 @@ impl P2PBlockSync {
                             let _ = s.turbo_continuity.update_for_continuity(observed_bps, None, 0, 10);
                         }
                         crate::tlog!(
-                            "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={} | cont_score={:.2} sustained={:.1}MB/s pid_rate={:.1}",
+                            "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} busy={busy_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={} | cont_score={:.2} sustained={:.1}MB/s pid_rate={:.1}",
                             lead_n as f64 / win as f64 * 100.0,
                             timeout_n as f64 / win as f64 * 100.0,
                             sync_store.tracked(), bytes_session / 1_048_576, store.base(),

@@ -964,7 +964,7 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec
         if header_end.is_none() || declared.map_or(true, |n| body.len() < n) {
             return (
                 "504 Gateway Timeout".to_string(),
-                format!("{{\"error\":\"node reply cut off: {e}\"}}").into_bytes(),
+                format!("{{\"error\":\"node reply cut off: {e} — for a POST the request may already have been applied; check before repeating it\"}}").into_bytes(),
                 "application/json",
             );
         }

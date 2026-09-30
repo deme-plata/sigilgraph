@@ -258,7 +258,7 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             let (itxt, icol) = if s.verify_break.is_some() {
                 (format!("⛓ INTEGRITY BROKEN — {}", s.verify_break.as_deref().unwrap_or("spine break")), C_RED)
             } else if synced {
-                (format!("⛓ INTEGRITY VERIFIED — genesis→{} spine · fold ✓ · tip-fp ✓ (verified here, no trusted peer)", group(spine)), C_NEON_GREEN)
+                (integrity_verified_text(snap_mode, &group(spine)), C_NEON_GREEN)
             } else if fold_ok {
                 (format!("⛓ verifying integrity — spine {} / tip {} · fold ✓", group(spine), group(net_tip)), C_GOLD)
             } else if light {
@@ -324,6 +324,16 @@ const WAIT_FULL_MS: u64 = 8_000;
 /// chain, and a node that far behind used to read "◆ SYNCED" with no ETA. `settled_gap` already
 /// discounts the ~512-block probation window, so caught-up reads near zero.
 const SYNCED_MAX_SETTLED_GAP: u64 = 1024;
+
+/// The verified-integrity line. In the recent-window monitor (`snap_mode`) the spine is anchored at a
+/// CHECKPOINT, not genesis — claiming "genesis→N" there overstated what this node had checked.
+fn integrity_verified_text(snap_mode: bool, spine: &str) -> String {
+    if snap_mode {
+        format!("⛓ TIP VERIFIED — recent window from a checkpoint (not genesis) · {spine} · fold ✓ · tip-fp ✓")
+    } else {
+        format!("⛓ INTEGRITY VERIFIED — genesis→{spine} spine · fold ✓ · tip-fp ✓ (verified here, no trusted peer)")
+    }
+}
 
 fn is_synced(caught: bool, settled_gap: u64, fold_ok: bool, broken: bool) -> bool {
     caught && settled_gap < SYNCED_MAX_SETTLED_GAP && fold_ok && !broken
@@ -936,6 +946,12 @@ mod synced_tests {
         // Old rule: caught = gap < 16_384 → "SYNCED". 10,000 settled blocks behind is ~21 minutes.
         assert!(!is_synced(true, 10_000, true, false));
         assert!(!is_synced(true, SYNCED_MAX_SETTLED_GAP, true, false), "the bound itself is not synced");
+    }
+
+    #[test]
+    fn a_checkpoint_anchored_monitor_does_not_claim_genesis() {
+        assert!(!integrity_verified_text(true, "28,000,000").contains("genesis→"), "must not claim a genesis-anchored spine");
+        assert!(integrity_verified_text(false, "28,000,000").contains("genesis→28,000,000"));
     }
 
     #[test]

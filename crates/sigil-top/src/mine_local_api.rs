@@ -102,7 +102,7 @@ mod shield_ops {
     use sigil_shield::wallet::{build_spend, NoteStore, OwnedNote, ShieldedAccount};
     use winterfell::math::fields::f64::BaseElement;
 
-    use super::{bad_request, not_available, ok_json, outcome_unknown};
+    use super::{bad_request, not_available, ok_json, outcome_unknown, nullifier_in_reply};
 
     fn now_ms() -> u64 {
         std::time::SystemTime::now()
@@ -537,8 +537,18 @@ mod shield_ops {
             let url = format!("{}/v1/shield", node.trim_end_matches('/'));
             match client.post(&url).json(&payload).send() {
                 Ok(r) => {
-                    let parsed: serde_json::Value =
-                        r.json().unwrap_or_else(|_| serde_json::json!({}));
+                    // A 200 whose body we cannot read is NOT "failed": the node may have queued the
+                    // shield. Say so, so the caller does not shield a second denomination blindly.
+                    let parsed: serde_json::Value = match r.json() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            failure = Some(format!(
+                                "unreadable reply from the node ({e}) — this deposit MAY have been queued; \
+                                 check your private balance before retrying"
+                            ));
+                            break;
+                        }
+                    };
                     if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
                         let txid = parsed
                             .get("txid")
@@ -559,7 +569,10 @@ mod shield_ops {
                     }
                 }
                 Err(e) => {
-                    failure = Some(format!("network error: {e}"));
+                    failure = Some(format!(
+                        "network error: {e} — this deposit MAY have been queued; check your private \
+                         balance before retrying"
+                    ));
                     break;
                 }
             }
@@ -900,20 +913,13 @@ mod shield_ops {
         let our_nf_hex = hex::encode(bundle.nullifier).to_ascii_lowercase();
         let status_url = format!("{}/v1/transactions/{}", node.trim_end_matches('/'), txid);
         let nulls_url = format!("{}/v1/shielded/nullifiers", node.trim_end_matches('/'));
-        let nf_is_spent = |client: &reqwest::blocking::Client| -> bool {
-            client
-                .get(&nulls_url)
-                .send()
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok())
-                .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str())
-                        .any(|s| s.eq_ignore_ascii_case(&our_nf_hex))
-                })
-                .unwrap_or(false)
+        // `None` = the chain could not be ASKED (unreachable / unreadable / no list). It used to fold into
+        // `false` ("not spent"), which let a flaky moment turn a landed payment into a hard failure.
+        let nf_state = |client: &reqwest::blocking::Client| -> Option<bool> {
+            let v = client.get(&nulls_url).send().ok()?.json::<serde_json::Value>().ok()?;
+            nullifier_in_reply(&v, &our_nf_hex)
         };
+        let nf_is_spent = |client: &reqwest::blocking::Client| -> bool { nf_state(client) == Some(true) };
 
         // The one unambiguous settlement test: OUR selected note's nullifier is now in the
         // spent set. The selector proved it was NOT there when it chose the note (the
@@ -1016,7 +1022,8 @@ mod shield_ops {
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string();
-                if is_hard_reject(&reason) && !nf_is_spent(&client) {
+                // Only a chain that ANSWERED "not spent" may turn a rejection into a hard failure.
+                if is_hard_reject(&reason) && nf_state(&client) == Some(false) {
                     hard_fail = Some(reason);
                     break;
                 }
@@ -1494,6 +1501,12 @@ fn not_available(reason: &str) -> (&'static str, String) {
     )
 }
 
+/// Is `nf_hex` in a `/v1/shielded/nullifiers` reply? `None` when the reply has no list at all.
+fn nullifier_in_reply(v: &serde_json::Value, nf_hex: &str) -> Option<bool> {
+    let list = v.get("nullifiers")?.as_array()?;
+    Some(list.iter().filter_map(|x| x.as_str()).any(|s| s.eq_ignore_ascii_case(nf_hex)))
+}
+
 /// The POST left this box but no readable answer came back (timeout, reset, torn reply): the
 /// node may or may not have accepted it. `ok:false` so a direct caller still sees an error, plus
 /// `outcome_unknown` and the nullifier so the payment job can WATCH the chain instead of retrying
@@ -1551,5 +1564,33 @@ pub fn handle(path: &str, body: &str) -> (&'static str, String) {
             not_available("this build was compiled without the shield-register feature")
         }
         _ => not_available("unknown local endpoint"),
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_without_a_list_is_unknown_not_not_spent() {
+        assert_eq!(nullifier_in_reply(&serde_json::json!({"ok":false}), "aa"), None);
+        assert_eq!(nullifier_in_reply(&serde_json::json!({"nullifiers":"nope"}), "aa"), None);
+    }
+
+    #[test]
+    fn a_real_list_answers_yes_or_no_case_insensitively() {
+        let v = serde_json::json!({"nullifiers":["AA","bb"]});
+        assert_eq!(nullifier_in_reply(&v, "aa"), Some(true));
+        assert_eq!(nullifier_in_reply(&v, "cc"), Some(false));
+    }
+
+    #[test]
+    fn outcome_unknown_carries_the_nullifier_and_an_error() {
+        let (_, body) = outcome_unknown("timed out".into(), "ab12");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["outcome_unknown"], true);
+        assert_eq!(v["nullifier"], "ab12");
+        assert!(v["error"].as_str().unwrap().contains("MAY have been submitted"));
     }
 }

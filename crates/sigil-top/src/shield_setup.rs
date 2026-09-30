@@ -629,13 +629,12 @@ pub fn scan_shielded(node_url: &str, seed_hex: &str) -> Option<ShieldedSnapshot>
 
     // The spent set is public by design — it is the double-spend guard — and it is the only
     // way a wallet learns about a spend it did not make on this device.
+    // A failed fetch here is NO READING, not an empty spent set: with the set empty every note that
+    // was already spent counted as balance. The scanner keeps its last good snapshot and retries.
+    let spent_list = http_json(&client, &format!("{base}/v1/shielded/nullifiers"))
+        .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())?;
     let spent: std::collections::BTreeSet<[u8; 32]> =
-        http_json(&client, &format!("{base}/v1/shielded/nullifiers"))
-            .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|v| v.as_str().and_then(wire32))
-            .collect();
+        spent_list.iter().filter_map(|v| v.as_str().and_then(wire32)).collect();
 
     let mut store = sigil_shield::wallet::NoteStore::new();
     for epoch in 0..=snap.epoch {
@@ -646,9 +645,11 @@ pub fn scan_shielded(node_url: &str, seed_hex: &str) -> Option<ShieldedSnapshot>
         } else {
             format!("{base}/v1/shielded/leaves?epoch={epoch}")
         };
-        let Some(page) = http_json(&client, &url) else { continue };
+        // Skipping an epoch we could not read silently UNDER-reports the balance (its notes are
+        // simply absent). Better no reading this cycle than a confidently low one.
+        let page = http_json(&client, &url)?;
         if page.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            continue;
+            return None;
         }
         let leaves: Vec<[u8; 32]> = page
             .get("leaves")

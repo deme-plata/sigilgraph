@@ -68,6 +68,9 @@ CHAIN — download and verify
   verify-chain                      re-verify the LOCAL store (precheck + parent linkage).
                                     Exit 1 on a break, 0 for a clean spine to genesis.
                                     [--json]
+  hash-at <H> [<H> …]               print the block hash the LOCAL store holds at each height, so two
+                                    nodes can be compared at equal height. Exit 1 if a height is not
+                                    held. Use on a store no other sigil-top has open. [--json]
 
     Verifying is the point: `verified` in the dashboard is the height THIS process has
     checked itself. `tip` is only what the network claims. A gap means catching up, not

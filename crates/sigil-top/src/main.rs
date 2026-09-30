@@ -389,6 +389,21 @@ struct FeedBlock {
     tip_ms: u64,
 }
 
+/// The `hash-at` report. A height this store does not hold is `null` / "—", never an empty hash.
+fn format_hash_rows(synced_to: u64, rows: &[(u64, Option<String>)], json: bool) -> String {
+    if json {
+        let items: Vec<String> = rows.iter().map(|(h, x)| match x {
+            Some(x) => format!("{{\"height\":{h},\"hash\":\"{x}\"}}"),
+            None => format!("{{\"height\":{h},\"hash\":null}}"),
+        }).collect();
+        format!("{{\"synced_to\":{synced_to},\"blocks\":[{}]}}\n", items.join(","))
+    } else {
+        let mut o = format!("synced_to {synced_to}\n");
+        for (h, x) in rows { o.push_str(&format!("{h} {}\n", x.as_deref().unwrap_or("—"))); }
+        o
+    }
+}
+
 /// Newest height first, one entry per height (a later duplicate of the same height is dropped), capped.
 fn merge_block_stream(blocks: &mut Vec<FeedBlock>, cap: usize) {
     blocks.sort_by(|a, b| b.height.cmp(&a.height));
@@ -1088,6 +1103,27 @@ fn main() {
                 }
                 Err(e) => { eprintln!("  {RED}✗ update check: {e}{RESET}\n"); std::process::exit(1); }
             }
+        }
+        // 2026-09-30: `hash-at <H>…` prints the block hash this LOCAL store holds at each height, so
+        // independent nodes can be compared at EQUAL height with no network (`verify-chain` proves a
+        // store is internally consistent; this proves two stores hold the same chain). Run it on a
+        // store no other sigil-top has open.
+        Some("hash-at") => {
+            let json = argv.iter().any(|a| a == "--json");
+            let heights: Vec<u64> = argv.iter().skip_while(|a| a.as_str() != "hash-at").skip(1)
+                .filter_map(|a| a.parse().ok()).collect();
+            if heights.is_empty() {
+                eprintln!("usage: sigil-top hash-at <height> [<height> …] [--json]");
+                std::process::exit(2);
+            }
+            let path = sigil_top_db_path();
+            let store = match block_store::BlockStore::open_blocking(&path) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
+            };
+            let rows: Vec<(u64, Option<String>)> = heights.iter().map(|h| (*h, store.get_stored_at_height(*h).map(|b| b.hash_hex))).collect();
+            print!("{}", format_hash_rows(store.synced_to(), &rows, json));
+            std::process::exit(if rows.iter().all(|(_, h)| h.is_some()) { 0 } else { 1 });
         }
         // v0.9.0: re-verify the LOCAL block store as a connected spine (precheck +
         // parent linkage), genesis→tip. No network. Exit 0 = clean chain to genesis,
@@ -3772,6 +3808,14 @@ mod pure_helpers_tests {
     //! Coverage for the pure money/format/version helpers (Tier 3 — sigil-top
     //! was the worst-density crate at 581 loc/test). All deterministic, no I/O.
     use super::*;
+
+    #[test]
+    fn hash_rows_plain_and_json_and_missing_heights() {
+        let rows = vec![(10u64, Some("ab".to_string())), (11, None)];
+        assert_eq!(format_hash_rows(99, &rows, false), "synced_to 99\n10 ab\n11 —\n");
+        assert_eq!(format_hash_rows(99, &rows, true),
+            "{\"synced_to\":99,\"blocks\":[{\"height\":10,\"hash\":\"ab\"},{\"height\":11,\"hash\":null}]}\n");
+    }
 
     fn fb(h: u64) -> FeedBlock { FeedBlock { height: h, hash: format!("{h:x}"), producer: String::new(), txs: 0, tip_ms: 0 } }
 

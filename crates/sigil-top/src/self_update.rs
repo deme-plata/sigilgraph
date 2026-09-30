@@ -62,6 +62,20 @@ pub(crate) fn maybe_auto_update(argv: &[String]) -> Option<String> {
 /// different crate should swap the user-agent literal for its own.
 // fetch_binary_reqwest moved to updater.rs (god-file split).
 
+/// Download candidates, best first: the manifest's own base (rebased by filename onto `active`), then every
+/// other base, then the manifest's absolute URL. Duplicates are dropped. Pure, so the ordering is pinned.
+fn candidate_urls(manifest_url: &str, active: usize, bases: &[&str]) -> Vec<String> {
+    let name = manifest_url.rsplit('/').next().unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |u: String| { if !u.is_empty() && !out.contains(&u) { out.push(u); } };
+    if !bases.is_empty() && !name.is_empty() {
+        push(format!("{}/{}", bases[active.min(bases.len() - 1)], name));
+        for b in bases { push(format!("{b}/{name}")); }
+    }
+    push(manifest_url.to_string());
+    out
+}
+
 /// The gate between "bytes arrived" and "bytes get written next to the running binary". The BLAKE3 hash MUST be
 /// present and well-formed: it used to be `if !t.blake3_hex.is_empty()`, so a manifest without one (an old or
 /// legacy-shaped signed manifest replayed by a download base) skipped verification entirely.
@@ -88,15 +102,23 @@ pub(crate) fn self_update(rel: &Release) -> Result<String, String> {
     // plain-HTTP :8099 mirror is reachable, so rebase by filename (blake3 gate
     // below authenticates the bytes regardless of transport).
     let bi = ACTIVE_BASE.load(std::sync::atomic::Ordering::Relaxed);
-    if bi > 0 {
-        if let Some(name) = t.url.rsplit('/').next() {
-            t.url = format!("{}/{}", CHANNEL_BASES[bi.min(CHANNEL_BASES.len()-1)], name);
+    // Use the ONE hardened download path (updater::fetch_binary_reqwest) rather than a duplicate inline
+    // client. Try the base the manifest came from FIRST, then every other base (same filename): a base
+    // that serves the signed manifest but 404s or corrupts the artifact used to end the update for good.
+    // Nothing is trusted by transport — every candidate must pass `verify_download` against the SIGNED
+    // manifest's BLAKE3 before it is used.
+    let mut got: Option<Vec<u8>> = None;
+    let mut last_err = String::from("no download attempted");
+    for url in candidate_urls(&t.url, bi, CHANNEL_BASES) {
+        match fetch_binary_reqwest(&url).and_then(|b| verify_download(&b, &t).map(|_| b)) {
+            Ok(b) => { got = Some(b); break; }
+            Err(e) => {
+                eprintln!("  [update] {url}: {e} — trying the next base");
+                last_err = e;
+            }
         }
     }
-    // Use the ONE hardened download path (updater::fetch_binary_reqwest) rather than a
-    // duplicate inline client — a single place to get TLS ≥1.2, the UA, and the timeout right.
-    let bytes = fetch_binary_reqwest(&t.url)?;
-    verify_download(&bytes, &t)?;
+    let bytes = got.ok_or(last_err)?;
     // LANE-C v0.50: provenance surfacing. The manifest carries the NEW build's
     // flux-rev (its fluxc `.proof` stamp). Show it next to the running FLUX_REV so
     // the operator can SEE provenance actually changed across the swap — a "new"
@@ -372,5 +394,32 @@ mod verify_download_tests {
         assert!(verify_download(b"abc", &tgt(&h.to_uppercase(), 0)).is_ok(), "size 0 = unstated, hash still enforced");
         assert!(verify_download(b"abd", &tgt(&h, 3)).is_err(), "different bytes");
         assert!(verify_download(b"abc", &tgt(&h, 4)).is_err(), "wrong size");
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+    const B: &[&str] = &["https://a/dl", "https://b/dl", "https://c/dl"];
+
+    #[test]
+    fn the_active_base_goes_first_then_every_other_once() {
+        let v = candidate_urls("https://a/dl/sigil-top-v1-linux", 1, B);
+        assert_eq!(v[0], "https://b/dl/sigil-top-v1-linux");
+        assert_eq!(v.len(), 3, "a, b, c once each; the manifest URL duplicates base a: {v:?}");
+        assert!(v.contains(&"https://a/dl/sigil-top-v1-linux".to_string()) && v.contains(&"https://c/dl/sigil-top-v1-linux".to_string()));
+    }
+
+    #[test]
+    fn a_foreign_manifest_url_is_kept_as_the_last_resort() {
+        let v = candidate_urls("https://elsewhere/x/f.bin", 0, B);
+        assert_eq!(v.last().unwrap(), "https://elsewhere/x/f.bin");
+        assert_eq!(v[0], "https://a/dl/f.bin");
+    }
+
+    #[test]
+    fn no_bases_or_no_name_falls_back_to_the_manifest_url() {
+        assert_eq!(candidate_urls("https://a/x/f.bin", 0, &[]), vec!["https://a/x/f.bin".to_string()]);
+        assert!(candidate_urls("", 0, B).is_empty());
     }
 }

@@ -236,8 +236,12 @@ pub(crate) fn fetch_latest() -> Result<Release, String> {
                 Ok(body) => {
                     // LANE-C: AUTHENTICATE the manifest before we trust a single field (incl. the
                     // blake3 we'd verify the binary against). A bad signature is fatal — fail closed.
+                    // A bad signature from THIS base is never accepted (fail closed), but it no longer ends the
+                    // search: one base that serves a bad/absent .sig must not lock every client out of updates
+                    // while the other bases carry a good, independently verified manifest.
                     if let Err(e) = verify_manifest_sig(base, &body) {
-                        return Err(e);
+                        last = e;
+                        break;
                     }
                     ACTIVE_BASE.store(bi, std::sync::atomic::Ordering::Relaxed);
                     match serde_json::from_str::<Release>(&body) {

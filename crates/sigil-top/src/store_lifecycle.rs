@@ -69,6 +69,14 @@ pub(crate) fn mark_store_foreign(path: &str) {
     let _ = std::fs::write(format!("{path}.netid"), "foreign-chain-detected");
 }
 
+/// Restart ourselves once to let the boot reset clear a store just marked foreign? Only from the interactive screen
+/// (`in_tui`: its start-up path runs the reset; headless `full-sync` opens the store directly and would not clear it),
+/// only for the wrong-chain break, and never twice in one process chain (`already_restarted`), so a store that is
+/// still foreign after a clean start cannot make sigil-top restart forever.
+pub(crate) fn should_self_restart(in_tui: bool, already_restarted: bool, reason: &str) -> bool {
+    in_tui && !already_restarted && is_foreign_chain_break(reason)
+}
+
 /// True when a verify-break reason is the "store from another chain" case.
 pub(crate) fn is_foreign_chain_break(reason: &str) -> bool {
     reason.contains("wrong network id")
@@ -377,6 +385,15 @@ mod foreign_store_tests {
     fn the_break_reason_is_recognised_and_ordinary_breaks_are_not() {
         assert!(is_foreign_chain_break("precheck failed: wrong network id: expected [115], got [116]"));
         assert!(!is_foreign_chain_break("parent linkage: hash mismatch"));
+    }
+
+    #[test]
+    fn self_restart_is_interactive_only_wrong_chain_only_and_once() {
+        let r = "precheck failed: wrong network id: expected [1], got [2]";
+        assert!(should_self_restart(true, false, r));
+        assert!(!should_self_restart(false, false, r), "headless full-sync must not restart");
+        assert!(!should_self_restart(true, true, r), "never a second restart — no loops");
+        assert!(!should_self_restart(true, false, "parent linkage: hash mismatch"), "ordinary corruption is not this case");
     }
 
     #[test]

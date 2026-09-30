@@ -2896,6 +2896,24 @@ impl P2PBlockSync {
                                         s.verify_break = Some(format!(
                                             "h={h}: {reason} — this store holds blocks from another chain; restart sigil-top and it clears itself"
                                         ));
+                                        // Interactive screen only (its start-up path is the one that clears a marked store),
+                                        // once per process chain: restart ourselves so nobody has to know to.
+                                        #[cfg(unix)]
+                                        if crate::store_lifecycle::should_self_restart(
+                                            crate::IN_TUI.load(std::sync::atomic::Ordering::Relaxed),
+                                            std::env::var_os("SIGIL_TOP_FOREIGN_RESTARTED").is_some(),
+                                            &reason,
+                                        ) {
+                                            crate::tlog!("[store] foreign-chain store detected at h={h} — restarting sigil-top once to clear it");
+                                            std::env::set_var("SIGIL_TOP_FOREIGN_RESTARTED", "1");
+                                            let _ = crossterm::terminal::disable_raw_mode();
+                                            let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+                                            if let Ok(exe) = std::env::current_exe() {
+                                                use std::os::unix::process::CommandExt;
+                                                // exec only returns on failure — then we simply carry on as before.
+                                                let _err = std::process::Command::new(exe).args(std::env::args().skip(1)).exec();
+                                            }
+                                        }
                                     } else {
                                         s.verify_break = Some(format!("h={h}: {reason}"));
                                     }

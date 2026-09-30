@@ -920,7 +920,7 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec
         );
     }
     let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw);
+    let read_err = stream.read_to_end(&mut raw).err();
     let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n");
     // Relay the UPSTREAM's real status line ("200 OK", "404 Not Found", ...)
     // instead of hardcoding success. Previously this always returned "200 OK"
@@ -941,12 +941,33 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| "502 Bad Gateway".to_string())
     };
+    let declared = header_end.and_then(|i| declared_content_length(&raw[..i]));
     // split off the HTTP headers; relay the body (sigil-rpcd sends Content-Length + close)
     let body = match header_end {
         Some(i) => raw[i + 4..].to_vec(),
         None => raw,
     };
+    // A read that died mid-body (the 6 s timeout, a reset) used to be relayed under the upstream's
+    // "200 OK" with a body cut off at an arbitrary byte — the wallet then parsed half a JSON document.
+    // If we know the body is short, say so.
+    if let Some(e) = read_err {
+        if header_end.is_none() || declared.map_or(true, |n| body.len() < n) {
+            return (
+                "504 Gateway Timeout".to_string(),
+                format!("{{\"error\":\"node reply cut off: {e}\"}}").into_bytes(),
+                "application/json",
+            );
+        }
+    }
     (status, body, "application/json")
+}
+
+/// `Content-Length` from a raw HTTP head, if present and numeric.
+fn declared_content_length(head: &[u8]) -> Option<usize> {
+    String::from_utf8_lossy(head).lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if k.trim().eq_ignore_ascii_case("content-length") { v.trim().parse().ok() } else { None }
+    })
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -1679,6 +1700,14 @@ pub mod pay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn declared_content_length_reads_the_header_case_insensitively() {
+        assert_eq!(declared_content_length(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\ncontent-length: 42"), Some(42));
+        assert_eq!(declared_content_length(b"HTTP/1.1 200 OK\r\nContent-Length:  7 "), Some(7));
+        assert_eq!(declared_content_length(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked"), None);
+        assert_eq!(declared_content_length(b"HTTP/1.1 200 OK\r\nContent-Length: nope"), None);
+    }
+
 
     // ══ LOCAL SIGNER GUARD (2026-09-27) ═════════════════════════════════════════════
 

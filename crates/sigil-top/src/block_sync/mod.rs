@@ -1468,7 +1468,12 @@ impl P2PBlockSync {
                             (drained, decoded)
                         })
                         .await
-                        .unwrap_or((Vec::new(), Vec::new()))
+                        .unwrap_or_else(|e| {
+                            // The decode task panicked or was cancelled: the drained replies went with it
+                            // (their in-flight slots are not returned). Say so instead of continuing silently.
+                            crate::tlog!("[sync] ⚠ parallel decode task failed: {e} — this batch of replies is lost");
+                            (Vec::new(), Vec::new())
+                        })
                     } else {
                         (drained, Vec::new())
                     };

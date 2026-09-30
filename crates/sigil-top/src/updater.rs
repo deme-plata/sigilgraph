@@ -15,8 +15,34 @@ pub(crate) fn fetch_binary_reqwest(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("client init: {e}"))?;
     let resp = client.get(url).send().map_err(|e| format!("request failed: {e}"))?;
     let resp = resp.error_for_status().map_err(|e| format!("HTTP status: {e}"))?;
-    let bytes = resp.bytes().map_err(|e| format!("read body: {e}"))?;
-    Ok(bytes.to_vec())
+    if resp.content_length().map_or(false, |n| n > MAX_UPDATE_BYTES) {
+        return Err(format!("update body advertises more than {} MiB — refusing", MAX_UPDATE_BYTES >> 20));
+    }
+    read_capped(resp, MAX_UPDATE_BYTES)
+}
+
+/// A release binary is ~36 MB. A download server that streams gigabytes must not be able to exhaust memory
+/// before the hash gate ever runs (`resp.bytes()` buffered the whole body with only a 120 s timeout).
+pub(crate) const MAX_UPDATE_BYTES: u64 = 512 << 20;
+
+/// Read at most `cap` bytes; a body longer than that is an error, not a truncation.
+pub(crate) fn read_capped<R: std::io::Read>(r: R, cap: u64) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    std::io::Read::take(r, cap + 1).read_to_end(&mut buf).map_err(|e| format!("read body: {e}"))?;
+    if buf.len() as u64 > cap {
+        return Err(format!("update body exceeds {} MiB — refusing", cap >> 20));
+    }
+    Ok(buf)
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    #[test]
+    fn a_body_at_the_cap_is_read_and_one_byte_over_is_refused() {
+        assert_eq!(read_capped(&[7u8; 10][..], 10).unwrap().len(), 10);
+        assert!(read_capped(&[7u8; 11][..], 10).is_err());
+    }
 }
 
 /// Pre-flight a freshly-swapped binary with `--selfcheck` BEFORE any handoff.

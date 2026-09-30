@@ -62,6 +62,24 @@ pub(crate) fn maybe_auto_update(argv: &[String]) -> Option<String> {
 /// different crate should swap the user-agent literal for its own.
 // fetch_binary_reqwest moved to updater.rs (god-file split).
 
+/// The gate between "bytes arrived" and "bytes get written next to the running binary". The BLAKE3 hash MUST be
+/// present and well-formed: it used to be `if !t.blake3_hex.is_empty()`, so a manifest without one (an old or
+/// legacy-shaped signed manifest replayed by a download base) skipped verification entirely.
+fn verify_download(bytes: &[u8], t: &Target) -> Result<(), String> {
+    let want = t.blake3_hex.trim();
+    if want.len() != 64 || !want.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("manifest carries no valid BLAKE3 for this build — refusing to install unverified bytes".into());
+    }
+    if t.size_bytes != 0 && bytes.len() as u64 != t.size_bytes {
+        return Err(format!("size mismatch — got {} expected {} bytes", bytes.len(), t.size_bytes));
+    }
+    let got = blake3::hash(bytes).to_hex().to_string();
+    if !got.eq_ignore_ascii_case(want) {
+        return Err(format!("BLAKE3 mismatch — refusing swap (got {}…)", &got[..12]));
+    }
+    Ok(())
+}
+
 pub(crate) fn self_update(rel: &Release) -> Result<String, String> {
     let mut t = rel.for_self();
     if t.url.is_empty() { return Err(format!("manifest has no {SELF_TARGET} build")); }
@@ -78,16 +96,7 @@ pub(crate) fn self_update(rel: &Release) -> Result<String, String> {
     // Use the ONE hardened download path (updater::fetch_binary_reqwest) rather than a
     // duplicate inline client — a single place to get TLS ≥1.2, the UA, and the timeout right.
     let bytes = fetch_binary_reqwest(&t.url)?;
-    if t.size_bytes != 0 && bytes.len() as u64 != t.size_bytes {
-        return Err(format!("size mismatch — got {} expected {} bytes", bytes.len(), t.size_bytes));
-    }
-    // BLAKE3 content-hash gate — the release channel signs binaries by blake3.
-    if !t.blake3_hex.is_empty() {
-        let got = blake3::hash(&bytes).to_hex().to_string();
-        if !got.eq_ignore_ascii_case(&t.blake3_hex) {
-            return Err(format!("BLAKE3 mismatch — refusing swap (got {}…)", &got[..12]));
-        }
-    }
+    verify_download(&bytes, &t)?;
     // LANE-C v0.50: provenance surfacing. The manifest carries the NEW build's
     // flux-rev (its fluxc `.proof` stamp). Show it next to the running FLUX_REV so
     // the operator can SEE provenance actually changed across the swap — a "new"
@@ -272,7 +281,14 @@ pub(crate) fn relaunch_new_binary(version: &str) -> bool {
             }
         }
         Err(e) => {
-            eprintln!("  [update] relaunch ABORTED — new binary failed pre-flight ({e}); staying on the current version, restart manually to apply.");
+            // The swapped-in binary cannot start. Leaving it at the install path means the NEXT launch runs
+            // a broken program (and `revert` needs a working one). Put the rollback image back first.
+            eprintln!("  [update] relaunch ABORTED — new binary failed pre-flight ({e}); reverting to the rollback image and staying on the current version.");
+            if let Some(prev) = prev_binary_path() {
+                if prev.exists() && self_replace::self_replace(&prev).is_err() {
+                    let _ = std::fs::copy(&prev, &target);
+                }
+            }
             return false;
         }
     }
@@ -334,5 +350,27 @@ pub(crate) fn relaunch_new_binary(version: &str) -> bool {
         // Every path failed → return false so the caller surfaces an HONEST "couldn't
         // auto-restart — please relaunch manually" (and does NOT overwrite it, see [U] handler).
         false
+    }
+}
+
+#[cfg(test)]
+mod verify_download_tests {
+    use super::*;
+    fn tgt(hex: &str, size: u64) -> Target { Target { url: "u".into(), blake3_hex: hex.into(), size_bytes: size } }
+
+    #[test]
+    fn a_manifest_without_a_valid_hash_never_installs() {
+        assert!(verify_download(b"abc", &tgt("", 3)).is_err(), "empty hash used to skip verification");
+        assert!(verify_download(b"abc", &tgt("deadbeef", 3)).is_err(), "short hash");
+        assert!(verify_download(b"abc", &tgt(&"z".repeat(64), 3)).is_err(), "non-hex hash");
+    }
+
+    #[test]
+    fn matching_hash_passes_and_any_difference_fails() {
+        let h = blake3::hash(b"abc").to_hex().to_string();
+        assert!(verify_download(b"abc", &tgt(&h, 3)).is_ok());
+        assert!(verify_download(b"abc", &tgt(&h.to_uppercase(), 0)).is_ok(), "size 0 = unstated, hash still enforced");
+        assert!(verify_download(b"abd", &tgt(&h, 3)).is_err(), "different bytes");
+        assert!(verify_download(b"abc", &tgt(&h, 4)).is_err(), "wrong size");
     }
 }

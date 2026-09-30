@@ -163,9 +163,9 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
     // we do not download the 11M-block middle, we prove it.
     let fold_h = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     let fold_bps = (fold_h as f64 / 0.342) as u64;
-    o.push_str(&row("throughput", &format!("{GOLD}⚡ {} blk/s{RESET} {DIM}effective · whole chain proven, grows with length{RESET}", group(fold_bps))));
+    o.push_str(&row("throughput", &format!("{GOLD}⚡ {} blk/s{RESET} {DIM}derived: height ÷ 0.342 s (a constant), not measured{RESET}", group(fold_bps))));
     // CATHEDRAL DAGKNIGHT (wired 2026-06-17) — module live, full vault ingest + tab in next slice
-    o.push_str(&row("cathedral", "vaults:0 (first wire) div:0 ✓ 4-roots+tip-proof+fluxc"));
+    o.push_str(&row("cathedral", "vaults:0 (first wire) · divergence not measured on this screen"));
     o.push_str(&row("crypto", &format!("{DIM}Ajtai/SIS · post-quantum · no trusted setup{RESET}")));
 
     o.push_str(&bottom());
@@ -209,13 +209,24 @@ pub(crate) fn bottom() -> String { format!("  {VIOLET}╰{}╯{RESET}\n", "─".
 /// column; emoji-presentation symbols (⬡ ⛏ ⬆ …) are two. Honest width here is what
 /// keeps the box's right border flush instead of ragged — the recurring bug.
 
+/// The right-hand end of the lite line. Offline there is nothing to report — the old line printed
+/// "0peers 0.00%" and a fold size as if they had been measured. The fold note appears only beside a
+/// tip-proof that actually verified.
+fn lite_tail(online: bool, tip_ok: bool, peers: impl std::fmt::Display, supply: &str, pct: f64) -> String {
+    if !online { return format!("{DIM}offline — no reading{RESET}"); }
+    let fold = if tip_ok { format!("  {DIM}fold 2.5KB·1chk{RESET}") } else { String::new() };
+    format!("{VIOLET}{peers}{RESET}peers  {GOLD}{supply}{RESET}{DIM}/21M {pct:.2}%{RESET}{fold}")
+}
+
 pub(crate) fn render_lite(st: &NodeStatus, online: bool) -> String {
     let build_net = build_network_id();
     let net = if st.network.is_empty() { build_net.as_str() } else { &st.network };
     let dot = if online { format!("{GREEN}●{RESET}") } else { format!("{RED}●{RESET}") };
     let frac = st.native_supply as f64 / MAX_SUPPLY_BASE as f64;
     // L4-A: lite scorecard carries the verify verdict — the whole point of a light client.
-    let (height, vbadge) = match st.tip.as_ref().map(verify_tip) {
+    let tv = st.tip.as_ref().map(verify_tip);
+    let tip_ok = matches!(&tv, Some(v) if v.ok);
+    let (height, vbadge) = match tv {
         Some(v) if v.ok => (v.height, format!("  {GREEN}✓tip{RESET}")),
         Some(v) => (v.height, format!("  {RED}✗tip{RESET}")),
         None => (st.height, String::new()),
@@ -224,7 +235,32 @@ pub(crate) fn render_lite(st: &NodeStatus, online: bool) -> String {
     let stall = stall_check(st.height, online);
     let frozen = if stall.frozen { format!("  {RED}{BOLD}■FROZEN {}s{RESET}", stall.stalled_secs) } else { String::new() };
     format!(
-        "  {dot} {VBRIGHT}◆ SIGIL{RESET} {DIM}{net}{RESET}  h{GOLD}{height}{RESET}{vbadge}{frozen}  {VIOLET}{}{RESET}peers  {GOLD}{}{RESET}{DIM}/21M {:.2}%{RESET}  {DIM}fold 2.5KB·1chk{RESET}\n",
-        st.peers, fmt_supply(st.native_supply), frac * 100.0
+        "  {dot} {VBRIGHT}◆ SIGIL{RESET} {DIM}{net}{RESET}  h{GOLD}{height}{RESET}{vbadge}{frozen}  {}\n",
+        lite_tail(online, tip_ok, st.peers, &fmt_supply(st.native_supply), frac * 100.0)
     )
+}
+
+#[cfg(test)]
+mod lite_honesty_tests {
+    use super::*;
+
+    #[test]
+    fn offline_lite_line_reports_no_reading_not_zeros() {
+        let t = lite_tail(false, true, 0, "0", 0.0);
+        assert!(t.contains("offline"), "{t}");
+        assert!(!t.contains("peers") && !t.contains("0.00%") && !t.contains("fold"), "{t}");
+    }
+
+    #[test]
+    fn fold_note_only_beside_a_verified_tip_proof() {
+        assert!(lite_tail(true, true, 3, "1", 0.5).contains("fold 2.5KB"));
+        assert!(!lite_tail(true, false, 3, "1", 0.5).contains("fold"), "an unverified tip must not carry the fold note");
+    }
+
+    #[test]
+    fn render_lite_offline_default_status_says_offline() {
+        let out = render_lite(&NodeStatus::default(), false);
+        assert!(out.contains("offline"), "{out}");
+        assert!(!out.contains("fold 2.5KB"), "{out}");
+    }
 }

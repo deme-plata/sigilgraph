@@ -2694,8 +2694,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // via SIGIL_SPINE_SYNC=1, a saved full-sync mode, or the explicit [F] key.
     // The spine retires in P3 (docs/SIGIL_ONE_CHAIN_SCOPE_v0.md).
     block_sync::ledger::ensure_running();
-    let spine_opt_in = std::env::var("SIGIL_SPINE_SYNC").map(|v| v == "1").unwrap_or(false);
-    if (want_sync && spine_opt_in) || autostart_full || autofullsync {
+    // v10.4.17 OUT OF THE BOX: the monitor path (recent_only — fast-snap to the verified live
+    // tip, NO genesis crawl) now joins the peer mesh on EVERY platform by default. The light
+    // monitor used to stay "mesh off" until [F] or SIGIL_SPINE_SYNC=1, so a double-clicked exe
+    // (Windows defaults want_sync=false) showed "0 peers / OFFLINE" and never dialed anyone.
+    // Opt OUT with SIGIL_SPINE_SYNC=0, --no-sync or SIGIL_TOP_NO_SYNC=1.
+    let spine_opt_in = mesh_join_default(
+        std::env::var("SIGIL_SPINE_SYNC").ok().as_deref(),
+        std::env::args().any(|a| a == "--no-sync") || std::env::var("SIGIL_TOP_NO_SYNC").is_ok(),
+    );
+    if spine_opt_in || autostart_full || autofullsync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
         // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
         let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
@@ -3994,5 +4002,28 @@ mod pure_helpers_tests {
         assert!(!version_gt("1.2.3", "1.2.3"), "equal is not greater");
         assert!(!version_gt("1.0.0", "1.0.1"));
         assert!(!version_gt("1.0", "1.0.0"), "1.0 == 1.0.0 (missing components are 0)");
+    }
+}
+
+/// Whether the light monitor joins the p2p mesh at launch. Default ON; `SIGIL_SPINE_SYNC=0`
+/// (or empty) or an explicit no-sync flag turns it off; `SIGIL_SPINE_SYNC=1` forces it on.
+pub(crate) fn mesh_join_default(spine_env: Option<&str>, no_sync_flag: bool) -> bool {
+    match spine_env {
+        Some(v) => !(v == "0" || v.is_empty()),
+        None => !no_sync_flag,
+    }
+}
+
+#[cfg(test)]
+mod mesh_join_default_tests {
+    use super::mesh_join_default;
+    #[test]
+    fn joins_by_default_and_respects_opt_out() {
+        assert!(mesh_join_default(None, false), "double-click must join the mesh");
+        assert!(mesh_join_default(Some("1"), false));
+        assert!(!mesh_join_default(Some("0"), false), "explicit opt-out");
+        assert!(!mesh_join_default(Some(""), false));
+        assert!(!mesh_join_default(None, true), "--no-sync / SIGIL_TOP_NO_SYNC opts out");
+        assert!(mesh_join_default(Some("1"), true), "explicit =1 beats the flag");
     }
 }

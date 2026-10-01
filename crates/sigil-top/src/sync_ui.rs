@@ -226,6 +226,14 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
                 // the peer network after [F] (or SIGIL_SPINE_SYNC=1). "0 peers" in red said "broken".
                 Span::styled("off — light monitor (F joins)".to_string(), Style::default().fg(C_GOLD))
             },
+            // v10.4.17: a 0-peer mesh must say WHY — the dial error was only in the logfile, so
+            // "mesh 0 peers" gave an operator nothing to act on (blocked port? dead seed?).
+            if mesh_started && mesh == 0 && s.dial_failures > 0 {
+                Span::styled(
+                    format!("  ✗{} dial fails: {}", s.dial_failures,
+                        s.stall_reason.trim_start_matches("✗ dial failed: ").chars().take(70).collect::<String>()),
+                    Style::default().fg(C_RED))
+            } else { Span::raw("") },
             dim("   "),
             Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
             Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),

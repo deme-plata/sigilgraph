@@ -79,14 +79,18 @@ const MAX_AGE: Duration = Duration::from_secs(2_400);
 pub fn already_in_pool(pool: &sigil_state::shielded::ShieldedPool, tx: &SigilTx) -> bool {
     match tx {
         SigilTx::Shield { cm, .. } => pool.has_ever_held(cm),
-        SigilTx::ShieldedSend { nullifier, extra_nullifiers, cm_outs, .. } => {
-            pool.is_spent(nullifier)
-                && extra_nullifiers.iter().all(|nf| pool.is_spent(nf))
-                && cm_outs.iter().all(|cm| pool.has_ever_held(cm))
-        }
-        SigilTx::Unshield { nullifier, cm_outs, .. } => {
-            pool.is_spent(nullifier) && cm_outs.iter().all(|cm| pool.has_ever_held(cm))
-        }
+        SigilTx::ShieldedSend { anchor, nullifier, extra_nullifiers, cm_outs, .. } => spend_fingerprint_present(
+            std::iter::once(nullifier).chain(extra_nullifiers.iter()),
+            cm_outs,
+            |nf| spent_under_anchor(pool, anchor, nf),
+            |cm| pool.has_ever_held(cm),
+        ),
+        SigilTx::Unshield { anchor, nullifier, cm_outs, .. } => spend_fingerprint_present(
+            std::iter::once(nullifier),
+            cm_outs,
+            |nf| spent_under_anchor(pool, anchor, nf),
+            |cm| pool.has_ever_held(cm),
+        ),
         // A registration is carried once the pool publishes exactly these keys for the
         // wallet. Idempotent to re-apply, so this is about honesty, not safety: without it
         // `/v1/transactions/:hash` never said "in flight" for a registration, and the
@@ -97,6 +101,29 @@ pub fn already_in_pool(pool: &sigil_state::shielded::ShieldedPool, tx: &SigilTx)
         }
         _ => false,
     }
+}
+
+/// Is `nf` spent in the pool generation `anchor` belongs to? The chain files a spend under
+/// `scoped_nullifier(epoch_of_anchor(anchor), nf)`; `pool.is_spent(nf)` asks about epoch 0
+/// only. Measured 2026-10-01 from Viktor's phone: a payment spending an EPOCH-1 note landed
+/// (spent-count 2,583 → 2,584) but this predicate kept answering "not in the pool", so it was
+/// never retired and was re-offered to 3,000+ candidates — before 0bf72c1c that produced the
+/// false "rejected: double-spend" every phone saw; after it, an eternal "pending".
+fn spent_under_anchor(pool: &sigil_state::shielded::ShieldedPool, anchor: &[u8; 32], nf: &[u8; 32]) -> bool {
+    match pool.epoch_of_anchor(anchor) {
+        Some(epoch) => pool.is_spent_in_epoch(epoch, nf),
+        None => pool.is_spent(nf),
+    }
+}
+
+/// A spend's own fingerprint: every input nullifier spent AND every output held.
+fn spend_fingerprint_present<'a>(
+    mut nullifiers: impl Iterator<Item = &'a [u8; 32]>,
+    cm_outs: &[[u8; 32]],
+    spent: impl Fn(&[u8; 32]) -> bool,
+    held: impl Fn(&[u8; 32]) -> bool,
+) -> bool {
+    nullifiers.all(|nf| spent(nf)) && cm_outs.iter().all(|cm| held(cm))
 }
 
 struct Pending {
@@ -1775,6 +1802,26 @@ mod tests {
     /// nullifier is spent AND every output is held — so a different spend of the same
     /// note (stale client, same-amount index collision) is still offered and still
     /// honestly refused, never silently reported as applied.
+    /// 2026-10-01: the predicate must ask about the spend in ITS OWN epoch. Emulates the
+    /// chain filing an epoch-1 spend under its scoped key, where the raw (epoch-0) lookup
+    /// says "unspent".
+    #[test]
+    fn a_landed_epoch_one_spend_is_recognised_under_its_scoped_key() {
+        let nf = [7u8; 32];
+        let outs = [[8u8; 32], [9u8; 32]];
+        let scoped = sigil_state::shielded::scoped_nullifier(1, nf);
+        let spent_set = [scoped];
+        let held = |c: &[u8; 32]| outs.contains(c);
+        let raw_lookup = |n: &[u8; 32]| spent_set.contains(n);
+        let epoch1_lookup = |n: &[u8; 32]| spent_set.contains(&sigil_state::shielded::scoped_nullifier(1, *n));
+        assert!(!spend_fingerprint_present(std::iter::once(&nf), &outs, raw_lookup, held),
+            "the OLD raw lookup misses an epoch-1 spend — the bug");
+        assert!(spend_fingerprint_present(std::iter::once(&nf), &outs, epoch1_lookup, held),
+            "the scoped lookup recognises it");
+        assert!(!spend_fingerprint_present(std::iter::once(&nf), &[[8u8; 32], [1u8; 32]], epoch1_lookup, held),
+            "a different spend of the same note (other outputs) is still not 'present'");
+    }
+
     #[test]
     fn already_in_pool_is_the_txs_own_fingerprint_not_just_its_nullifier() {
         use sigil_state::{commit_state_transition, SigilState, StateMutation, StateTransition, NATIVE};

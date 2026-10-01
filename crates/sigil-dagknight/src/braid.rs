@@ -88,6 +88,9 @@ pub struct Braid {
     /// `cfg.ghostdag_k.is_some()` — v1 behavior is completely unaffected
     /// when this is `None` (see the `ghostdag` module doc).
     ghostdag: Option<GhostdagStore>,
+    /// Added to every PUBLISHED blue score: 0 for a genesis braid, `base_height + 1`
+    /// for a base-anchored one (see [`Braid::new_with_base`]). Never used internally.
+    blue_offset: u64,
     /// Active window records, keyed by block hash.
     recs: HashMap<BlockHash, BlockRec>,
     /// known-parent → children within the window (spine + merge edges).
@@ -164,6 +167,7 @@ impl Braid {
             cfg,
             dag: BitfieldDag::new(),
             ghostdag,
+            blue_offset: 0,
             recs: HashMap::new(),
             children: HashMap::new(),
             frontier: BTreeSet::new(),
@@ -196,6 +200,13 @@ impl Braid {
     pub fn new_with_base(cfg: BraidConfig, base_hash: BlockHash, base_height: u64) -> Self {
         let mut b = Self::new(cfg);
         b.anchor_trusted(base_hash, base_height);
+        // The first block past the base is scored 0 by GHOSTDAG (it has no resident
+        // parent). Publish scores relative to height instead, so two nodes anchored at
+        // different heights report the SAME number for the same block on an all-blue
+        // chain — measured 2026-10-01: block 29,968,140 read 4,145,006 on the producer
+        // and 602,063 on node-4, each offset by its own restart height. Reporting only:
+        // the stored scores, fork choice and the blue-depth walk are untouched.
+        b.blue_offset = base_height.saturating_add(1);
         b
     }
 
@@ -827,7 +838,10 @@ impl Braid {
     /// v2 blue score of `h` (0 in v1 mode, or if `h` is unknown to the
     /// ghostdag store).
     pub fn blue_score(&self, h: &BlockHash) -> u64 {
-        self.ghostdag.as_ref().map(|s| s.blue_score(h)).unwrap_or(0)
+        match self.ghostdag.as_ref().and_then(|s| s.get(h).map(|d| d.blue_score)) {
+            Some(score) => score.saturating_add(self.blue_offset),
+            None => 0,
+        }
     }
 
     /// True iff v2 GHOSTDAG coloring is active for this braid
@@ -1416,6 +1430,31 @@ mod tests {
         assert_eq!(b.merge_tips(&h(3), 4), vec![h(2)]);
         // Cap respected.
         assert_eq!(b.merge_tips(&h(200), 1), vec![h(3)]);
+    }
+
+    /// 2026-10-01: two honest nodes published different blue scores for the same block
+    /// because each counted from its own restart. Two braids anchored at different
+    /// heights on one all-blue chain must now agree with each other AND with height.
+    #[test]
+    fn anchored_braids_publish_the_same_blue_score_for_the_same_block() {
+        let c = BraidConfig { final_depth: 64, ghostdag_k: Some(4), ..BraidConfig::default() };
+        let hash = |i: u64| { let mut x = [0u8; 32]; x[..8].copy_from_slice(&i.to_le_bytes()); x[31] = 0xB1; x };
+        let mut early = Braid::new_with_base(c.clone(), hash(1000), 1000);
+        let mut late = Braid::new_with_base(c.clone(), hash(1100), 1100);
+        for i in 1001..=1300u64 {
+            let view = v(hash(i), hash(i - 1), vec![], i, PA);
+            assert!(matches!(early.insert(view.clone()), InsertOutcome::Inserted { .. }));
+            if i > 1100 {
+                assert!(matches!(late.insert(view), InsertOutcome::Inserted { .. }));
+            }
+        }
+        for i in [1101u64, 1200, 1300] {
+            assert_eq!(early.blue_score(&hash(i)), i, "early anchor: blue score must track height");
+            assert_eq!(late.blue_score(&hash(i)), i, "late anchor: blue score must track height");
+        }
+        assert_eq!(early.blue_score(&[0xEE; 32]), 0, "unknown blocks still read 0");
+        // Same finality as before: the offset is reporting only.
+        assert_eq!(early.finalized_height(), 1300 - 64);
     }
 
     #[test]

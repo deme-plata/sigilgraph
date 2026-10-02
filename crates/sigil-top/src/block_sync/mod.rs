@@ -207,6 +207,8 @@ pub struct P2PSyncState {
     /// with peer_count==0 means "we ARE trying — the dials are being rejected"
     /// (previously indistinguishable from not dialing at all).
     pub dial_failures: u64,
+    /// v10.4.18: plain-language reason for the newest dial failure (shown on the SYNC card).
+    pub last_dial_err: String,
     /// v0.7.0: Latest sync progress from the P2P mesh (consumed by TUI gauge).
     pub sync_height: u64,
     pub sync_hash_hex: String,
@@ -1410,6 +1412,7 @@ impl P2PBlockSync {
                                 if s.peer_count == 0 {
                                     s.stall_reason = format!("✗ dial failed: {error}");
                                 }
+                                s.last_dial_err = dial_error_hint(&error.to_string());
                                 crate::tlog!("[mesh] ✗DIAL-FAIL {who} — {error}");
                             }
                             flux_p2p::SwarmAppEvent::IncomingConnectionFailed { addr, error } => {
@@ -3377,5 +3380,34 @@ mod lane3_decode_batch_bench {
         if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 4 {
             assert!(par_ms < seq_ms, "batched decode should not be SLOWER than sequential on a multi-core box (seq={seq_ms:.1}ms par={par_ms:.1}ms)");
         }
+    }
+}
+
+/// Plain-language reading of a dial error. Windows error 10013 (WSAEACCES) on connect means
+/// something on the PC — Windows Firewall or, far more often, an antivirus network shield —
+/// forbids THIS program from opening sockets; no network or peer fix can help (field-proven
+/// 2026-10-02: Avast/AVG/McAfee blocked every dial and every HTTPS request from a fresh exe).
+pub(crate) fn dial_error_hint(e: &str) -> String {
+    if e.contains("10013") {
+        return "your antivirus/firewall blocks this program (Windows error 10013) — allow sigil-top in Avast/AVG/McAfee/Defender".into();
+    }
+    if e.contains("10060") || e.contains("timed out") {
+        return "connection timed out — a firewall may be dropping outbound traffic to the peer".into();
+    }
+    if e.contains("10061") || e.contains("refused") {
+        return "peer refused the connection — it may be offline".into();
+    }
+    e.chars().take(110).collect()
+}
+
+#[cfg(test)]
+mod dial_error_hint_tests {
+    use super::dial_error_hint;
+    #[test]
+    fn names_the_antivirus_block() {
+        let e = "Failed to negotiate transport protocol(s): [(/ip4/1.2.3.4/tcp/9501: : Det blev forsøgt at få adgang til en socket (os error 10013)";
+        assert!(dial_error_hint(e).contains("antivirus"));
+        assert!(dial_error_hint("x: Connection timed out (os error 110)").contains("timed out"));
+        assert!(dial_error_hint("something else").starts_with("something"));
     }
 }

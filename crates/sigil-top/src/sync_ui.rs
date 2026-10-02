@@ -231,7 +231,7 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             if mesh_started && mesh == 0 && s.dial_failures > 0 {
                 Span::styled(
                     format!("  ✗{} dial fails: {}", s.dial_failures,
-                        s.stall_reason.trim_start_matches("✗ dial failed: ").chars().take(70).collect::<String>()),
+                        if s.last_dial_err.is_empty() { s.stall_reason.trim_start_matches("✗ dial failed: ").chars().take(70).collect::<String>() } else { s.last_dial_err.clone() }),
                     Style::default().fg(C_RED))
             } else { Span::raw("") },
             dim("   "),

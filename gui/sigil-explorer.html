@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SIGIL Explorer · sigil-g0</title>
+<title>SIGIL Explorer · sigil-g2</title>
 <link rel="icon" type="image/svg+xml" href="/sigil-login/favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
@@ -94,7 +94,7 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
 <div class="app">
   <div class="topbar">
     <div class="brand"><span>⬡</span> SIGIL Explorer</div>
-    <div class="net">sigil-g0</div>
+    <div class="net">sigil-g2</div>
     <div class="search-wrap" onclick="document.getElementById('search').focus()">
       <span class="search-ico">⬡</span>
       <input id="search" placeholder="Search blocks · hashes · producers · heights…" autocomplete="off" spellcheck="false" oninput="doSearch()" onkeydown="if(event.key==='Enter')doSearch(true);if(event.key==='Escape')this.blur()" onfocus="this.select()">
@@ -183,7 +183,7 @@ async function doSearch(force){
       || (b.prod&&ql.length>=3&&(pn[b.prod.toLowerCase()]||'').indexOf(ql)>=0)
       || (b.isGenesis&&((ql.length>=3&&'genesis'.indexOf(ql)===0)||ql==='#0'||q==='0'));
     if(hit && !results.some(function(r){return r.title===title;}))
-      results.push({type:'live',title:title,sub:(b.isGenesis?'genesis · sigil-g0 · '+(b.sig_scheme||'SqiSign5')+' · b3:'+(b.hash||'').slice(0,22)+'…':'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,22)+'…'),score:'',sridx:window._sr.push(b)-1});
+      results.push({type:'live',title:title,sub:(b.isGenesis?'genesis · '+(window.__sigilNet||'sigil-g2')+' · '+(b.sig_scheme||'SqiSign5')+' · b3:'+(b.hash||'').slice(0,22)+'…':'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,22)+'…'),score:'',sridx:window._sr.push(b)-1});
   });
   openSearchModal(q,results.slice(0,40));
 }
@@ -241,7 +241,7 @@ async function load(){
       if((r.headers.get('content-type')||'').indexOf('json')>=0){ let j=await r.json(); d=j.data||j; } }catch(e){}
     var height=(dag&&dag.height)||(d.height!=null?d.height:0)||0;
     var peers=(d.peers!=null?d.peers:(d.peer_count||0))||0;
-    var net=(dag&&dag.network)||'sigil-g0';
+    var net=(dag&&dag.network)||'sigil-g2'; window.__sigilNet=net;
     var status=(dag&&dag.results&&dag.results.length)?'producing':(d.status||'producing');
     // v0.11: when sigil-top answers from its LOCAL verified spine it tags source +
     // exposes the cryptographically-verified watermark + break alarm.
@@ -263,7 +263,7 @@ async function load(){
   }catch(e){
     // Only truly unreachable when even the DAG feed gave us nothing.
     if(dag&&dag.results&&dag.results.length){
-      document.getElementById('live-txt').textContent=((dag&&dag.network)||'sigil-g0')+' · h '+Number((dag&&dag.height)||0).toLocaleString()+' · live';
+      document.getElementById('live-txt').textContent=((dag&&dag.network)||'sigil-g2')+' · h '+Number((dag&&dag.height)||0).toLocaleString()+' · live';
     }else{
       document.getElementById('live-txt').textContent='node unreachable';
     }
@@ -330,7 +330,7 @@ async function load(){
 
   // Peers ← local mesh state (was a dead "Loading…" placeholder before v0.11)
   try{
-    let r=await fetch('/api/v1/peers',{cache:'no-store'}); let j=await r.json();
+    let r=await fetch('/api/v1/peers',{cache:'no-store'}); if(!(r.headers.get('content-type')||'').includes('json')){ document.getElementById('peers').innerHTML='<div class="empty">This node does not publish its peer list here</div>'; throw 0; } let j=await r.json();
     var pl=(j.results||j.peers||[]);
     var el=document.getElementById('peers');
     el.innerHTML=pl.length?pl.map(function(p){
@@ -411,7 +411,7 @@ function openBlockModal(i){
     '<span onclick="document.getElementById(\'blkModal\').remove()" style="position:absolute;top:16px;right:18px;cursor:pointer;color:var(--dim);font-size:18px">✕</span>'+
     '<div style="text-align:center;margin-bottom:6px"><div style="font-size:10px;letter-spacing:3px;color:'+(b.isGenesis?'var(--gold)':'var(--teal)')+';font-family:\'JetBrains Mono\';text-transform:uppercase">'+(b.isGenesis?'⬡ Genesis Block':'⬡ Block Height')+'</div>'+
       '<div style="font-family:\'Orbitron\';font-weight:900;font-size:46px;color:var(--gold);text-shadow:0 0 22px rgba(251,191,36,.5);line-height:1.1;margin-top:2px">#'+b.h+'</div>'+
-      '<div style="font-size:11px;color:var(--dim);font-family:\'JetBrains Mono\';margin-top:2px">'+_ago(b.ts)+' · sigil-g0 testnet</div></div>'+
+      '<div style="font-size:11px;color:var(--dim);font-family:\'JetBrains Mono\';margin-top:2px">'+_ago(b.ts)+' · '+(window.__sigilNet||'sigil-g2')+' mainnet</div></div>'+
     '<div style="margin-top:18px">'+
       row('Producer','<span class="badge badge-'+({D:'d',E:'e',G:'g',B:'b'}[b.prod]||'d')+'" style="font-size:11px">'+prodName+'</span>',false,'')+
       row('Block Hash',(b.hash||'—'),true,(b.hash&&b.hash.indexOf('…')<0)?b.hash:'')+

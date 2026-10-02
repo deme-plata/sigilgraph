@@ -96,6 +96,21 @@ mod hub_power {
     }
 }
 
+/// One-line status of the local mining relay: whether it serves, how many upstreams are
+/// healthy, shares through it, and the upstream currently fastest. Empty when off.
+fn relay_summary() -> String {
+    if !crate::mining_relay::enabled() { return String::new(); }
+    let (st, ups) = crate::mining_relay::snapshot();
+    if ups.is_empty() { return String::new(); }
+    let now = std::time::Instant::now();
+    let healthy = ups.iter().filter(|u| u.cool_until.map(|t| now >= t).unwrap_or(true)).count();
+    let best = ups.iter().filter(|u| u.ewma_ms > 0.0).min_by(|a, b| a.ewma_ms.partial_cmp(&b.ewma_ms).unwrap_or(std::cmp::Ordering::Equal));
+    let via = best.map(|u| format!(" · fastest {} {:.0} ms", u.base.trim_start_matches("https://").trim_start_matches("http://"), u.ewma_ms)).unwrap_or_default();
+    let state = if crate::mining_relay::relay_is_up() { "✓" } else { "waits for verified tip" };
+    format!("   relay :{} {state} · {healthy}/{} upstreams · {} ok / {} rej · {} failover{via}",
+        crate::mining_relay::port(), ups.len(), st.accepted, st.rejected, st.failovers)
+}
+
 pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = app.mine_stats.lock().unwrap().clone();
     let mining = app.mining;
@@ -134,6 +149,7 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         dim("   "), Span::styled(conn_txt, Style::default().fg(conn_col).add_modifier(Modifier::BOLD)),
         dim("   node "), Span::styled(engine_node_url(), Style::default().fg(C_DIM)),
         dim("   "), Span::styled(wshort, Style::default().fg(C_DIM)),
+        Span::styled(relay_summary(), Style::default().fg(C_NEON_CYAN)),
     ])), head);
 
     f.render_widget(Paragraph::new(Line::from(vec![

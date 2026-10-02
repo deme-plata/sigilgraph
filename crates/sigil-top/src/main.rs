@@ -40,6 +40,7 @@ mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
 mod integrity_ui; // ◈ DATA INTEGRITY card — our block hash vs every network node's at equal height
 mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
+mod mining_relay; // miners point at THIS node (127.0.0.1:18186); balanced failover across upstream nodes
 mod ai_tools;   // [A]I: the SIGIL wallet MCP surface as tools the model can use (read / propose / confirmed actions)
 mod ai_setup;   // [A]I auto-setup: install/start ollama + pull the model, from a flux-SIGNED manifest
 mod skills;     // flux-signed skill packs (text-only) for flux-moe
@@ -1567,6 +1568,22 @@ pub(crate) fn miner_wallet() -> String {
     let seed_derived = miner_keypair().map(|kp| kp.pubkey_hex());
     let env = std::env::var("SIGIL_MINE_WALLET").ok();
     let chosen = std::fs::read_to_string(mine_wallet_path()).ok();
+    let has_any = seed_derived.is_some()
+        || env.as_deref().map(valid_addr).unwrap_or(false)
+        || chosen.as_deref().map(valid_addr).unwrap_or(false);
+    // NEVER mine to a keyless address again (2026-10-02). The old fallback hashed the
+    // hostname — and where HOSTNAME is unset (Windows, tmux, containers) EVERY such install
+    // hashed the same word, so they all credited a406208d…e138 = blake3("sigil-top-miner:
+    // sigil-top"): 84,213.66 SIGIL measured that day, in an address nobody holds a key for.
+    // With no wallet configured, create a real one once (seed → 0600 file, reloaded by
+    // `miner_seed`), and mine to that.
+    if !has_any {
+        static CREATED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(addr) = CREATED.get_or_init(|| match ai_tools::create_wallet() {
+            Ok((addr, path)) => { tlog!("[wallet] no wallet configured — created {}… (seed in {path}, owner-only)", &addr[..12]); Some(addr) }
+            Err(e) => { tlog!("[wallet] ⚠ could not create a wallet ({e}) — mining has no keyed address"); None }
+        }) { return addr.clone(); }
+    }
     let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
     resolve_mine_wallet(seed_derived.as_deref(), env.as_deref(), chosen.as_deref(), &host)
 }
@@ -1591,7 +1608,10 @@ pub(crate) fn set_mine_wallet(addr: &str) -> bool {
 /// `hex_to_32`'s own comment; this function exists so `mine_local_api.rs` doesn't grow a
 /// THIRD copy with its own edge cases.
 pub(crate) fn miner_seed() -> Option<[u8; 32]> {
-    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()?;
+    // 2026-10-02: also the wallet this install created for itself (0600 file), so a
+    // restart keeps the SAME keyed wallet instead of falling back to a keyless address.
+    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()
+        .or_else(|| std::fs::read_to_string(ai_tools::wallet_seed_path()).ok())?;
     hex_to_32(seed_hex.trim())
 }
 
@@ -2532,6 +2552,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
     // has crash-looped, this reverts to the last working binary and relaunches.
     if !cfg.once && crashloop_guard() { return Ok(()); }
+    // Local mining endpoint (loopback only). It answers 503 until this node has verified
+    // the chain, so starting it early is safe; SIGIL_MINING_RELAY=0 turns it off.
+    if !cfg.once { mining_relay::start(kgauge_ui::api_base_of(&cfg.api)); }
 
     // ── v0.35 (sync-starts-earlier, DeepSeek audit S4): the ENTIRE sync bootstrap runs
     // BEFORE the terminal is touched. It used to sit after raw-mode + alt-screen + panic-
@@ -3391,6 +3414,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             }
             // [A]I: the local model's reply lands here (computed off the UI thread)
             if app.ai_rx.is_some() { ai_drain(&mut app); }
+            mining_relay::set_node_verified(app.verify.as_ref().map(|v| v.ok).unwrap_or(false), app.target_height);
             // [A]I auto-setup progress (install / pull) — drain everything pending this frame
             if let Some(rx) = app.ai_setup_rx.as_ref() {
                 let mut finished = false;
@@ -3892,6 +3916,12 @@ pub(crate) fn engine_node_url() -> String {
     #[cfg(feature = "producer")]
     if producer::mining_api::local_mining_api_is_up() {
         return producer::mining_api::local_mining_api_url();
+    }
+    // 2026-10-02: a node that has verified the chain (10 ms tip proof or full sync) serves
+    // its own mining endpoint and balances shares across upstream nodes — so a rig never
+    // depends on one URL. See `mining_relay.rs` for what this does and does not decentralise.
+    if mining_relay::relay_is_up() {
+        return mining_relay::url();
     }
     "http://sigilgraph.quillon.xyz:18181".into()
 }

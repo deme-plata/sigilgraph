@@ -105,6 +105,14 @@ fn candidate_devices(t: &mut String) -> Vec<(opencl3::device::cl_device_id, Stri
         Ok(p) => p,
         Err(e) => {
             t.push_str(&format!("get_platforms FAILED: {e}\n"));
+            // The commonest cause by far (measured 2026-10-02 on a Vast GTX 1080, Ubuntu 24.04
+            // container): the NVIDIA driver lib is present but the OpenCL LOADER is not, or only
+            // as `libOpenCL.so.1` while this loader asks for `libOpenCL.so`. Say how to fix it.
+            if format!("{e}").contains("DLOPEN") {
+                t.push_str("hint: no OpenCL loader found. On Debian/Ubuntu: apt install ocl-icd-libopencl1, \
+                            then ln -s libOpenCL.so.1 /usr/lib/x86_64-linux-gnu/libOpenCL.so ; on NVIDIA also \
+                            echo libnvidia-opencl.so.1 > /etc/OpenCL/vendors/nvidia.icd\n");
+            }
             return Vec::new();
         }
     };

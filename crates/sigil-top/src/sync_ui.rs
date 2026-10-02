@@ -579,11 +579,22 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
 
     // ---- the queue table ----
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!(" {:<3} {:<26} {:>7} {:<11} {:<12} {:<18} {:>9} {:>8}",
-            "#", "RANGE", "BLOCKS", "WAIT", "STATE", "PEER", "blk/s", "AGE"),
-        Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
-    )));
+    // Wide windows get five DERIVED columns (each computed from counters already on this
+    // screen, nothing invented): where the range sits in the chain, how far it is ahead of
+    // the verified frontier, its estimated size, an ETA for in-flight rows, and a plain-words
+    // note on why it is in the state it is in.
+    let wide = tbl.width >= 150;
+    let bytes_per_block = if s.fetched_total > 0 { s.sync_total as f64 / s.fetched_total as f64 } else { 0.0 };
+    let avg_wait_ms: Option<f64> = done_log().lock().ok().and_then(|d| {
+        let now = Instant::now();
+        let w: Vec<f64> = d.iter().filter(|x| now.duration_since(x.at) <= DONE_RETAIN && x.wait_ms > 0)
+            .map(|x| x.wait_ms as f64).collect();
+        (!w.is_empty()).then(|| w.iter().sum::<f64>() / w.len() as f64)
+    });
+    let mut hdr = format!(" {:<3} {:<26} {:>7} {:<11} {:<12} {:<18} {:>9} {:>8}",
+        "#", "RANGE", "BLOCKS", "WAIT", "STATE", "PEER", "blk/s", "AGE");
+    if wide { hdr.push_str(&format!("  {:>6} {:>11} {:>7} {:>6}  {}", "POS", "AHEAD", "~MB", "ETA", "NOTE")); }
+    lines.push(Line::from(Span::styled(hdr, Style::default().fg(C_DIM).add_modifier(Modifier::BOLD))));
     if t.rows.is_empty() {
         lines.push(Line::from(Span::styled(
             if t.chunk == 0 { "  idle — the sync engine is not running (light monitor; press F for full sync)" }
@@ -644,6 +655,16 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                 Span::styled(format!("{rate_txt:>9} "), Style::default().fg(rate_col)),
                 Span::styled(format!("{:>8}", fmt_age(r.age_ms)), Style::default().fg(if r.age_ms > WAIT_FULL_MS { C_RED } else { C_DIM })),
             ]));
+            if wide {
+                let ex = queue_extra(r, tip, verified, bytes_per_block, avg_wait_ms);
+                if let Some(last) = lines.last_mut() {
+                    last.spans.push(Span::styled(format!("  {:>6} ", ex.pos), Style::default().fg(C_DIM)));
+                    last.spans.push(Span::styled(format!("{:>11} ", ex.ahead), Style::default().fg(C_VBRIGHT)));
+                    last.spans.push(Span::styled(format!("{:>7} ", ex.mb), Style::default().fg(C_DIM)));
+                    last.spans.push(Span::styled(format!("{:>6}  ", ex.eta), Style::default().fg(C_NEON_CYAN)));
+                    last.spans.push(Span::styled(ex.note, Style::default().fg(ex.note_col)));
+                }
+            }
         }
         if rows.len() > room {
             lines.push(Line::from(Span::styled(
@@ -793,6 +814,64 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     let mut sl = sl;
     sl.extend(disk_lines());
     f.render_widget(Paragraph::new(sl), pane_sess);
+}
+
+/// The derived, wide-window columns of one queue row.
+pub(crate) struct QueueExtra { pub pos: String, pub ahead: String, pub mb: String, pub eta: String, pub note: String, pub note_col: Color }
+
+/// Pure: compute the derived columns for a range row from counters already on screen.
+pub(crate) fn queue_extra(r: &sigil_sync::RangeRow, tip: u64, verified: u64, bytes_per_block: f64, avg_wait_ms: Option<f64>) -> QueueExtra {
+    let blocks = r.end.saturating_sub(r.start);
+    let pos = if tip > 0 { format!("{:.1}%", 100.0 * r.start as f64 / tip as f64) } else { "—".into() };
+    let ahead_n = r.start.saturating_sub(verified);
+    let ahead = if ahead_n == 0 { "at frontier".into() } else { format!("+{}", group(ahead_n)) };
+    let mb = if bytes_per_block > 0.0 { format!("{:.1}", blocks as f64 * bytes_per_block / 1_048_576.0) } else { "—".into() };
+    let (eta, note, note_col) = match &r.state {
+        sigil_sync::RangeState::InFlight { fanout, .. } => {
+            let eta = match avg_wait_ms {
+                Some(a) if *fanout > 0 => { let left = (a - r.age_ms as f64).max(0.0); if left < 1.0 { "now".into() } else { fmt_age(left as u64) } }
+                _ => "—".into(),
+            };
+            let (n, c) = if *fanout == 0 { ("claimed, not sent yet".to_string(), C_DIM) }
+                else if r.age_ms > WAIT_FULL_MS { ("timed out — will be re-asked".to_string(), C_RED) }
+                else if r.age_ms as f64 > WAIT_FULL_MS as f64 * 0.5 { ("slow peer".to_string(), C_GOLD) }
+                else if *fanout > 1 { (format!("redundant ×{fanout}, first reply wins"), C_NEON_GREEN) }
+                else { ("downloading".to_string(), C_NEON_GREEN) };
+            (eta, n, c)
+        }
+        sigil_sync::RangeState::Fetched { .. } => {
+            let (n, c) = if r.start <= verified { ("next to verify".to_string(), C_NEON_CYAN) }
+                else { (format!("blocked by gap @ {}", group(verified)), C_GOLD) };
+            ("—".into(), n, c)
+        }
+        sigil_sync::RangeState::Verified => ("—".into(), "verified, leaving the queue".into(), C_NEON_CYAN),
+    };
+    QueueExtra { pos, ahead, mb, eta, note, note_col }
+}
+
+#[cfg(test)]
+mod queue_extra_tests {
+    use super::queue_extra;
+    use sigil_sync::{RangeRow, RangeState};
+    #[test]
+    fn staged_row_behind_a_gap_says_so_and_frontier_row_is_next() {
+        let r = RangeRow { start: 9_940_000, end: 9_950_000, state: RangeState::Fetched { at_ms: 0 }, age_ms: 1000 };
+        let e = queue_extra(&r, 30_000_000, 9_928_193, 150.0, Some(2000.0));
+        assert!(e.note.contains("gap @ 9,928,193"), "{}", e.note);
+        assert_eq!(e.ahead, "+11,807");
+        assert_eq!(e.pos, "33.1%");
+        assert_eq!(e.mb, "1.4");
+        let f = RangeRow { start: 9_928_193, end: 9_938_193, state: RangeState::Fetched { at_ms: 0 }, age_ms: 10 };
+        assert_eq!(queue_extra(&f, 30_000_000, 9_928_193, 0.0, None).note, "next to verify");
+    }
+    #[test]
+    fn in_flight_eta_comes_from_recent_completions_only() {
+        let r = RangeRow { start: 1, end: 10_001, state: RangeState::InFlight { peer: "p".into(), since_ms: 0, fanout: 1 }, age_ms: 500 };
+        assert_eq!(queue_extra(&r, 100_000, 0, 0.0, None).eta, "—");
+        assert_ne!(queue_extra(&r, 100_000, 0, 0.0, Some(2_000.0)).eta, "—");
+        let slow = RangeRow { age_ms: 9_000, ..r.clone() };
+        assert!(queue_extra(&slow, 100_000, 0, 0.0, Some(2_000.0)).note.contains("timed out"));
+    }
 }
 
 /// Disk usage of the braid store + free space on its device, sampled OFF the draw thread

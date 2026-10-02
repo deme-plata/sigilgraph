@@ -182,23 +182,45 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
         }
         lines.push(Line::from(dim("  It never invents balances or prices — those come from the node.")));
     }
-    for (role, content) in &app.ai_msgs {
+    for (i, (role, content)) in app.ai_msgs.iter().enumerate() {
+        // The in-flight assistant message is still empty while the model thinks: the
+        // progress block below speaks for it, so don't print a bare "moe ›" yet.
+        if app.ai_thinking && Some(i) == app.ai_reply_idx && content.is_empty() { continue; }
+        if role == "tool" {
+            lines.push(Line::from(Span::styled(format!("  {content}"), Style::default().fg(C_NEON_GOLD))));
+            continue;
+        }
         if role == "user" {
             lines.push(Line::from(Span::styled("you ›", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD))));
         } else {
             lines.push(Line::from(Span::styled("moe ›", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))));
         }
+        let width = msgs_area.width.max(8) as usize;
         for l in content.lines() {
-            lines.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(Color::White))));
+            // Wrap HERE, one Line per screen row, so the scroll arithmetic below is exact.
+            for row in wrap_rows(&format!("  {l}"), width, 2) {
+                lines.push(Line::from(Span::styled(row, Style::default().fg(Color::White))));
+            }
         }
         lines.push(Line::from(""));
     }
     if app.ai_thinking {
-        lines.push(Line::from(dim("moe is thinking…")));
+        lines.extend(ai_progress_lines(app));
+    } else if !app.ai_last_stats.is_empty() && !app.ai_msgs.is_empty() {
+        lines.push(Line::from(dim(&format!("  ⏱ {}", app.ai_last_stats))));
     }
-    let total = lines.len() as u16;
-    let inner_h = msgs_area.height.saturating_sub(2); // top border + breathing room
-    let scroll = total.saturating_sub(inner_h);
+    for q in &app.ai_queued {
+        lines.push(Line::from(Span::styled("you › (queued — sent when moe finishes)", Style::default().fg(C_DIM))));
+        lines.push(Line::from(Span::styled(format!("  {q}"), Style::default().fg(C_DIM))));
+    }
+    // Transcript rows are pre-wrapped above (one Line = one screen row), so the newest row
+    // is always the last one — the old count-Lines-then-let-ratatui-wrap mismatch pushed the
+    // latest prompt + streaming reply below the visible area. Short status lines still use
+    // the estimate.
+    let width = msgs_area.width.max(1) as usize;
+    let total: usize = lines.iter().map(|l| wrapped_rows(l, width)).sum();
+    let inner_h = msgs_area.height.saturating_sub(2) as usize; // top border + breathing room
+    let scroll = total.saturating_sub(inner_h).min(u16::MAX as usize) as u16;
     f.render_widget(
         Paragraph::new(lines)
             .wrap(ratatui::widgets::Wrap { trim: false })
@@ -214,6 +236,108 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(C_NEON_CYAN)).title(" ask flux-moe ")),
         input_area,
     );
+}
+
+/// Pure: greedy word-wrap of `text` into rows at most `width` columns wide; continuation
+/// rows are indented by `indent` spaces. Over-long words are hard-split.
+pub(crate) fn wrap_rows(text: &str, width: usize, indent: usize) -> Vec<String> {
+    let width = width.max(indent + 4);
+    let w = |s: &str| Span::raw(s.to_string()).width();
+    let mut rows: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_inclusive(' ') {
+        let fits = w(&cur) + w(word.trim_end_matches(' ')) <= width;
+        if !fits && !cur.trim().is_empty() {
+            rows.push(cur.trim_end().to_string());
+            cur = " ".repeat(indent);
+        }
+        if w(&cur) + w(word) > width {
+            for ch in word.chars() {                       // hard-split a word longer than a row
+                if w(&cur) + w(&ch.to_string()) > width { rows.push(std::mem::take(&mut cur)); cur = " ".repeat(indent); }
+                cur.push(ch);
+            }
+        } else {
+            cur.push_str(word);
+        }
+    }
+    if !cur.trim().is_empty() || rows.is_empty() { rows.push(cur.trim_end().to_string()); }
+    rows
+}
+
+/// Pure: how many screen rows `line` occupies when word-wrapped (trim off) to `width`,
+/// mirroring ratatui's WordWrapper closely enough that the newest row is never hidden.
+pub(crate) fn wrapped_rows(line: &Line, width: usize) -> usize {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if text.is_empty() { return 1; }
+    let (mut rows, mut col) = (1usize, 0usize);
+    for word in text.split_inclusive(' ') {
+        let w = Span::raw(word).width();
+        if col + w.saturating_sub(if word.ends_with(' ') { 1 } else { 0 }) > width && col > 0 {
+            rows += 1;
+            col = 0;
+        }
+        if w > width {                     // a word longer than the row is hard-split
+            rows += (col + w - 1) / width;
+            col = (col + w) % width;
+        } else {
+            col += w;
+        }
+    }
+    rows
+}
+
+/// Pure: the progress estimate for an in-flight reply. Returns (fraction 0..1, eta secs).
+/// A model's reply length is not known in advance, so the target is the running average
+/// of this session's replies (default 300 tokens) and the bar is capped at 95 % until the
+/// model says it is done — the ETA is an estimate and is labelled as one.
+pub(crate) fn ai_progress(tokens: u64, rate_tok_s: f64, avg_reply_tokens: f64) -> (f64, Option<f64>) {
+    let target = if avg_reply_tokens >= 20.0 { avg_reply_tokens } else { 300.0 };
+    let frac = (tokens as f64 / target).min(0.95);
+    let eta = if rate_tok_s > 0.5 { Some(((target - tokens as f64).max(0.0)) / rate_tok_s) } else { None };
+    (frac, eta)
+}
+
+fn ai_progress_lines(app: &App) -> Vec<Line<'static>> {
+    const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let elapsed = app.ai_started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let spin = SPIN[((elapsed * 10.0) as usize) % SPIN.len()];
+    let rate = match app.ai_first_token {
+        Some(t0) if app.ai_tokens > 1 => app.ai_tokens as f64 / t0.elapsed().as_secs_f64().max(0.05),
+        _ => 0.0,
+    };
+    let load = app.ai_load.lock().map(|l| l.clone()).unwrap_or_default();
+    let mut gauges: Vec<Span<'static>> = Vec::new();
+    match (load.gpu_pct, load.vram_used_mb, load.vram_total_mb) {
+        (Some(g), Some(u), Some(t)) => gauges.push(Span::styled(
+            format!("GPU {g:>3}% · VRAM {:.1}/{:.1} GB", u as f64 / 1024.0, t as f64 / 1024.0),
+            Style::default().fg(if g >= 50 { C_NEON_GREEN } else { C_GOLD }))),
+        _ => gauges.push(dim(if crate::flux_moe::ollama_is_local() { "GPU —" } else { "GPU remote" })),
+    }
+    if let Some(c) = load.cpu_pct { gauges.push(dim(&format!(" · CPU {c}%"))); }
+
+    let mut out = vec![Line::from(Span::styled("moe ›", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)))];
+    if app.ai_tokens == 0 {
+        // Still reasoning (qwen3 thinks before it answers) or loading the model.
+        let what = if app.ai_think_chars > 0 { format!("thinking · {} chars of reasoning", app.ai_think_chars) }
+                   else { "waiting for the model (loading / reading the prompt)".to_string() };
+        let mut l = vec![Span::styled(format!("  {spin} "), Style::default().fg(C_NEON_CYAN)), dim(&format!("{what} · {elapsed:.0}s   "))];
+        l.extend(gauges);
+        out.push(Line::from(l));
+    } else {
+        let (frac, eta) = ai_progress(app.ai_tokens, rate, app.ai_avg_reply_tokens);
+        let w = 24usize;
+        let filled = (frac * w as f64).round() as usize;
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(w - filled));
+        let eta_s = match eta { Some(e) => format!("eta ~{e:.0}s (est.)"), None => "eta —".to_string() };
+        let mut l = vec![
+            Span::styled(format!("  {spin} "), Style::default().fg(C_NEON_CYAN)),
+            Span::styled(bar, Style::default().fg(C_NEON_CYAN)),
+            dim(&format!(" {} tok · {rate:.1} tok/s · {eta_s} · {elapsed:.0}s   ", app.ai_tokens)),
+        ];
+        l.extend(gauges);
+        out.push(Line::from(l));
+    }
+    out
 }
 
 /// [2] MCP Swarm AI — the live job-index board from the Claude Code sessions.
@@ -530,4 +654,47 @@ pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
         Line::from(kb),
         serve_line,
     ])
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrapped_rows;
+    use ratatui::text::Line;
+    #[test]
+    fn a_long_reply_counts_every_wrapped_row() {
+        assert_eq!(wrapped_rows(&Line::from(""), 10), 1);
+        assert_eq!(wrapped_rows(&Line::from("short"), 10), 1);
+        assert_eq!(wrapped_rows(&Line::from("aaaa bbbb cccc dddd"), 10), 2);
+        assert!(wrapped_rows(&Line::from("word ".repeat(100)), 20) >= 25);
+        assert_eq!(wrapped_rows(&Line::from("x".repeat(25)), 10), 3);
+    }
+
+    #[test]
+    fn pre_wrapped_rows_never_exceed_the_width() {
+        use super::wrap_rows;
+        let text = format!("  {}", "SIGIL keeps a fingerprint of every block, not the block itself. ".repeat(12));
+        for width in [20usize, 37, 80, 237] {
+            let rows = wrap_rows(&text, width, 2);
+            assert!(rows.len() > 1 || width >= text.len());
+            for r in &rows { assert!(ratatui::text::Span::raw(r.clone()).width() <= width, "{width}: {r:?}"); }
+            let joined: String = rows.iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+            assert_eq!(joined.split_whitespace().count(), text.split_whitespace().count(), "no word lost at {width}");
+        }
+        assert_eq!(wrap_rows("", 10, 2), vec![String::new()]);
+    }
+}
+
+#[cfg(test)]
+mod ai_progress_tests {
+    use super::ai_progress;
+    #[test]
+    fn bar_never_claims_done_before_the_model_does_and_eta_needs_a_rate() {
+        let (f, eta) = ai_progress(10_000, 20.0, 300.0);
+        assert!(f <= 0.95);
+        assert_eq!(eta, Some(0.0));
+        assert_eq!(ai_progress(10, 0.0, 300.0).1, None);
+        // no history yet → default 300-token target: 150 tok at 20 tok/s → 7.5 s left
+        let (f, eta) = ai_progress(150, 20.0, 0.0);
+        assert!((f - 0.5).abs() < 1e-9 && (eta.unwrap() - 7.5).abs() < 1e-9);
+    }
 }

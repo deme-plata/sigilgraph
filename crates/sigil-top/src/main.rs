@@ -40,6 +40,7 @@ mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
 mod integrity_ui; // ◈ DATA INTEGRITY card — our block hash vs every network node's at equal height
 mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
+mod ai_tools;   // [A]I: the SIGIL wallet MCP surface as tools the model can use (read / propose / confirmed actions)
 mod ai_setup;   // [A]I auto-setup: install/start ollama + pull the model, from a flux-SIGNED manifest
 mod skills;     // flux-signed skill packs (text-only) for flux-moe
 use sync_ui::*;
@@ -1846,7 +1847,18 @@ struct App {
     ai_input: String,                           // the line being typed
     ai_msgs: Vec<(String, String)>,             // (role, content) chat history
     ai_thinking: bool,                          // a reply is in flight
-    ai_rx: Option<mpsc::Receiver<String>>,      // model reply lands here (off-UI-thread)
+    ai_rx: Option<mpsc::Receiver<flux_moe::StreamEv>>, // streamed reply events (off-UI-thread)
+    ai_started: Option<Instant>,                // when the in-flight reply was sent
+    ai_first_token: Option<Instant>,            // first visible answer token (latency to text)
+    ai_think_chars: usize,                      // hidden reasoning received so far
+    ai_tokens: u64,                             // answer chunks received (≈ tokens on ollama)
+    ai_avg_reply_tokens: f64,                   // running average reply length → the ETA estimate
+    ai_load: std::sync::Arc<std::sync::Mutex<flux_moe::Load>>, // GPU/CPU while generating
+    ai_load_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ai_last_stats: String,                      // "120 tok · 19.8 tok/s · 6.1 s" of the last reply
+    ai_pending: Option<(String, serde_json::Value)>, // an ACTION the model asked for, awaiting the user's `yes`
+    ai_queued: std::collections::VecDeque<String>, // typed while a reply was in flight — sent next, never dropped
+    ai_reply_idx: Option<usize>,                // index of the in-flight reply in ai_msgs (others may push meanwhile)
     ai_setup_rx: Option<mpsc::Receiver<ai_setup::SetupEvent>>, // auto-setup progress (install/pull), off-UI-thread
     ai_setup_running: bool,                     // an auto-setup is in flight (F5 is a no-op meanwhile)
     ai_skills: Vec<skills::LoadedSkill>,        // flux-signed skills loaded this session (text only)
@@ -1938,6 +1950,8 @@ impl App {
               } else { None },
               ai_detected: false, ai_models: Vec::new(), ai_model: None,
               ai_input: String::new(), ai_msgs: Vec::new(), ai_thinking: false, ai_rx: None,
+              ai_started: None, ai_first_token: None, ai_think_chars: 0, ai_tokens: 0, ai_avg_reply_tokens: 0.0,
+              ai_load: Default::default(), ai_load_stop: None, ai_last_stats: String::new(), ai_pending: None, ai_queued: Default::default(), ai_reply_idx: None,
               ai_setup_rx: None, ai_setup_running: false, ai_skills: Vec::new(), ai_skills_rx: None,
               ai_skills_note: String::new(),
               splash_frame: 0,
@@ -3376,13 +3390,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 check_fleet_health(&mut app.fleet_nodes);
             }
             // [A]I: the local model's reply lands here (computed off the UI thread)
-            if let Some(rx) = app.ai_rx.as_ref() {
-                if let Ok(reply) = rx.try_recv() {
-                    app.ai_msgs.push(("assistant".to_string(), reply));
-                    app.ai_thinking = false;
-                    app.ai_rx = None;
-                }
-            }
+            if app.ai_rx.is_some() { ai_drain(&mut app); }
             // [A]I auto-setup progress (install / pull) — drain everything pending this frame
             if let Some(rx) = app.ai_setup_rx.as_ref() {
                 let mut finished = false;
@@ -3623,8 +3631,22 @@ impl Tab {
 fn ai_submit(app: &mut App) {
     let msg = app.ai_input.trim().to_string();
     if msg.is_empty() { return; }
+    // A reply is still streaming: replacing `ai_rx` now would DROP it (the old bug — "it
+    // missed my prompt"). Queue the message instead; `ai_drain` sends it when this one ends.
+    if app.ai_thinking {
+        app.ai_input.clear();
+        app.ai_queued.push_back(msg);
+        return;
+    }
     app.ai_input.clear();
     app.ai_msgs.push(("user".to_string(), msg.clone()));
+    // An ACTION the model asked for waits for exactly this: the user's own `yes`.
+    if let Some((name, _args)) = app.ai_pending.take() {
+        let yes = matches!(msg.trim().to_ascii_lowercase().as_str(), "yes" | "y" | "ja" | "j" | "ok");
+        let reply = if !yes { format!("Cancelled — I did not {}.", ai_tools::action_summary(&name)) } else { ai_run_action(app, &name) };
+        app.ai_msgs.push(("assistant".to_string(), reply));
+        return;
+    }
     // Typed setup commands: `setup` / `install` / `retry` / `f5`. A phone or a terminal
     // that swallows function keys has no F5, so the keypress can never be the ONLY way to
     // (re)run the out-of-the-box flow.
@@ -3653,18 +3675,119 @@ fn ai_submit(app: &mut App) {
             return;
         }
     };
-    let history: Vec<(String, String)> = app.ai_msgs[..app.ai_msgs.len().saturating_sub(1)].to_vec();
+    let history: Vec<(String, String)> = app.ai_msgs[..app.ai_msgs.len().saturating_sub(1)]
+        .iter().filter(|(r, c)| r != "tool" && !c.is_empty()).cloned().collect();
+    let api_base = kgauge_ui::api_base_of(&app.cfg.api);
     let extra = skills::context_block(&app.ai_skills); // flux-signed skills → system context
     let (tx, rx) = mpsc::channel();
     app.ai_rx = Some(rx);
     app.ai_thinking = true;
-    std::thread::spawn(move || {
-        let reply = match flux_moe::chat(&model, &history, &msg, &extra) {
-            Ok(r) => r,
+    app.ai_started = Some(Instant::now());
+    app.ai_first_token = None;
+    app.ai_think_chars = 0;
+    app.ai_tokens = 0;
+    // The streamed answer grows in place inside this (initially empty) assistant message.
+    app.ai_msgs.push(("assistant".to_string(), String::new()));
+    app.ai_reply_idx = Some(app.ai_msgs.len() - 1);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.ai_load_stop = Some(stop.clone());
+    let slot = app.ai_load.clone();
+    std::thread::spawn(move || flux_moe::sample_load(slot, stop));
+    std::thread::spawn(move || ai_tools::chat_agent(&model, &history, &msg, &extra, &api_base, &tx));
+}
+
+/// Run an ACTION the user just confirmed with `yes`. Never reachable from the model alone.
+fn ai_run_action(app: &mut App, name: &str) -> String {
+    match name {
+        "sigil_create_wallet" => match ai_tools::create_wallet() {
+            Ok((addr, path)) => format!("✓ New wallet created:\n  {addr}\n\nIts secret seed is saved to {path} (owner-only). Back that file up — it is the wallet. The AI never saw it.\nThis node now mines to this wallet. Say \"start mining\" when you're ready."),
             Err(e) => format!("⚠ {e}"),
-        };
-        let _ = tx.send(reply);
-    });
+        },
+        "sigil_start_mining" => {
+            if app.mining { return "Already mining — see tab 3.".into(); }
+            if miner_keypair().is_none() { return "⚠ This node has no wallet yet, and mining needs one it can sign for. Ask me to create a wallet first.".into(); }
+            app.toggle_engine_mining();
+            format!("✓ Mining started to {} — the Mining tab shows hashrate and shares.", miner_wallet())
+        }
+        "sigil_stop_mining" => {
+            if !app.mining { return "Not mining right now.".into(); }
+            app.toggle_engine_mining();
+            "✓ Mining stopped.".into()
+        }
+        other => format!("⚠ unknown action {other}"),
+    }
+}
+
+/// Drain every streamed event that arrived since the last frame into the transcript.
+fn ai_drain(app: &mut App) {
+    let Some(rx) = app.ai_rx.take() else { return };
+    let idx = app.ai_reply_idx.filter(|&i| i < app.ai_msgs.len()).unwrap_or(app.ai_msgs.len().saturating_sub(1));
+    let mut idx = idx;
+    let mut finished = false;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            flux_moe::StreamEv::Thinking(t) => app.ai_think_chars += t.chars().count(),
+            flux_moe::StreamEv::Token(t) => {
+                if app.ai_first_token.is_none() { app.ai_first_token = Some(Instant::now()); }
+                app.ai_tokens += 1;
+                if let Some(last) = app.ai_msgs.get_mut(idx) { last.1.push_str(&t); }
+            }
+            flux_moe::StreamEv::ToolCalls(_) => {}
+            flux_moe::StreamEv::ToolRan(line) => {
+                app.ai_msgs.insert(idx, ("tool".to_string(), line));
+                idx += 1;
+                app.ai_reply_idx = Some(idx);
+            }
+            flux_moe::StreamEv::Confirm { name, args, summary } => {
+                if let Some(last) = app.ai_msgs.get_mut(idx) {
+                    if !last.1.trim().is_empty() { last.1.push_str("\n\n"); }
+                    last.1.push_str(&format!("⚠ I'd like to {summary}. Type yes to allow — anything else cancels."));
+                }
+                app.ai_pending = Some((name, args));
+                finished = true;
+            }
+            flux_moe::StreamEv::Whole(r) => {
+                if let Some(last) = app.ai_msgs.get_mut(idx) { last.1 = r; }
+                app.ai_last_stats = String::new();
+                finished = true;
+            }
+            flux_moe::StreamEv::Done { eval_count, eval_ns, prompt_count, reason } => {
+                if let Some(last) = app.ai_msgs.get_mut(idx) {
+                    last.1 = flux_moe::strip_think_blocks(&last.1);
+                    if reason == "interrupted" { last.1.push_str("\n\n⚠ the connection to the model dropped mid-answer."); }
+                }
+                let secs = app.ai_started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+                let n = if eval_count > 0 { eval_count } else { app.ai_tokens };
+                let rate = if eval_ns > 0 { eval_count as f64 / (eval_ns as f64 / 1e9) } else { 0.0 };
+                app.ai_last_stats = if rate > 0.0 {
+                    format!("{n} tok · {rate:.1} tok/s · {secs:.1} s total · prompt {prompt_count} tok")
+                } else { format!("{n} tok · {secs:.1} s total") };
+                if n > 0 {
+                    app.ai_avg_reply_tokens = if app.ai_avg_reply_tokens == 0.0 { n as f64 }
+                        else { 0.7 * app.ai_avg_reply_tokens + 0.3 * n as f64 };
+                }
+                finished = true;
+            }
+        }
+    }
+    if finished {
+        app.ai_thinking = false;
+        if let Some(next) = app.ai_queued.pop_front() {
+            if let Some(s) = app.ai_load_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+            app.ai_input = next;
+            ai_submit(app);
+            return;
+        }
+        if let Some(s) = app.ai_load_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+        if let Some(m) = app.ai_msgs.get_mut(idx) {
+            if m.1.trim().is_empty() && app.ai_pending.is_none() {
+                m.1 = "(the model returned no text — ask again, or try SIGIL_OLLAMA_THINK=0)".into();
+            }
+        }
+        app.ai_reply_idx = None;
+    } else {
+        app.ai_rx = Some(rx);
+    }
 }
 
 /// First entry into the [A]I tab, by ANY route: one local-ollama probe (localhost, instant),

@@ -159,7 +159,7 @@ fn think_override() -> Option<bool> {
 
 /// Chat may legitimately take a while (the model is generating), so it gets a
 /// generous timeout — and it runs OFF the UI thread.
-fn client() -> reqwest::blocking::Client { client_with_timeout(chat_timeout_secs()) }
+pub(crate) fn client() -> reqwest::blocking::Client { client_with_timeout(chat_timeout_secs()) }
 
 /// The models the local ollama has pulled, newest first. Empty ⇒ ollama not
 /// running (or no models). The caller shows the "install a model" hint then.
@@ -489,7 +489,7 @@ pub(crate) fn pick_model_with(
 ///
 /// So: answer the question that was meant, in the user's own language, and keep
 /// the honesty rule exactly where it was — live numbers still come from the node.
-fn system_prompt() -> &'static str {
+pub(crate) fn system_prompt() -> &'static str {
     "You are flux-moe, the on-device AI inside the SIGIL sigil-top node. You know the SIGIL \
      whitepaper well — the block header and its commitments, dual-lane mining (Φ proof-of-work \
      × Ω proof-of-time), state agreement at one chokepoint, shielded-by-default privacy, the \
@@ -709,6 +709,141 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
     } else {
         let peek: String = thinking.chars().take(400).collect();
         Ok(format!("(no final answer — {advice})\n\nIts reasoning so far:\n{peek}"))
+    }
+}
+
+/// One event of a streamed reply. Sent over a channel from the worker thread to the UI.
+#[derive(Debug, Clone)]
+pub(crate) enum StreamEv {
+    /// A piece of the model's hidden reasoning (qwen3 thinks before it answers).
+    Thinking(String),
+    /// A piece of the visible answer.
+    Token(String),
+    /// Finished. `eval_count`/`eval_ns` are ollama's own measurement of the answer.
+    Done { eval_count: u64, eval_ns: u64, prompt_count: u64, reason: String },
+    /// The model asked for tools (raw ollama `tool_calls` entries).
+    ToolCalls(Vec<serde_json::Value>),
+    /// A read tool ran; one line for the transcript ("🔧 balance a3f1…  → 12.5 SIGIL").
+    ToolRan(String),
+    /// The model wants an ACTION (create wallet, start mining): the user must type `yes`.
+    Confirm { name: String, args: serde_json::Value, summary: String },
+    /// Streaming was not possible; this is the whole reply from the non-streaming path
+    /// (which carries all the self-heal logic), or an error already formatted for the user.
+    Whole(String),
+}
+
+/// Pure: parse one NDJSON line of ollama's streamed `/api/chat` into events.
+pub(crate) fn parse_stream_line(line: &str) -> Vec<StreamEv> {
+    let mut out = Vec::new();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { return out };
+    if let Some(m) = v.get("message") {
+        if let Some(t) = m.get("thinking").and_then(|t| t.as_str()) {
+            if !t.is_empty() { out.push(StreamEv::Thinking(t.to_string())); }
+        }
+        if let Some(c) = m.get("content").and_then(|c| c.as_str()) {
+            if !c.is_empty() { out.push(StreamEv::Token(c.to_string())); }
+        }
+        if let Some(tc) = m.get("tool_calls").and_then(|t| t.as_array()) {
+            if !tc.is_empty() { out.push(StreamEv::ToolCalls(tc.clone())); }
+        }
+    }
+    if v.get("done").and_then(|d| d.as_bool()) == Some(true) {
+        let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        out.push(StreamEv::Done {
+            eval_count: n("eval_count"),
+            eval_ns: n("eval_duration"),
+            prompt_count: n("prompt_eval_count"),
+            reason: v.get("done_reason").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+        });
+    }
+    out
+}
+
+/// Streamed chat: words appear as the model produces them. Any failure before the first
+/// byte (connect error, 404, a model that rejects `think`) falls back to [`chat`], whose
+/// self-heal paths (start ollama, pull the model, retry without `think`) stay the single
+/// source of truth for recovery — streaming adds speed of feedback, not a second
+/// error-handling path.
+pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str, extra_system: &str,
+                          tx: &std::sync::mpsc::Sender<StreamEv>) {
+    use std::io::BufRead;
+    let system = if extra_system.is_empty() { system_prompt().to_string() } else { format!("{}{}", system_prompt(), extra_system) };
+    let mut messages = vec![serde_json::json!({"role":"system","content":system})];
+    for (role, content) in history {
+        messages.push(serde_json::json!({"role": role, "content": content}));
+    }
+    messages.push(serde_json::json!({"role":"user","content":user}));
+    let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": true });
+    if let (Some(t), Some(o)) = (think_override(), body.as_object_mut()) {
+        o.insert("think".to_string(), serde_json::Value::Bool(t));
+    }
+    let url = format!("{}/api/chat", ollama_base());
+    let fallback = |tx: &std::sync::mpsc::Sender<StreamEv>| {
+        let r = match chat(model, history, user, extra_system) { Ok(r) => r, Err(e) => format!("⚠ {e}") };
+        let _ = tx.send(StreamEv::Whole(r));
+    };
+    let resp = match client().post(&url).json(&body).send() {
+        Ok(r) if r.status().is_success() => r,
+        _ => return fallback(tx),
+    };
+    let mut got_any = false;
+    let reader = std::io::BufReader::new(resp);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        for ev in parse_stream_line(&line) {
+            got_any = true;
+            let done = matches!(ev, StreamEv::Done { .. });
+            if tx.send(ev).is_err() { return; } // UI went away
+            if done { return; }
+        }
+    }
+    if !got_any { return fallback(tx); }
+    // Stream ended without a `done` line (connection dropped mid-answer): close it honestly.
+    let _ = tx.send(StreamEv::Done { eval_count: 0, eval_ns: 0, prompt_count: 0, reason: "interrupted".into() });
+}
+
+/// Live machine load while a reply is generating: GPU via `nvidia-smi` (only meaningful when
+/// ollama runs on THIS machine), CPU from `/proc/stat` deltas. `None` = not measurable here.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Load { pub gpu_pct: Option<u32>, pub vram_used_mb: Option<u64>, pub vram_total_mb: Option<u64>, pub cpu_pct: Option<u32> }
+
+pub(crate) fn ollama_is_local() -> bool {
+    host_of(&ollama_base()).map(|h| is_loopback_host(&h)).unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn cpu_times() -> Option<(u64, u64)> {
+    let s = std::fs::read_to_string("/proc/stat").ok()?;
+    let f: Vec<u64> = s.lines().next()?.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+    if f.len() < 4 { return None; }
+    let idle = f[3] + f.get(4).copied().unwrap_or(0);
+    Some((f.iter().sum(), idle))
+}
+#[cfg(not(target_os = "linux"))]
+fn cpu_times() -> Option<(u64, u64)> { None }
+
+/// Sample load once a second until `stop` is set; each sample replaces `slot`.
+pub(crate) fn sample_load(slot: std::sync::Arc<std::sync::Mutex<Load>>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let local = ollama_is_local();
+    let mut prev = cpu_times();
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let mut l = Load::default();
+        if local {
+            if let Ok(o) = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]).output() {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let p: Vec<u64> = s.lines().next().unwrap_or("").split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if p.len() == 3 { l.gpu_pct = Some(p[0] as u32); l.vram_used_mb = Some(p[1]); l.vram_total_mb = Some(p[2]); }
+            }
+        }
+        let now = cpu_times();
+        if let (Some((t0, i0)), Some((t1, i1))) = (prev, now) {
+            let dt = t1.saturating_sub(t0);
+            if dt > 0 { l.cpu_pct = Some((100 * dt.saturating_sub(i1.saturating_sub(i0)) / dt) as u32); }
+        }
+        prev = now;
+        if let Ok(mut g) = slot.lock() { *g = l; }
     }
 }
 
@@ -1239,5 +1374,33 @@ mod oob_tests {
         let (m3, why3) = pick_model_tiered("qwen3:8b", Some("qwen3:4b"), Some("qwen3:1.7b"), &big);
         assert_eq!(m3, "qwen3:1.7b"); assert!(why3.contains("phone"), "{why3}");
         match saved { Some(p) => std::env::set_var("PREFIX", p), None => std::env::remove_var("PREFIX") }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::{parse_stream_line, StreamEv};
+
+    #[test]
+    fn thinking_and_content_chunks_become_separate_events() {
+        let ev = parse_stream_line(r#"{"message":{"role":"assistant","content":"","thinking":"hmm"},"done":false}"#);
+        assert!(matches!(ev.as_slice(), [StreamEv::Thinking(t)] if t == "hmm"));
+        let ev = parse_stream_line(r#"{"message":{"role":"assistant","content":"Hel"},"done":false}"#);
+        assert!(matches!(ev.as_slice(), [StreamEv::Token(t)] if t == "Hel"));
+    }
+
+    #[test]
+    fn done_line_carries_ollamas_own_measurement() {
+        let ev = parse_stream_line(r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","eval_count":120,"eval_duration":6000000000,"prompt_eval_count":40}"#);
+        match ev.as_slice() {
+            [StreamEv::Done { eval_count: 120, eval_ns: 6_000_000_000, prompt_count: 40, reason }] => assert_eq!(reason, "stop"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn garbage_and_blank_lines_are_ignored_not_fatal() {
+        assert!(parse_stream_line("").is_empty());
+        assert!(parse_stream_line("not json").is_empty());
     }
 }

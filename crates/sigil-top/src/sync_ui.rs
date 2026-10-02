@@ -790,7 +790,77 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
             Style::default().fg(C_NEON_GREEN))]),
         Line::from(vec![dim("  data            "), Span::styled(if mb >= 1.0 { format!("{mb:.0} MB") } else { "—".into() }, Style::default().fg(C_DIM))]),
     ];
+    let mut sl = sl;
+    sl.extend(disk_lines());
     f.render_widget(Paragraph::new(sl), pane_sess);
+}
+
+/// Disk usage of the braid store + free space on its device, sampled OFF the draw thread
+/// every 15 s (walking a multi-GB store per frame would stall the UI).
+#[derive(Clone, Copy, Default)]
+struct DiskSample { braid: Option<u64>, free: Option<u64>, total: Option<u64> }
+
+fn disk_sample() -> DiskSample {
+    use std::sync::{Mutex, OnceLock};
+    static SLOT: OnceLock<Mutex<DiskSample>> = OnceLock::new();
+    let slot = SLOT.get_or_init(|| {
+        std::thread::Builder::new().name("disk-sampler".into()).spawn(|| loop {
+            let db = crate::store_lifecycle::sigil_top_db_path();
+            let braid = crate::store_lifecycle::dir_size_capped(&db, u64::MAX).ok().filter(|&b| b > 0);
+            let (free, total) = df_free_total(std::path::Path::new(&db));
+            if let Some(m) = SLOT.get() { if let Ok(mut g) = m.lock() { *g = DiskSample { braid, free, total }; } }
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        }).ok();
+        Mutex::new(DiskSample::default())
+    });
+    slot.lock().map(|g| *g).unwrap_or_default()
+}
+
+/// (free, total) bytes on the filesystem holding `path` via POSIX `df -Pk`; `None` where
+/// there is no `df` (Windows) — shown as "—", never guessed.
+fn df_free_total(path: &std::path::Path) -> (Option<u64>, Option<u64>) {
+    let mut p = path;
+    while !p.exists() { match p.parent() { Some(q) => p = q, None => return (None, None) } }
+    let Ok(out) = std::process::Command::new("df").arg("-Pk").arg(p).output() else { return (None, None) };
+    parse_df_pk(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure: `df -Pk` output → (available, total) bytes.
+pub(crate) fn parse_df_pk(text: &str) -> (Option<u64>, Option<u64>) {
+    let Some(line) = text.lines().nth(1) else { return (None, None) };
+    let f: Vec<&str> = line.split_whitespace().collect();
+    let kb = |i: usize| f.get(i).and_then(|x| x.parse::<u64>().ok()).map(|k| k * 1024);
+    (kb(3), kb(1))
+}
+
+fn fmt_bytes(b: u64) -> String {
+    let g = b as f64 / (1024.0 * 1024.0 * 1024.0);
+    if g >= 1.0 { format!("{g:.1} GB") } else { format!("{:.0} MB", b as f64 / (1024.0 * 1024.0)) }
+}
+
+fn disk_lines() -> Vec<Line<'static>> {
+    let d = disk_sample();
+    let braid = d.braid.map(fmt_bytes).unwrap_or_else(|| "—".into());
+    let free_col = match d.free { Some(f) if f < 5 << 30 => C_NEON_PINK, Some(f) if f < 20 << 30 => C_GOLD, _ => C_NEON_GREEN };
+    let free = match (d.free, d.total) {
+        (Some(f), Some(t)) if t > 0 => format!("{} of {} ({}% used)", fmt_bytes(f), fmt_bytes(t), 100 - (100 * f / t)),
+        (Some(f), _) => fmt_bytes(f),
+        _ => "—".into(),
+    };
+    vec![
+        Line::from(vec![dim("  braid on disk   "), Span::styled(braid, Style::default().fg(C_VBRIGHT))]),
+        Line::from(vec![dim("  disk free       "), Span::styled(free, Style::default().fg(free_col))]),
+    ]
+}
+
+#[cfg(test)]
+mod disk_tests {
+    #[test]
+    fn df_pk_parses_available_and_total() {
+        let t = "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 83886080 5452595 78433485 7% /\n";
+        assert_eq!(super::parse_df_pk(t), (Some(78433485 * 1024), Some(83886080 * 1024)));
+        assert_eq!(super::parse_df_pk(""), (None, None));
+    }
 }
 
 /// v0.26: read at most the last `max_bytes` of a (possibly huge) log file — seek to the

@@ -237,6 +237,22 @@
   .ai .aistat a{cursor:pointer; text-decoration:underline}
   .ai .aistat select{background:#0d1119; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:12px; border-radius:7px; padding:3px 8px; outline:none}
   .ai .aistat .mok{color:var(--ok)}
+  .ai .aistat .faint,.ai .faint{color:var(--faint)}
+  .ai .msg.tool{align-self:flex-start; font-size:11.5px; color:var(--gold); background:transparent; padding:2px 6px}
+  .ai .msg.u.faint{opacity:.6}
+  .ai .msg .stats{margin-top:8px; font-size:11px; color:var(--faint)}
+  .ai .msg .h{color:var(--cyan); font-weight:700; margin:6px 0 2px}
+  .ai .msg .sp{height:6px}
+  .ai .msg ul,.ai .msg ol{margin:4px 0 4px 18px; padding:0}
+  .ai .msg code{font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; background:#0b1018; border:1px solid var(--edge); border-radius:5px; padding:0 4px}
+  .ai .msg pre.code{font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; background:#05080d; border:1px solid var(--edge); border-radius:8px; padding:10px; overflow-x:auto; white-space:pre}
+  .ai .mono{font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; word-break:break-all}
+  .ai .aiprog[hidden]{display:none}
+  .ai .aiprog{display:flex; align-items:center; gap:10px; padding:4px 14px 6px; font-size:11.5px; color:var(--dim)}
+  .ai .aiprog .bar{width:160px; height:6px; border-radius:4px; background:#0d1119; border:1px solid var(--edge); overflow:hidden}
+  .ai .aiprog .bar i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--cyan),#9f7bff); transition:width .25s}
+  .ai .inbar textarea{flex:1; resize:none; background:#0d1119; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:13.5px; border-radius:10px; padding:10px 14px; outline:none; line-height:1.4; max-height:140px}
+  .ai .inbar textarea:focus{border-color:#31465f}
   .ai .inbar{display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--edge)}
   .ai .inbar input{flex:1; background:#0d1119; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:13.5px; border-radius:10px; padding:10px 14px; outline:none}
   .ai .inbar input:focus{border-color:#31465f}
@@ -677,80 +693,222 @@ function shortA(a){ a=String(a); return a.length>16? a.slice(0,8)+'…'+a.slice(
 function extractAddr(s){ const m=s.match(/\b([a-fA-F0-9]{64}|qnk[a-zA-Z0-9]{6,})\b/); return m?m[1]:''; }
 function walletAddr(){ try{ return localStorage.getItem('sigil-wallet-address')||''; }catch(e){ return ''; } }
 async function apiGet(path){ const r=await fetch(SIGIL_API+path,{cache:'no-store'}); if(!r.ok) throw new Error('API '+r.status); const j=await r.json(); if(j.ok===false) throw new Error(j.error||'api error'); return j; }
-// flux-moe: the user's OWN local ollama. HTTPS pages may call http://localhost (mixed-content exempt).
-const OLLAMA='http://localhost:11434';
-let ollamaModels=[], ollamaModel=null;
+// flux-moe: the user's OWN model. Default = local ollama; any endpoint the user trusts can be
+// chosen (e.g. their sigil-top node's tunnel). HTTPS pages may call http://localhost.
+// 2026-10-02: streaming, conversation memory, markdown, stop, progress + the SIGIL wallet
+// read tools (balance/height/supply/pools/shielded/miners/nation) executed HERE against the
+// node, and payments only ever PROPOSED (the wallet signs). Addresses are checked in code:
+// qwen3:8b measurably shortened a 64-hex address and invented "bob's wallet address".
+const OLLAMA_DEFAULTS=['http://localhost:11434','http://127.0.0.1:11434','http://127.0.0.1:11444'];
+function aiPref(k,d){ try{ const v=localStorage.getItem('sigil-ai-'+k); return v===null?d:v; }catch(e){ return d; } }
+function aiSave(k,v){ try{ localStorage.setItem('sigil-ai-'+k,v); }catch(e){} }
+let OLLAMA=aiPref('endpoint','http://localhost:11434');
+let ollamaModels=[], ollamaModel=aiPref('model',null);
+let aiHistory=[];             // [{role,content}] — the conversation the model remembers
+let aiAbort=null;             // AbortController of the in-flight reply
+let aiAvgTok=0;               // running average reply length → ETA estimate
 async function detectOllama(){ try{ const r=await fetch(OLLAMA+'/api/tags',{cache:'no-store'}); if(!r.ok) return false;
-  const j=await r.json(); ollamaModels=(j.models||[]).map(m=>m.name); if(ollamaModels.length && !ollamaModel) ollamaModel=ollamaModels[0]; return ollamaModels.length>0; }catch(e){ return false; } }
-async function askOllama(prompt){
-  const sys="You are flux-moe, the on-device AI of the SIGIL Nation wallet. Be concise, warm and honest. You help with SIGIL: the Nation welfare stipend, mining, the DEX, the Polygon bridge, and the commons/remembrance. For anything needing a LIVE number or a money action (balance, supply, height, pools, mining, nation, send) tell the user to type that word as a command — those run against the real chain. Never invent balances, prices, or amounts.";
-  const r=await fetch(OLLAMA+'/api/chat',{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({model:ollamaModel,stream:false,messages:[{role:'system',content:sys},{role:'user',content:prompt}]})});
-  if(!r.ok) throw new Error('ollama '+r.status); const j=await r.json(); return (j.message&&j.message.content)||'(no response)';
+  const j=await r.json(); ollamaModels=(j.models||[]).map(m=>m.name);
+  if(ollamaModels.length && (!ollamaModel || ollamaModels.indexOf(ollamaModel)<0)) ollamaModel=ollamaModels[0];
+  return ollamaModels.length>0; }catch(e){ return false; } }
+const AI_SYS="You are flux-moe, the on-device AI of the SIGIL Nation wallet. Be concise, warm and honest. "+
+  "You help with SIGIL: mining, privacy, the DEX, the Nation, the bridge. You have SIGIL wallet tools: use one whenever the user "+
+  "needs a LIVE number. Never invent balances, heights, prices or amounts. If a request is missing a wallet address or an amount, "+
+  "ASK, never guess or use a placeholder. Copy addresses exactly. Payments are only proposed with sigil_propose_private_send; the "+
+  "user signs in the wallet. Never ask for or repeat a seed or secret key.";
+function aiTool(name,desc,props,req){ return {type:'function',function:{name:name,description:desc,parameters:{type:'object',properties:props||{},required:req||[]}}}; }
+const AI_TOOLS=[
+  aiTool('sigil_balance','Live transparent balance of a SIGIL wallet, in SIGIL. Omit wallet to use the logged-in wallet.',{wallet:{type:'string',description:'64-hex wallet id'}}),
+  aiTool('sigil_network_status','Live chain height and native supply.'),
+  aiTool('sigil_pools','Live DEX liquidity pools.'),
+  aiTool('sigil_shielded_status','Live shielded pool: note count (the real privacy number), nullifiers, capacity.'),
+  aiTool('sigil_mining_network','Live miners, network hashrate, blocks accepted.'),
+  aiTool('sigil_nation_status','Live SIGIL Nation treasury and stipend.'),
+  aiTool('sigil_propose_private_send','PROPOSE a private payment; nothing is sent, the user signs in the wallet. Only call with a full address AND an amount.',
+    {to:{type:'string',description:'64-hex or sigil1s: address exactly as given'},amount:{type:'number',description:'amount in SIGIL'},memo:{type:'string'}},['to','amount'])
+];
+const isWallet=s=>/^[0-9a-fA-F]{64}$/.test(String(s||'').trim());
+const isShielded=s=>/^sigil1s:[0-9a-fA-F]{64}:[0-9a-fA-F]{64}$/.test(String(s||'').trim());
+async function aiRunTool(name,args){
+  args=args||{};
+  const G=v=>Number(v||0)/1e10;
+  switch(name){
+    case 'sigil_balance': { let w=String(args.wallet||'').trim(); if(!isWallet(w)) w=walletAddr().replace(/^qnk/,'');
+      if(!isWallet(w)) return [{error:'no valid 64-hex wallet; ask the user for their full address'},'balance → ⚠ need a full address'];
+      const j=await apiGet('/v1/balance?wallet='+w); const b=G(j.data.balance); return [{wallet:w,balance_sigil:b},'balance '+shortA(w)+' → '+b+' SIGIL']; }
+    case 'sigil_network_status': { const s=await apiGet('/v1/supply'); const c=await fetch(SIGIL_API+'/v1/mining/challenge',{cache:'no-store'}).then(r=>r.json());
+      const sup=G(s.data.native_supply); return [{height:c.height,native_supply_sigil:sup,max_supply_sigil:21000000,minted_pct:s.data.minted_pct},'network → height '+Number(c.height).toLocaleString()+' · supply '+sup.toLocaleString(undefined,{maximumFractionDigits:0})+' SIGIL']; }
+    case 'sigil_pools': { const j=await apiGet('/v1/pools'); const p=j.pools||j.data||[]; return [{pools:p},'pools → '+p.length]; }
+    case 'sigil_shielded_status': { const j=await fetch(SIGIL_API+'/v1/shielded/anchor',{cache:'no-store'}).then(r=>r.json());
+      return [{notes:j.notes,nullifiers:j.nullifiers,capacity:j.capacity,epoch:j.epoch},'shielded pool → '+Number(j.notes).toLocaleString()+' notes']; }
+    case 'sigil_mining_network': { const d=(await apiGet('/v1/mining/miners')).data;
+      return [{live_miners:d.live_miners,net_mhps:d.net_hps/1e6,blocks_accepted:d.blocks_accepted,height:d.height},'mining → '+d.live_miners+' miners · '+(d.net_hps/1e6).toFixed(1)+' MH/s']; }
+    case 'sigil_nation_status': { const d=(await apiGet('/v1/nation/status')).data; const t=G(d.treasury_glyphs);
+      return [{active:d.active,treasury_sigil:t,payout_asset:d.payout_asset,claim_interval_blocks:d.claim_interval_blocks},'nation → treasury '+t.toFixed(2)+' SIGIL']; }
+    case 'sigil_propose_private_send': { const to=String(args.to||'').trim(); const amt=Number(args.amount);
+      if(!(isWallet(to)||isShielded(to))) return [{error:'recipient is not a valid address ('+to.length+' chars) — ask the user to paste it'},'proposal refused → bad address'];
+      if(!(amt>0)) return [{error:'no positive amount — ask the user'},'proposal refused → no amount'];
+      return [{status:'shown to the user; nothing sent; the user signs in the wallet'},{propose:{to:to,amount:amt,memo:args.memo||''}}]; }
+  }
+  return [{error:'unknown tool '+name},'unknown tool '+name];
+}
+// Minimal SAFE markdown: escape first, then a few inline/block forms. Never injects raw HTML.
+function aiMd(src){
+  const parts=String(src).split('```'); let out='';
+  parts.forEach((p,i)=>{
+    if(i%2===1){ out+='<pre class="code">'+esc(p.replace(/^[a-z0-9_-]*\n/i,''))+'</pre>'; return; }
+    const lines=esc(p).split('\n'); let html='', inList='';
+    const close=()=>{ if(inList){ html+='</'+inList+'>'; inList=''; } };
+    lines.forEach(l=>{
+      let m;
+      if((m=l.match(/^\s*#{1,4}\s+(.*)$/))){ close(); html+='<div class="h">'+m[1]+'</div>'; return; }
+      if((m=l.match(/^\s*[-*•]\s+(.*)$/))){ if(inList!=='ul'){ close(); html+='<ul>'; inList='ul'; } html+='<li>'+m[1]+'</li>'; return; }
+      if((m=l.match(/^\s*\d+[.)]\s+(.*)$/))){ if(inList!=='ol'){ close(); html+='<ol>'; inList='ol'; } html+='<li>'+m[1]+'</li>'; return; }
+      close(); html+= l.trim()==='' ? '<div class="sp"></div>' : '<div>'+l+'</div>';
+    });
+    close();
+    html=html.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/`([^`]+)`/g,'<code>$1</code>');
+    out+=html;
+  });
+  return out;
+}
+function stripThink(s){ return String(s).replace(/<think>[\s\S]*?<\/think>/g,'').replace(/^\s+/,''); }
+// One streamed turn. onEv({thinking|token|tools|done}). Resolves with {content,tool_calls,done}.
+async function aiStream(messages,tools,onEv,signal){
+  const body={model:ollamaModel,stream:true,messages:messages,options:{num_ctx:8192}};
+  if(tools) body.tools=tools;
+  const r=await fetch(OLLAMA+'/api/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:signal});
+  if(!r.ok) throw new Error('model '+r.status+' '+(await r.text()).slice(0,160));
+  const rd=r.body.getReader(), dec=new TextDecoder(); let buf='', content='', calls=[], done=null;
+  for(;;){ const {value,done:end}=await rd.read(); if(end) break; buf+=dec.decode(value,{stream:true});
+    let i; while((i=buf.indexOf('\n'))>=0){ const line=buf.slice(0,i).trim(); buf=buf.slice(i+1); if(!line) continue;
+      let j; try{ j=JSON.parse(line); }catch(e){ continue; }
+      const m=j.message||{};
+      if(m.thinking) onEv({thinking:m.thinking});
+      if(m.content){ content+=m.content; onEv({token:m.content}); }
+      if(m.tool_calls&&m.tool_calls.length) calls=calls.concat(m.tool_calls);
+      if(j.done){ done=j; }
+    } }
+  return {content:content,tool_calls:calls,done:done};
 }
 function renderAI(body){
   body.innerHTML=`<div class="ai">
-    <div class="aistat" id="aistat">🧠 looking for your local model…</div>
+    <div class="aistat" id="aistat">🧠 looking for your model…</div>
     <div class="msgs" id="aimsgs"></div>
+    <div class="aiprog" id="aiprog" hidden><div class="bar"><i id="aibar"></i></div><span id="aiprogt"></span></div>
     <div class="chips" id="aichips"></div>
-    <div class="inbar"><input id="aiin" placeholder="ask: balance · supply · pools · mining · nation · send…" autocomplete="off"><button class="btn" id="aisend">Send</button></div>
+    <div class="inbar"><textarea id="aiin" rows="1" placeholder="Ask anything… (Enter sends · Shift+Enter new line)" autocomplete="off"></textarea>
+      <button class="btn" id="aisend">Send</button><button class="btn ghost" id="aistop" hidden>Stop</button></div>
   </div>`;
   const msgs=body.querySelector('#aimsgs');
-  const add=(cls,html)=>{ const d=document.createElement('div'); d.className='msg '+cls; d.innerHTML=html; msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; return d; };
-  const addCard=(html)=>{ const d=document.createElement('div'); d.className='card'; d.innerHTML=html; msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; return d; };
-  add('a','<b>SIGIL AI</b> — I run your wallet through the live chain. Try <b>balance</b>, <b>supply</b>, <b>height</b>, <b>pools</b>, <b>mining</b>, <b>nation</b>, or <b>send 1 to &lt;addr&gt;</b>. Type <b>help</b> for all.');
+  const nearBottom=()=>msgs.scrollHeight-msgs.scrollTop-msgs.clientHeight<80;
+  const follow=(force)=>{ if(force||nearBottom()) msgs.scrollTop=msgs.scrollHeight; };
+  const add=(cls,html)=>{ const d=document.createElement('div'); d.className='msg '+cls; d.innerHTML=html; msgs.appendChild(d); follow(true); return d; };
+  const addCard=(html)=>{ const d=document.createElement('div'); d.className='card'; d.innerHTML=html; msgs.appendChild(d); follow(true); return d; };
+  add('a','<b>SIGIL AI</b> — I run your wallet through the live chain. Try <b>balance</b>, <b>supply</b>, <b>height</b>, <b>pools</b>, <b>mining</b>, <b>nation</b>, or <b>send 1 to &lt;addr&gt;</b>. With a model connected, just ask in your own words — I can look things up myself.');
   const chipbar=body.querySelector('#aichips');
-  ['balance','supply','height','pools','mining','nation','help'].forEach(c=>{ const el=document.createElement('div'); el.className='chip'; el.textContent=c; el.onclick=()=>{ body.querySelector('#aiin').value=c; run(); }; chipbar.appendChild(el); });
+  ['balance','supply','height','pools','mining','nation','help','new chat'].forEach(c=>{ const el=document.createElement('div'); el.className='chip'; el.textContent=c;
+    el.onclick=()=>{ if(c==='new chat'){ aiHistory=[]; msgs.innerHTML=''; add('sys','new conversation — the model has forgotten the previous one'); return; } body.querySelector('#aiin').value=c; run(); }; chipbar.appendChild(el); });
   const stat=body.querySelector('#aistat');
-  const ollamaHelp=()=>"To chat with a local model (free, private, on your machine):<br>1. Install <b>ollama</b> from ollama.com<br>2. Pull a model your GPU can run — e.g. <b>ollama pull qwen3:8b</b> (bigger GPU → bigger model → more reasoning)<br>3. Start it so this page is allowed to reach it:<br><b>OLLAMA_ORIGINS='*' ollama serve</b><br>Reopen this tab and pick your model. Then chat freely — the effort/reasoning goes up with the model you choose.";
-  detectOllama().then(ok=>{
-    if(ok){ stat.innerHTML='🧠 local model &nbsp;<select id="aimodel"></select>&nbsp; <span class="mok">● connected</span>';
-      const sel=stat.querySelector('#aimodel'); sel.innerHTML=ollamaModels.map(m=>'<option '+(m===ollamaModel?'selected':'')+'>'+esc(m)+'</option>').join(''); sel.onchange=()=>{ ollamaModel=sel.value; };
-      add('sys','local model connected — you can chat freely, and commands still run live');
-    } else { stat.innerHTML='🧠 no local model — <a id="ohelp">how to enable free chat</a> · commands work now';
-      const h=stat.querySelector('#ohelp'); if(h) h.onclick=()=>add('a',ollamaHelp()); }
-  });
-  async function run(){ const inp=body.querySelector('#aiin'); const q=inp.value.trim(); if(!q)return; inp.value=''; add('u',esc(q)); await handle(q.toLowerCase(), q); }
+  const prog=body.querySelector('#aiprog'), bar=body.querySelector('#aibar'), progt=body.querySelector('#aiprogt');
+  const inp=body.querySelector('#aiin'), sendBtn=body.querySelector('#aisend'), stopBtn=body.querySelector('#aistop');
+  const ollamaHelp=()=>"To chat with a model (free, private, on your machine):<br>1. Install <b>ollama</b> from ollama.com<br>2. Pull a model your GPU can run — e.g. <b>ollama pull qwen3:8b</b><br>3. Start it so this page may reach it:<br><b>OLLAMA_ORIGINS=* ollama serve</b><br>Or point the endpoint box above at your own SIGIL node's model.";
+  function paintStat(ok){
+    const eps=OLLAMA_DEFAULTS.indexOf(OLLAMA)<0?OLLAMA_DEFAULTS.concat([OLLAMA]):OLLAMA_DEFAULTS;
+    stat.innerHTML='🧠 <select id="aiep" title="where the model runs">'+eps.map(e=>'<option '+(e===OLLAMA?'selected':'')+'>'+esc(e)+'</option>').join('')+'<option value="__custom">other…</option></select> '+
+      (ok? '<select id="aimodel">'+ollamaModels.map(m=>'<option '+(m===ollamaModel?'selected':'')+'>'+esc(m)+'</option>').join('')+'</select> <span class="mok">● connected</span>'
+         : '<span class="faint">no model here</span> — <a id="ohelp">how to enable chat</a> · commands still work');
+    const ep=stat.querySelector('#aiep'); ep.onchange=async()=>{ let v=ep.value; if(v==='__custom'){ v=prompt('Model endpoint (ollama URL):','http://127.0.0.1:11434'); if(!v){ paintStat(ok); return; } }
+      OLLAMA=v.replace(/\/+$/,''); aiSave('endpoint',OLLAMA); stat.innerHTML='🧠 connecting to '+esc(OLLAMA)+'…'; paintStat(await detectOllama()); };
+    const sel=stat.querySelector('#aimodel'); if(sel) sel.onchange=()=>{ ollamaModel=sel.value; aiSave('model',ollamaModel); };
+    const h=stat.querySelector('#ohelp'); if(h) h.onclick=()=>add('a',ollamaHelp());
+  }
+  detectOllama().then(ok=>{ paintStat(ok); if(ok) add('sys','model connected — chat freely; live commands still run'); });
+  inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,140)+'px'; });
+  function busy(on){ sendBtn.hidden=on; stopBtn.hidden=!on; prog.hidden=!on; if(!on){ bar.style.width='0'; progt.textContent=''; } }
+  stopBtn.onclick=()=>{ if(aiAbort) aiAbort.abort(); };
+  let queue=[];
+  async function run(){ const q=inp.value.trim(); if(!q) return; inp.value=''; inp.style.height='auto';
+    if(aiAbort){ queue.push(q); add('u faint',esc(q)+' <span class="faint">· queued</span>'); return; }
+    add('u',esc(q)); await handle(q.toLowerCase(), q);
+    while(queue.length && !aiAbort){ const n=queue.shift(); await handle(n.toLowerCase(), n); } }
+  async function chat(raw){
+    aiHistory.push({role:'user',content:raw});
+    const msgsOut=[{role:'system',content:AI_SYS}].concat(aiHistory.slice(-16));
+    const bubble=add('a','<span class="faint">· '+esc(ollamaModel)+' is thinking ·</span>');
+    aiAbort=new AbortController(); busy(true);
+    const t0=performance.now(); let first=0, toks=0, thinkChars=0, text='';
+    const tick=()=>{ const el=(performance.now()-t0)/1000;
+      if(!toks){ progt.textContent=(thinkChars? 'thinking · '+thinkChars+' chars of reasoning' : 'loading the model / reading the prompt')+' · '+el.toFixed(0)+'s'; bar.style.width='4%'; return; }
+      const rate=toks/Math.max(.05,(performance.now()-first)/1000), tgt=aiAvgTok>=20?aiAvgTok:300;
+      bar.style.width=Math.min(95,100*toks/tgt)+'%';
+      progt.textContent=toks+' tok · '+rate.toFixed(1)+' tok/s · eta ~'+Math.max(0,(tgt-toks)/rate).toFixed(0)+'s (est.) · '+el.toFixed(0)+'s'; };
+    const timer=setInterval(tick,250);
+    try{
+      for(let step=0; step<4; step++){
+        const res=await aiStream(msgsOut,AI_TOOLS,ev=>{
+          if(ev.thinking) thinkChars+=ev.thinking.length;
+          if(ev.token){ if(!first) first=performance.now(); toks++; text+=ev.token; bubble.innerHTML=aiMd(stripThink(text)); follow(false); }
+        },aiAbort.signal);
+        if(!res.tool_calls.length){
+          const d=res.done||{}; const n=d.eval_count||toks; const rate=d.eval_duration? d.eval_count/(d.eval_duration/1e9):0;
+          if(n) aiAvgTok=aiAvgTok? .7*aiAvgTok+.3*n : n;
+          const final=stripThink(text)||'(no text — ask again)';
+          bubble.innerHTML=aiMd(final)+'<div class="stats">⏱ '+n+' tok'+(rate? ' · '+rate.toFixed(1)+' tok/s':'')+' · '+((performance.now()-t0)/1000).toFixed(1)+' s</div>';
+          aiHistory.push({role:'assistant',content:final}); break;
+        }
+        msgsOut.push({role:'assistant',content:res.content,tool_calls:res.tool_calls});
+        for(const c of res.tool_calls){
+          const name=c.function&&c.function.name; let args=c.function&&c.function.arguments; if(typeof args==='string'){ try{ args=JSON.parse(args); }catch(e){ args={}; } }
+          let out;
+          try{ out=await aiRunTool(name,args); }catch(e){ out=[{error:String(e&&e.message||e)},name+' → ⚠ '+(e&&e.message||e)]; }
+          if(out[1]&&out[1].propose){ const p=out[1].propose;
+            const cd=addCard('<div class="h">⚠️ Proposed private send</div><div class="row"><span class="k">amount</span><span><b>'+esc(p.amount)+' SIGIL</b></span></div><div class="row"><span class="k">to</span><span class="mono">'+esc(p.to)+'</span></div>'+(p.memo?'<div class="row"><span class="k">memo</span><span>'+esc(p.memo)+'</span></div>':'')+'<div class="btns"><button class="btn mag" data-a="go">Open wallet to sign</button><button class="btn ghost" data-a="no">Cancel</button></div><div class="note" style="margin-top:8px">Check every character of the address. Nothing has been sent — the wallet signs and shields it.</div>');
+            cd.querySelector('[data-a=go]').onclick=()=>toast('Open your SIGIL wallet → Send to sign this'); cd.querySelector('[data-a=no]').onclick=()=>cd.remove();
+            msgs.insertBefore(cd,bubble);
+          } else { const t=document.createElement('div'); t.className='msg tool'; t.textContent='🔧 '+out[1]; msgs.insertBefore(t,bubble); }
+          msgsOut.push({role:'tool',tool_name:name,content:JSON.stringify(out[0]).slice(0,2000)});
+        }
+        text=''; bubble.innerHTML='<span class="faint">· reading the results ·</span>';
+      }
+    }catch(err){
+      if(err&&err.name==='AbortError'){ bubble.innerHTML=aiMd(stripThink(text))+'<div class="stats">■ stopped</div>'; if(text) aiHistory.push({role:'assistant',content:stripThink(text)}); }
+      else bubble.innerHTML='⚠️ could not reach the model at <b>'+esc(OLLAMA)+'</b> ('+esc(err&&err.message||err)+'). If ollama runs there, restart it with <b>OLLAMA_ORIGINS=* ollama serve</b> so this page may call it.';
+    }finally{ clearInterval(timer); aiAbort=null; busy(false); follow(false); }
+  }
   async function handle(ql, raw){
     const think=add('sys','· working ·'); const done=(cls,html)=>{ think.remove(); add(cls,html); };
     try{
-      if(/help|what can|commands/.test(ql)){ done('a','Commands (all live from the SIGIL API):<br>• <b>balance [addr]</b><br>• <b>supply</b><br>• <b>height</b><br>• <b>pools</b><br>• <b>mining</b><br>• <b>nation</b><br>• <b>send N to addr</b> (proposes; signs in wallet)<br><br>Free-form chat lights up once a flux-moe endpoint is proxied same-origin.'); return; }
-      if(/^send |transfer |^pay /.test(ql)){ think.remove(); const m=raw.match(/([0-9]*\.?[0-9]+)\s+(?:sigil\s+)?(?:to\s+)?([a-fA-F0-9qnk]{6,})/i);
+      if(/^help$|what can|^commands$/.test(ql)){ done('a','Commands (all live from the SIGIL API):<br>• <b>balance [addr]</b><br>• <b>supply</b><br>• <b>height</b><br>• <b>pools</b><br>• <b>mining</b><br>• <b>nation</b><br>• <b>send N to addr</b> (proposes; signs in wallet)<br><br>With a model connected you can also just ask — it looks numbers up with the same tools.'); return; }
+      if(/^(send|transfer|pay) /.test(ql)){ think.remove(); const m=raw.match(/([0-9]*\.?[0-9]+)\s+(?:sigil\s+)?(?:to\s+)?([a-zA-Z0-9:]{6,})/i);
         if(!m){ add('a','Format: <b>send 1.5 to &lt;addr&gt;</b>'); return; }
-        const c=addCard('<div class="h">⚠️ Proposed send</div><div class="row"><span class="k">amount</span><span><b>'+esc(m[1])+' SIGIL</b></span></div><div class="row"><span class="k">to</span><span>'+shortA(m[2])+'</span></div><div class="row"><span class="k">from</span><span>'+(walletAddr()?shortA(walletAddr()):'(not logged in)')+'</span></div><div class="btns"><button class="btn mag" data-a="go">Open wallet to sign</button><button class="btn ghost" data-a="no">Cancel</button></div><div class="note" style="margin-top:8px">SIGIL is privacy-only — a send must be signed &amp; shielded in your wallet. This console proposes; the wallet executes.</div>');
+        if(!(isWallet(m[2])||isShielded(m[2]))){ add('a','That address is not complete ('+m[2].length+' characters). A SIGIL address is 64 hex characters, or <b>sigil1s:…</b>. Paste the whole thing.'); return; }
+        const c=addCard('<div class="h">⚠️ Proposed private send</div><div class="row"><span class="k">amount</span><span><b>'+esc(m[1])+' SIGIL</b></span></div><div class="row"><span class="k">to</span><span class="mono">'+esc(m[2])+'</span></div><div class="row"><span class="k">from</span><span>'+(walletAddr()?shortA(walletAddr()):'(not logged in)')+'</span></div><div class="btns"><button class="btn mag" data-a="go">Open wallet to sign</button><button class="btn ghost" data-a="no">Cancel</button></div><div class="note" style="margin-top:8px">SIGIL is privacy-only — a send must be signed &amp; shielded in your wallet. This console proposes; the wallet executes.</div>');
         c.querySelector('[data-a=go]').onclick=()=>toast('Open your SIGIL wallet → Send to sign this');
         c.querySelector('[data-a=no]').onclick=()=>c.remove(); return; }
-      if(/balance|how much|my sigil/.test(ql)){ const a=extractAddr(raw)||walletAddr();
+      if(/^(balance|my balance|how much)\b/.test(ql)){ const a=extractAddr(raw)||walletAddr();
         if(!a){ done('a','I need a wallet address — log into the wallet, or type <b>balance &lt;addr&gt;</b>.'); return; }
         const j=await apiGet('/v1/balance?wallet='+encodeURIComponent(a.replace(/^qnk/,''))); const bal=Number(j.data.balance||0)/1e10;
         done('a','Balance for <b>'+shortA(a)+'</b>: <b>'+bal.toLocaleString(undefined,{maximumFractionDigits:4})+' SIGIL</b>'); return; }
-      if(/supply|minted|max supply/.test(ql)){ const j=await apiGet('/v1/supply'); const d=j.data; done('a','Native supply: <b>'+(Number(d.native_supply)/1e10).toLocaleString(undefined,{maximumFractionDigits:0})+' SIGIL</b> of 21,000,000 max ('+(d.minted_pct*100).toFixed(3)+'% minted).'); return; }
-      if(/height|tip|how tall|status|block/.test(ql)){ const j=await apiGet('/v1/mining/challenge'); done('a','Chain tip: <b>height '+(j.height||0).toLocaleString()+'</b> · net '+(Number(j.net_hps||0)/1e6).toFixed(1)+' MH/s.'); return; }
-      if(/pool|liquidity|dex/.test(ql)){ const j=await apiGet('/v1/pools'); const p=j.pools||j.data||[]; done('a', p.length? '<b>'+p.length+' pools</b>: '+p.map(x=>esc(x.pair||x.id||'?')).join(', ') : 'No DEX pools live on SIGIL yet.'); return; }
-      if(/min(e|ing|er)|hashrate|hps/.test(ql)){ const j=await apiGet('/v1/mining/miners'); const d=j.data; done('a','Mining: <b>'+d.live_miners+' live miners</b>, net <b>'+(d.net_hps/1e6).toFixed(1)+' MH/s</b>, '+d.blocks_accepted.toLocaleString()+' blocks accepted @ height '+d.height.toLocaleString()+'.'); return; }
-      if(/nation|welfare|stipend|citizen/.test(ql)){ const j=await apiGet('/v1/nation/status'); const d=j.data; done('a','SIGIL Nation: welfare <b>'+(Number(d.treasury_glyphs)/1e10).toLocaleString(undefined,{maximumFractionDigits:2})+' SIGIL</b> treasury, $'+(Number(d.stipend_usd_e8)/1e8).toFixed(2)+' '+d.payout_asset+' stipend every '+d.claim_interval_blocks.toLocaleString()+' blocks ('+(d.welfare_bps/100)+'% dev-fee carve).'); return; }
+      if(/^(supply|minted|max supply)$/.test(ql)){ const j=await apiGet('/v1/supply'); const d=j.data; done('a','Native supply: <b>'+(Number(d.native_supply)/1e10).toLocaleString(undefined,{maximumFractionDigits:0})+' SIGIL</b> of 21,000,000 max ('+(d.minted_pct).toFixed(3)+'% minted).'); return; }
+      if(/^(height|tip|status|block)$/.test(ql)){ const j=await apiGet('/v1/mining/challenge'); done('a','Chain tip: <b>height '+(j.height||0).toLocaleString()+'</b> · net '+(Number(j.net_hps||0)/1e6).toFixed(1)+' MH/s.'); return; }
+      if(/^(pools?|liquidity|dex)$/.test(ql)){ const j=await apiGet('/v1/pools'); const p=j.pools||j.data||[]; done('a', p.length? '<b>'+p.length+' pools</b>: '+p.map(x=>esc(x.pair||x.id||'?')).join(', ') : 'No DEX pools live on SIGIL yet.'); return; }
+      if(/^(mining|miners|hashrate)$/.test(ql)){ const j=await apiGet('/v1/mining/miners'); const d=j.data; done('a','Mining: <b>'+d.live_miners+' live miners</b>, net <b>'+(d.net_hps/1e6).toFixed(1)+' MH/s</b>, '+d.blocks_accepted.toLocaleString()+' blocks accepted @ height '+d.height.toLocaleString()+'.'); return; }
+      if(/^(nation|welfare|stipend)$/.test(ql)){ const j=await apiGet('/v1/nation/status'); const d=j.data; done('a','SIGIL Nation: welfare <b>'+(Number(d.treasury_glyphs)/1e10).toLocaleString(undefined,{maximumFractionDigits:2})+' SIGIL</b> treasury, $'+(Number(d.stipend_usd_e8)/1e8).toFixed(2)+' '+d.payout_asset+' stipend every '+d.claim_interval_blocks.toLocaleString()+' blocks ('+(d.welfare_bps/100)+'% dev-fee carve).'); return; }
       if(/\bdied\b|passed away|passed on|lost (my|our|her|him)|funeral|griev|\bgrief\b|\brip\b|no longer with us|miss (her|him|them|my)/.test(ql)){
         think.remove();
         add('a',"I'm sorry. That's a real loss, and it matters. If you'd like, the Nation can hold their memory — kept at this block for as long as the chain stands. No rush, and only if you want to.");
         const c=addCard('<div class="h">🕯️ Hold a remembrance</div><div class="note" style="color:var(--dim);margin-top:2px">Open the commons and inscribe who or what you want remembered. No fee; it is not a transaction.</div><div class="btns" style="margin-top:10px"><button class="btn" data-a="open">Open remembrance</button></div>');
         c.querySelector('[data-a=open]').onclick=()=>openNationRemembrance(); return;
       }
-      if(ollamaModel){ const stat=body.querySelector('#aistat'); think.innerHTML='<span class="msg sys">· '+esc(ollamaModel)+' is thinking ·</span>';
-        try{ const ans=await askOllama(raw); done('a', esc(ans).replace(/\n/g,'<br>')); }
-        // NOTE the escaping: this string is single-quoted, so an apostrophe needs ONE
-        // backslash. It previously carried TWO (\\'), which JavaScript reads as an escaped
-        // BACKSLASH followed by a string-terminating quote — so the literal ended early, the
-        // rest of the line became syntax garbage, and the WHOLE 39k-character script block
-        // failed to parse with "missing ) after argument list". `boot()` never ran, so SIGIL
-        // OS sat on its boot screen forever with zero log lines. One character, entire app.
-        catch(err){ done('a','⚠️ couldn\'t reach your local model ('+(err&&err.message||err)+'). If ollama is running, restart it with <b>OLLAMA_ORIGINS=&#39;*&#39; ollama serve</b> so this page is allowed to call it.'); }
-        return; }
-      done('a',"I can run <b>balance, supply, height, pools, mining, nation, send</b> now. For free-form chat, start your local model — tap <b>🧠 how to enable free chat</b> above.");
-    }catch(e){ done('a','⚠️ '+(e&&e.message||e)); }
+      think.remove();
+      if(ollamaModel && ollamaModels.length){ await chat(raw); return; }
+      add('a',"I can run <b>balance, supply, height, pools, mining, nation, send</b> now. For free-form chat, connect a model — tap <b>how to enable chat</b> above.");
+    }catch(e){ think.remove(); add('a','⚠️ '+esc(e&&e.message||e)); }
   }
-  body.querySelector('#aisend').onclick=run;
-  body.querySelector('#aiin').addEventListener('keydown',e=>{ if(e.key==='Enter') run(); });
-  setTimeout(()=>body.querySelector('#aiin').focus(),50);
+  sendBtn.onclick=run;
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); run(); } });
+  setTimeout(()=>inp.focus(),50);
 }
 
 /* ============================ TERMINAL — flux-aether ============================

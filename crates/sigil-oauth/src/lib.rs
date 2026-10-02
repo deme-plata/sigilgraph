@@ -62,6 +62,11 @@ fn now() -> u64 {
 fn b3(data: &[u8]) -> [u8; 32] {
     *blake3::hash(data).as_bytes()
 }
+/// 32 bytes from the OS-seeded CSPRNG — the same source `Keypair::generate` uses, exposed
+/// so a caller that must PERSIST the seed (a wallet the user backs up) can hold it.
+pub fn random_seed() -> [u8; 32] {
+    rand32()
+}
 fn rand32() -> [u8; 32] {
     use rand::Rng;
     let mut s = [0u8; 32];

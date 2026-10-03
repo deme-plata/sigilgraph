@@ -944,7 +944,7 @@ pub(crate) fn chat_client(route: &AiRoute) -> Result<reqwest::blocking::Client, 
 }
 
 /// What the ledger records as the destination: host plus how it travelled.
-fn route_label(base: &str, route: &AiRoute) -> String {
+pub(crate) fn route_label(base: &str, route: &AiRoute) -> String {
     match route {
         AiRoute::Proxied(p) => format!("{base} via Tor ({p})"),
         AiRoute::Direct => format!("{base} (direct: provider sees this IP)"),
@@ -1027,7 +1027,17 @@ pub(crate) fn privacy_report() -> String {
     format!("{where_}\n{body}\n   ledger: {}", path.display())
 }
 
-/// Restore placeholders inside a JSON value (tool-call arguments from an/// Restore placeholders inside a JSON value (tool-call arguments from an
+/// Ledger one more outbound request of an agent turn (a follow-up step that carries
+/// tool results back to the off-box model).
+pub(crate) fn veil_ledger_step(messages: &[serde_json::Value], destination: &str,
+                               findings: &[(sigil_veil::Kind, String)], ledger: Option<&std::path::Path>) {
+    if let Some(path) = ledger {
+        let sent = serde_json::to_string(messages).unwrap_or_default();
+        let _ = sigil_veil::ledger_append(path, &sigil_veil::LedgerEntry::new(destination, &sent, findings));
+    }
+}
+
+/// Restore placeholders inside a JSON value (tool-call arguments from an/// Restore placeholders inside a JSON value (tool-call arguments from an/// Restore placeholders inside a JSON value (tool-call arguments from an
 /// off-box model) so the tool layer acts on the real address, never `[QNK_1]`.
 pub(crate) fn rehydrate_json(v: &mut serde_json::Value, map: &sigil_veil::VeilMap) {
     match v {

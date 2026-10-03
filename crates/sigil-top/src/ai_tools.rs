@@ -205,44 +205,90 @@ pub(crate) fn create_wallet() -> Result<(String, String), String> {
 /// stop at an action and ask the user. Any failure to start falls back to the plain stream.
 pub(crate) fn chat_agent(model: &str, history: &[(String, String)], user: &str, extra_system: &str,
                          base: &str, tx: &Sender<StreamEv>) {
+    let route = flux_moe::current_ai_route();
+    chat_agent_at(model, history, user, extra_system, base, &flux_moe::ollama_base(), &route,
+                  Some(&flux_moe::veil_ledger_path()), tx)
+}
+
+/// [`chat_agent`] with the model endpoint, route and ledger injected (testable).
+///
+/// SIGIL Veil applies whenever `route` is not Local: this loop is the AI tab's REAL
+/// path, and it used to build its own request and post it straight to the endpoint —
+/// bypassing the gate, the Tor route and the ledger that `chat`/`chat_stream` had
+/// (found 2026-10-03 while wiring L4; never released). Now every step is gated:
+/// the first request through `veil_outbound`, the model's tool-call arguments are
+/// restored before a tool runs, tool RESULTS are pseudonymised before they go back,
+/// streamed answers are restored for the screen, and every step is ledgered.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &str, extra_system: &str,
+                            base: &str, ollama_base: &str, route: &flux_moe::AiRoute,
+                            ledger: Option<&std::path::Path>, tx: &Sender<StreamEv>) {
     use std::io::BufRead;
+    if let flux_moe::AiRoute::Refuse(msg) = route { let _ = tx.send(StreamEv::Whole(msg.clone())); return; }
     let system = format!("{}{}{}", flux_moe::system_prompt(), extra_system, TOOLS_SYSTEM);
     let mut messages = vec![json!({"role":"system","content":system})];
     for (role, content) in history { messages.push(json!({"role": role, "content": content})); }
     messages.push(json!({"role":"user","content":user}));
-    let url = format!("{}/api/chat", flux_moe::ollama_base());
+    let remote = !matches!(route, flux_moe::AiRoute::Local);
+    let dest = flux_moe::route_label(ollama_base, route);
+    let mut veil = if remote {
+        match flux_moe::veil_outbound(&mut messages, &dest, ledger) {
+            Ok(m) => Some(m),
+            Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; }
+        }
+    } else { None };
+    let http = match flux_moe::chat_client(route) { Ok(c) => c, Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; } };
+    let url = format!("{}/api/chat", ollama_base);
     for step in 0..MAX_STEPS {
         let body = json!({"model": model, "messages": messages, "stream": true, "tools": tool_defs()});
-        let resp = match flux_moe::client().post(&url).json(&body).send() {
+        let resp = match http.post(&url).json(&body).send() {
             Ok(r) if r.status().is_success() => r,
             _ if step == 0 => return flux_moe::chat_stream(model, history, user, extra_system, tx),
             Ok(r) => { let _ = tx.send(StreamEv::Whole(format!("⚠ model error {} after a tool call", r.status()))); return; }
             Err(e) => { let _ = tx.send(StreamEv::Whole(format!("⚠ {e}"))); return; }
         };
         let mut calls: Vec<Value> = Vec::new();
+        // `text` stays in the model's own (placeholder) form — it goes back into
+        // `messages`; only what reaches the SCREEN is restored.
         let mut text = String::new();
         let mut done_ev = None;
+        let mut screen = sigil_veil::StreamRehydrator::new();
         for line in std::io::BufReader::new(resp).lines() {
             let Ok(line) = line else { break };
             for ev in flux_moe::parse_stream_line(&line) {
                 match ev {
                     StreamEv::ToolCalls(c) => calls.extend(c),
                     StreamEv::Done { .. } => done_ev = Some(ev),
-                    StreamEv::Token(t) => { text.push_str(&t); if tx.send(StreamEv::Token(t)).is_err() { return; } }
+                    StreamEv::Token(t) => {
+                        text.push_str(&t);
+                        let shown = match &veil { Some(m) => screen.push(&t, m), None => t };
+                        if !shown.is_empty() && tx.send(StreamEv::Token(shown)).is_err() { return; }
+                    }
+                    StreamEv::Thinking(t) => {
+                        let shown = match &veil { Some(m) => sigil_veil::rehydrate(&t, m), None => t };
+                        if tx.send(StreamEv::Thinking(shown)).is_err() { return; }
+                    }
                     other => { if tx.send(other).is_err() { return; } }
                 }
             }
             if done_ev.is_some() { break; }
+        }
+        if let Some(m) = &veil {
+            let tail = screen.finish(m);
+            if !tail.is_empty() && tx.send(StreamEv::Token(tail)).is_err() { return; }
         }
         if calls.is_empty() {
             let _ = tx.send(done_ev.unwrap_or(StreamEv::Done { eval_count: 0, eval_ns: 0, prompt_count: 0, reason: "interrupted".into() }));
             return;
         }
         messages.push(json!({"role":"assistant","content": text, "tool_calls": calls}));
+        let mut step_findings: Vec<(sigil_veil::Kind, String)> = Vec::new();
         for c in &calls {
             let name = c.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("").to_string();
             let args = c.pointer("/function/arguments").cloned().unwrap_or(json!({}));
-            let args = match args { Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})), v => v };
+            let mut args = match args { Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})), v => v };
+            // the tool acts on the REAL address, never on "[QNK_1]"
+            if let Some(m) = &veil { flux_moe::rehydrate_json(&mut args, m); }
             if is_action(&name) {
                 let _ = tx.send(StreamEv::Confirm { summary: action_summary(&name), name, args });
                 return;
@@ -251,8 +297,15 @@ pub(crate) fn chat_agent(model: &str, history: &[(String, String)], user: &str, 
             if tx.send(StreamEv::ToolRan(receipt)).is_err() { return; }
             let mut s = result.to_string();
             s.truncate(2000);
+            // ...and the result goes back to an off-box model with its identifiers hidden
+            if let Some(m) = veil.as_mut() {
+                let (hidden, f) = sigil_veil::pseudonymize(&s, m);
+                step_findings.extend(f);
+                s = hidden;
+            }
             messages.push(json!({"role":"tool","tool_name": name, "content": s}));
         }
+        if remote { flux_moe::veil_ledger_step(&messages, &dest, &step_findings, ledger); }
     }
     let _ = tx.send(StreamEv::Whole("⚠ stopped after 4 tool steps without a final answer — ask more narrowly.".into()));
 }
@@ -260,6 +313,69 @@ pub(crate) fn chat_agent(model: &str, history: &[(String, String)], user: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AI tab's REAL path, end to end, against a fake OFF-BOX model server: the
+    /// first request and the follow-up carrying the tool result must both leave
+    /// without the wallet address; the tool must act on the real address; the
+    /// screen must show the real address; both steps must be ledgered.
+    #[test]
+    fn agent_loop_to_an_off_box_model_goes_through_veil() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        const W: &str = "4973498a9865b291636faef205f728a49d98890f001e9e806479043f038ebf6c";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let replies = vec![
+            format!("{}\n{}\n",
+                json!({"message":{"content":"","tool_calls":[{"function":{"name":"sigil_balance","arguments":{"wallet":"[HEX_1]"}}}]}}),
+                json!({"done":true})),
+            format!("{}\n{}\n{}\n",
+                json!({"message":{"content":"Balance of [HE"}}), json!({"message":{"content":"X_1] is unknown."}}), json!({"done":true,"done_reason":"stop"})),
+        ];
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for reply in replies {
+                let (c, _) = listener.accept().unwrap();
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() { break; }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); }
+                }
+                let mut body = vec![0u8; len];
+                r.read_exact(&mut body).unwrap();
+                bodies.push(String::from_utf8(body).unwrap());
+                let mut c = c;
+                let _ = c.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", reply.len(), reply).as_bytes());
+            }
+            bodies
+        });
+        let dir = std::env::temp_dir().join(format!("veil-agent-{}", std::process::id()));
+        let ledger = dir.join("veil-egress.jsonl");
+        let (tx, rx) = std::sync::mpsc::channel();
+        chat_agent_at("m", &[], &format!("what is the balance of {W}?"), "", "http://127.0.0.1:1",
+                      &format!("http://127.0.0.1:{port}"), &flux_moe::AiRoute::Direct, Some(&ledger), &tx);
+        drop(tx);
+        let mut shown = String::new();
+        let mut receipts = Vec::new();
+        for ev in rx {
+            match ev {
+                StreamEv::Token(t) => shown.push_str(&t),
+                StreamEv::ToolRan(r) => receipts.push(r),
+                _ => {}
+            }
+        }
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("[HEX_1]") && !bodies[0].contains(W), "first request leaked: {}", bodies[0]);
+        assert!(bodies[1].contains("\"role\":\"tool\"") && !bodies[1].contains(W), "tool result leaked: {}", bodies[1]);
+        assert!(receipts.iter().any(|r| r.contains("balance") && !r.contains("no wallet given")),
+            "the tool must have acted on the REAL wallet, not fallen back to the node's own: {receipts:?}");
+        assert_eq!(shown, format!("Balance of {W} is unknown."), "the screen shows the real address");
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 2, "both steps ledgered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn address_guards_reject_what_qwen3_8b_actually_produced() {

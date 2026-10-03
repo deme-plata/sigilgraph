@@ -24,6 +24,9 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+/// Veil Sessions: pay for remote AI with one ordinary shielded payment (L2).
+pub mod session;
+
 /// What a span of text was recognised as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {

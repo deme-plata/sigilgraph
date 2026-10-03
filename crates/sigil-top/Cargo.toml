@@ -56,6 +56,9 @@ sigil-net       = { path = "../sigil-net" }
 # Wallet login: OAuth2 (auth-code + PKCE), the wallet signs the auth request
 # (no password). DNS-anchored, post-quantum-ready.
 sigil-oauth     = { path = "../sigil-oauth" }
+# SIGIL Veil — egress gate for the one AI path that can leave the machine
+# (SIGIL_OLLAMA_ALLOW_REMOTE=1): refuse secrets, pseudonymise identifiers, ledger.
+sigil-veil      = { path = "../sigil-veil" }
 # Auto-update "the flux way": BLAKE3 content-hash verify + cross-platform self-replace
 # (rename-self trick on Windows) so a running binary hot-swaps itself from the release channel.
 blake3       = "1"

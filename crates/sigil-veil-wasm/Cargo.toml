@@ -1,0 +1,17 @@
+[package]
+name = "sigil-veil-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser skin over sigil-veil: the SIGIL OS AI app gates every message bound for an off-device model endpoint through the same tested Rust gate sigil-top uses."
+
+[dependencies]
+sigil-veil = { path = "../sigil-veil" }
+wasm-bindgen = "0.2"
+
+[lib]
+# rlib ONLY — same reason as sigil-shield (measured 2026-08-26: a cdylib in the
+# manifest drops the extra-filename hash, every build rewrites one unhashed rlib
+# and its consumers can never converge). The .wasm is built with
+# `cargo rustc --crate-type cdylib` by scripts/build-veil-wasm.sh.
+crate-type = ["rlib"]

@@ -9199,6 +9199,7 @@ dependencies = [
  "sigil-synctune",
  "sigil-tip-proof",
  "sigil-tx",
+ "sigil-veil",
  "tokio",
  "winterfell",
  "zstd",
@@ -9289,6 +9290,14 @@ name = "sigil-veil"
 version = "5.1.1"
 dependencies = [
  "blake3",
+]
+
+[[package]]
+name = "sigil-veil-wasm"
+version = "5.1.1"
+dependencies = [
+ "sigil-veil",
+ "wasm-bindgen",
 ]
 
 [[package]]

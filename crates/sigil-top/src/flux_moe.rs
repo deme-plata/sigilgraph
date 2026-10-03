@@ -595,6 +595,8 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
         messages.push(serde_json::json!({"role": role, "content": content}));
     }
     messages.push(serde_json::json!({"role":"user","content":user}));
+    // SIGIL Veil: only when the model is OFF this machine (SIGIL_OLLAMA_ALLOW_REMOTE).
+    let veil = if ollama_is_local() { None } else { Some(veil_outbound(&mut messages, &ollama_base(), Some(&veil_ledger_path()))?) };
 
     // No `think` key unless the user explicitly asked for one: measured, forcing it
     // off is a regression and forcing it on is already ollama's default. `think` is
@@ -684,6 +686,7 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
         .and_then(|c| c.as_str())
         .map(strip_think_blocks)
         .unwrap_or_default();
+    let content = match &veil { Some(m) => sigil_veil::rehydrate(&content, m), None => content };
     if !content.is_empty() {
         return Ok(content);
     }
@@ -708,6 +711,7 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
         Err(format!("`{model}` produced no answer. {advice}"))
     } else {
         let peek: String = thinking.chars().take(400).collect();
+        let peek = match &veil { Some(m) => sigil_veil::rehydrate(&peek, m), None => peek };
         Ok(format!("(no final answer — {advice})\n\nIts reasoning so far:\n{peek}"))
     }
 }
@@ -773,6 +777,14 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
         messages.push(serde_json::json!({"role": role, "content": content}));
     }
     messages.push(serde_json::json!({"role":"user","content":user}));
+    let veil = if ollama_is_local() {
+        None
+    } else {
+        match veil_outbound(&mut messages, &ollama_base(), Some(&veil_ledger_path())) {
+            Ok(m) => Some(m),
+            Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; }
+        }
+    };
     let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": true });
     if let (Some(t), Some(o)) = (think_override(), body.as_object_mut()) {
         o.insert("think".to_string(), serde_json::Value::Bool(t));
@@ -788,11 +800,30 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
     };
     let mut got_any = false;
     let reader = std::io::BufReader::new(resp);
+    let mut answer_rh = sigil_veil::StreamRehydrator::new();
+    let mut think_rh = sigil_veil::StreamRehydrator::new();
     for line in reader.lines() {
         let Ok(line) = line else { break };
         for ev in parse_stream_line(&line) {
             got_any = true;
             let done = matches!(ev, StreamEv::Done { .. });
+            // Off-box model: placeholders become real values again, here, locally.
+            let ev = match (&veil, ev) {
+                (None, ev) => ev,
+                (Some(m), StreamEv::Token(t)) => StreamEv::Token(answer_rh.push(&t, m)),
+                (Some(m), StreamEv::Thinking(t)) => StreamEv::Thinking(think_rh.push(&t, m)),
+                (Some(m), StreamEv::ToolCalls(mut calls)) => {
+                    for c in calls.iter_mut() { rehydrate_json(c, m); }
+                    StreamEv::ToolCalls(calls)
+                }
+                (Some(m), ev @ StreamEv::Done { .. }) => {
+                    let tail = answer_rh.finish(m);
+                    if !tail.is_empty() && tx.send(StreamEv::Token(tail)).is_err() { return; }
+                    ev
+                }
+                (Some(_), ev) => ev,
+            };
+            if let StreamEv::Token(t) | StreamEv::Thinking(t) = &ev { if t.is_empty() { continue; } }
             if tx.send(ev).is_err() { return; } // UI went away
             if done { return; }
         }
@@ -800,6 +831,74 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
     if !got_any { return fallback(tx); }
     // Stream ended without a `done` line (connection dropped mid-answer): close it honestly.
     let _ = tx.send(StreamEv::Done { eval_count: 0, eval_ns: 0, prompt_count: 0, reason: "interrupted".into() });
+}
+
+// ── SIGIL Veil: the egress gate on the one path that leaves the machine ──────
+//
+// The model runs on loopback by default and then nothing below runs. Only with
+// SIGIL_OLLAMA_ALLOW_REMOTE=1 and an off-box host does a request leave — and then:
+// a recovery phrase or labelled key in anything the user/tools wrote refuses the
+// request outright; every other identifier becomes a placeholder before the bytes
+// leave and is restored in the answer here; every send lands in a local ledger.
+
+/// `$SIGIL_TOP_HOME/veil-egress.jsonl` (default `~/.sigil-top/`) — "what did my AI send out?"
+pub(crate) fn veil_ledger_path() -> std::path::PathBuf {
+    std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .or_else(|| std::env::var("USERPROFILE").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("veil-egress.jsonl")
+}
+
+/// Gate a chat request bound for an OFF-BOX model, in place. System text
+/// (our prompt + signed skills) is pseudonymised but never refused; user,
+/// assistant and tool text is gated (hard stops refuse). Returns the map that
+/// rehydrates the answer, or the message to show instead of sending.
+pub(crate) fn veil_outbound(messages: &mut [serde_json::Value], destination: &str,
+                            ledger: Option<&std::path::Path>) -> Result<sigil_veil::VeilMap, String> {
+    let mut map = sigil_veil::VeilMap::new();
+    let mut findings: Vec<(sigil_veil::Kind, String)> = Vec::new();
+    for m in messages.iter_mut() {
+        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+        let Some(content) = m.get("content").and_then(|c| c.as_str()).map(str::to_string) else { continue };
+        let text = if role == "system" {
+            let (t, f) = sigil_veil::pseudonymize(&content, &mut map);
+            findings.extend(f);
+            t
+        } else {
+            match sigil_veil::gate(&content, &mut map) {
+                sigil_veil::Verdict::Send { text, findings: f } => { findings.extend(f); text }
+                sigil_veil::Verdict::Refuse { reasons } => {
+                    let what: Vec<&str> = reasons.iter().map(|k| match k {
+                        sigil_veil::Kind::Mnemonic => "a recovery phrase",
+                        _ => "a secret key",
+                    }).collect();
+                    return Err(format!(
+                        "🕶 Veil stopped this message: it contains {}, and the model is OFF this machine ({}). \
+                         Nothing was sent. Remove it — or use the on-device model (unset SIGIL_OLLAMA_ALLOW_REMOTE), \
+                         where nothing ever leaves.",
+                        what.join(" and "), destination));
+                }
+            }
+        };
+        if let Some(o) = m.as_object_mut() { o.insert("content".into(), serde_json::Value::String(text)); }
+    }
+    if let Some(path) = ledger {
+        let sent = serde_json::to_string(messages).unwrap_or_default();
+        let _ = sigil_veil::ledger_append(path, &sigil_veil::LedgerEntry::new(destination, &sent, &findings));
+    }
+    Ok(map)
+}
+
+/// Restore placeholders inside a JSON value (tool-call arguments from an
+/// off-box model) so the tool layer acts on the real address, never `[QNK_1]`.
+pub(crate) fn rehydrate_json(v: &mut serde_json::Value, map: &sigil_veil::VeilMap) {
+    match v {
+        serde_json::Value::String(s) => *s = sigil_veil::rehydrate(s, map),
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| rehydrate_json(x, map)),
+        serde_json::Value::Object(o) => o.values_mut().for_each(|x| rehydrate_json(x, map)),
+        _ => {}
+    }
 }
 
 /// Live machine load while a reply is generating: GPU via `nvidia-smi` (only meaningful when
@@ -1006,6 +1105,53 @@ pub(crate) fn pick_model_tiered(
 
 #[cfg(test)]
 mod tests {
+    /// SIGIL_AI_MODEL is process-global and cargo runs tests in parallel threads:
+    /// one test's remove_var landed mid-another's assert (explicit_choice_always_wins
+    /// failed in the suite, passed alone — 2026-10-03). Every test touching it holds this.
+    static AI_MODEL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) fn ai_model_env() -> std::sync::MutexGuard<'static, ()> {
+        AI_MODEL_ENV.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    // ── SIGIL Veil wiring ──
+    const VEIL_HEX: &str = "4973498a9865b291636faef205f728a49d98890f001e9e806479043f038ebf6c";
+
+    #[test]
+    fn veil_refuses_a_recovery_phrase_bound_off_box_and_sends_nothing() {
+        let dir = std::env::temp_dir().join(format!("veil-wire-{}", std::process::id()));
+        let ledger = dir.join("veil-egress.jsonl");
+        let mut msgs = vec![
+            serde_json::json!({"role":"system","content":"You are SIGIL's assistant."}),
+            serde_json::json!({"role":"user","content":"is this safe: abandon ability able about above absent absorb abstract absurd abuse access accident"}),
+        ];
+        let r = veil_outbound(&mut msgs, "http://gpu.example:11434", Some(&ledger));
+        assert!(r.unwrap_err().contains("recovery phrase"));
+        assert!(!ledger.exists(), "a refused request must not even be ledgered as sent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn veil_pseudonymises_and_ledgers_what_left() {
+        let dir = std::env::temp_dir().join(format!("veil-wire2-{}", std::process::id()));
+        let ledger = dir.join("veil-egress.jsonl");
+        let mut msgs = vec![
+            serde_json::json!({"role":"system","content":format!("Wallet in use: qnk{VEIL_HEX}. example seed = {VEIL_HEX}")}),
+            serde_json::json!({"role":"user","content":format!("why did my send to qnk{VEIL_HEX} fail? mail me at viktor@sigilgraph.org")}),
+        ];
+        let map = veil_outbound(&mut msgs, "http://gpu.example:11434", Some(&ledger)).expect("system text is never refused");
+        let wire = serde_json::to_string(&msgs).unwrap();
+        assert!(!wire.contains(VEIL_HEX) && !wire.contains("sigilgraph.org"), "{wire}");
+        assert!(wire.contains("[QNK_1]") && wire.contains("[EMAIL_1]"), "{wire}");
+        let line = std::fs::read_to_string(&ledger).unwrap();
+        assert!(line.contains("gpu.example") && !line.contains(VEIL_HEX));
+        // the answer and a tool call come back with real values
+        assert_eq!(sigil_veil::rehydrate("Resend to [QNK_1].", &map), format!("Resend to qnk{VEIL_HEX}."));
+        let mut call = serde_json::json!({"function":{"name":"balance","arguments":{"address":"[QNK_1]"}}});
+        rehydrate_json(&mut call, &map);
+        assert_eq!(call["function"]["arguments"]["address"], format!("qnk{VEIL_HEX}"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The on-device promise is enforced, not just documented: a REMOTE endpoint is
     /// refused and the localhost default used instead, unless the operator has also
     /// opted in explicitly. Pure — never touches the process-global env.
@@ -1248,6 +1394,7 @@ mod tests {
 
     #[test]
     fn big_gpu_gets_the_big_model() {
+        let _env = ai_model_env();
         std::env::remove_var("SIGIL_AI_MODEL");
         let hw = Hardware { vram_bytes: Some(24 * GIB), ram_bytes: Some(64 * GIB), gpu_name: Some("RTX 4090".into()) };
         assert_eq!(pick_model("qwen3:8b", Some("qwen3:4b"), &hw).0, "qwen3:8b");
@@ -1258,6 +1405,7 @@ mod tests {
 
     #[test]
     fn no_fallback_never_invents_one() {
+        let _env = ai_model_env();
         std::env::remove_var("SIGIL_AI_MODEL");
         let hw = Hardware { vram_bytes: None, ram_bytes: Some(8 * GIB), gpu_name: None };
         let (m, why) = pick_model("qwen3:8b", None, &hw);
@@ -1267,6 +1415,7 @@ mod tests {
 
     #[test]
     fn explicit_choice_always_wins() {
+        let _env = ai_model_env();
         std::env::set_var("SIGIL_AI_MODEL", "llama3:70b");
         let hw = Hardware { vram_bytes: None, ram_bytes: Some(4 * GIB), gpu_name: None };
         assert_eq!(pick_model("qwen3:8b", Some("qwen3:4b"), &hw).0, "llama3:70b");
@@ -1275,6 +1424,7 @@ mod tests {
 
     #[test]
     fn every_error_message_names_a_next_action() {
+        let _env = ai_model_env();
         // The whole point of the tab not dead-ending: each message says what to DO.
         let m404 = http_error_message(reqwest::StatusCode::NOT_FOUND, r#"{"error":"model 'qwen3:8b' not found"}"#, "qwen3:8b");
         assert!(m404.contains("F5") || m404.contains("ollama pull"), "{m404}");
@@ -1288,6 +1438,7 @@ mod tests {
     /// stays hermetic; run with `SIGIL_OLLAMA_LIVE=1` (+ `SIGIL_AI_MODEL=<tag>`).
     #[test]
     fn live_ollama_roundtrip() {
+        let _env = ai_model_env();
         if std::env::var("SIGIL_OLLAMA_LIVE").as_deref() != Ok("1") {
             eprintln!("skipped: set SIGIL_OLLAMA_LIVE=1 to run against a real ollama");
             return;
@@ -1354,6 +1505,7 @@ mod oob_tests {
 
     #[test]
     fn small_tier_only_for_phones_and_tiny_boxes() {
+        let _env = crate::flux_moe::tests::ai_model_env();
         std::env::remove_var("SIGIL_AI_MODEL");
         std::env::remove_var("TERMUX_VERSION");
         let saved = std::env::var("PREFIX").ok();

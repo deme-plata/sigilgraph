@@ -438,7 +438,26 @@ pub fn gate(text: &str, map: &mut VeilMap) -> Verdict {
     Verdict::Send { text: out, findings }
 }
 
-/// Put the real values back into a remote answer. Unknown placeholders are left
+/// Pseudonymise WITHOUT refusing — for text the user didn't write (system
+/// prompts, skill text) where a hard stop would lock the feature: hard-stop kinds
+/// are replaced like everything else, so the value still never leaves.
+pub fn pseudonymize(text: &str, map: &mut VeilMap) -> (String, Vec<(Kind, String)>) {
+    let found = scan(text);
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    let mut findings = Vec::new();
+    for f in &found {
+        out.push_str(&text[last..f.start]);
+        let p = map.placeholder_for(f.kind, &text[f.start..f.end]);
+        findings.push((f.kind, p.clone()));
+        out.push_str(&p);
+        last = f.end;
+    }
+    out.push_str(&text[last..]);
+    (out, findings)
+}
+
+/// Put the real values back into a remote answer./// Put the real values back into a remote answer. Unknown placeholders are left
 /// as they are (the model may invent `[ADDR_9]`; that must not crash or guess).
 pub fn rehydrate(answer: &str, map: &VeilMap) -> String {
     let mut out = String::with_capacity(answer.len());
@@ -465,7 +484,45 @@ pub fn rehydrate(answer: &str, map: &VeilMap) -> String {
     out
 }
 
-/// One line of the egress ledger.
+/// Rehydrate a STREAMED answer. Tokens arrive in arbitrary pieces, so a
+/// placeholder can be split ("[HE" + "X_1]"); text from an unmatched `[` is
+/// held back until it closes or grows past any placeholder's length.
+#[derive(Debug, Default)]
+pub struct StreamRehydrator {
+    held: String,
+}
+
+/// Longest placeholder we ever mint is "[MNEMONIC_99999]"; anything longer than
+/// this inside brackets is ordinary text and is released.
+const MAX_PLACEHOLDER: usize = 24;
+
+impl StreamRehydrator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed a chunk; returns the text that can be shown now.
+    pub fn push(&mut self, chunk: &str, map: &VeilMap) -> String {
+        self.held.push_str(chunk);
+        // Everything up to the last '[' that is still open can go out; the open
+        // tail stays held unless it is already too long to be a placeholder.
+        let cut = match self.held.rfind('[') {
+            Some(open) if !self.held[open..].contains(']') && self.held.len() - open <= MAX_PLACEHOLDER => open,
+            _ => self.held.len(),
+        };
+        let ready: String = self.held[..cut].to_string();
+        self.held.drain(..cut);
+        rehydrate(&ready, map)
+    }
+
+    /// End of stream: release whatever is held.
+    pub fn finish(&mut self, map: &VeilMap) -> String {
+        let rest = std::mem::take(&mut self.held);
+        rehydrate(&rest, map)
+    }
+}
+
+/// One line of the egress ledger./// One line of the egress ledger.
 #[derive(Debug, Clone)]
 pub struct LedgerEntry {
     pub ts: u64,
@@ -640,9 +697,40 @@ mod tests {
     }
 
     #[test]
+    fn pseudonymize_never_refuses_but_still_hides() {
+        let mut m = VeilMap::new();
+        let (out, f) = pseudonymize(&format!("example: seed = {HEX}"), &mut m);
+        assert_eq!(out, "example: seed = [SECRET_1]");
+        assert_eq!(f[0].0, Kind::SecretKey);
+    }
+
+    #[test]
     fn rehydrate_leaves_invented_placeholders_and_brackets() {
         let m = VeilMap::new();
         assert_eq!(rehydrate("see [ADDR_9] and [1] and [unclosed", &m), "see [ADDR_9] and [1] and [unclosed");
+    }
+
+    #[test]
+    fn streamed_placeholders_split_across_chunks_are_restored() {
+        let (_, _, m) = send(&format!("tx {HEX} to qnk{HEX}"));
+        let chunks = ["Check [H", "EX_1", "] then send to [QN", "K_1]. Also [not a placeholder at all, just text] ok", " [ADDR_7] [", "end"];
+        let mut r = StreamRehydrator::new();
+        let mut out = String::new();
+        for c in chunks {
+            out.push_str(&r.push(c, &m));
+        }
+        out.push_str(&r.finish(&m));
+        assert_eq!(out, format!("Check {HEX} then send to qnk{HEX}. Also [not a placeholder at all, just text] ok [ADDR_7] [end"));
+    }
+
+    #[test]
+    fn stream_rehydrator_does_not_hold_ordinary_text() {
+        let m = VeilMap::new();
+        let mut r = StreamRehydrator::new();
+        assert_eq!(r.push("hello ", &m), "hello ");
+        assert_eq!(r.push("world", &m), "world");
+        assert_eq!(r.push(" [x", &m), " ");
+        assert_eq!(r.finish(&m), "[x");
     }
 
     #[test]

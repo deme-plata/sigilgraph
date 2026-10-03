@@ -206,8 +206,10 @@ pub(crate) fn create_wallet() -> Result<(String, String), String> {
 pub(crate) fn chat_agent(model: &str, history: &[(String, String)], user: &str, extra_system: &str,
                          base: &str, tx: &Sender<StreamEv>) {
     let route = flux_moe::current_ai_route();
+    let mode = flux_moe::rewrite_mode();
+    let rewriter = if matches!(route, flux_moe::AiRoute::Local) || mode == flux_moe::RewriteMode::Off { None } else { flux_moe::find_rewriter() };
     chat_agent_at(model, history, user, extra_system, base, &flux_moe::ollama_base(), &route,
-                  Some(&flux_moe::veil_ledger_path()), tx)
+                  Some(&flux_moe::veil_ledger_path()), rewriter.as_ref(), mode, tx)
 }
 
 /// [`chat_agent`] with the model endpoint, route and ledger injected (testable).
@@ -222,15 +224,37 @@ pub(crate) fn chat_agent(model: &str, history: &[(String, String)], user: &str, 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &str, extra_system: &str,
                             base: &str, ollama_base: &str, route: &flux_moe::AiRoute,
-                            ledger: Option<&std::path::Path>, tx: &Sender<StreamEv>) {
+                            ledger: Option<&std::path::Path>, rewriter: Option<&flux_moe::Rewriter>,
+                            mode: flux_moe::RewriteMode, tx: &Sender<StreamEv>) {
     use std::io::BufRead;
     if let flux_moe::AiRoute::Refuse(msg) = route { let _ = tx.send(StreamEv::Whole(msg.clone())); return; }
     let system = format!("{}{}{}", flux_moe::system_prompt(), extra_system, TOOLS_SYSTEM);
-    let mut messages = vec![json!({"role":"system","content":system})];
-    for (role, content) in history { messages.push(json!({"role": role, "content": content})); }
-    messages.push(json!({"role":"user","content":user}));
     let remote = !matches!(route, flux_moe::AiRoute::Local);
-    let dest = flux_moe::route_label(ollama_base, route);
+    // L4: an off-box model gets ONE de-identified question rewritten on this device —
+    // no history, not the user's own wording. Shown in the transcript, then gated as usual.
+    let rewritten = if remote && mode != flux_moe::RewriteMode::Off {
+        rewriter.and_then(|rw| flux_moe::rewrite_with(rw, history, user))
+    } else { None };
+    if remote && mode == flux_moe::RewriteMode::Require && rewritten.is_none() {
+        let _ = tx.send(StreamEv::Whole("🕶 Not sent: SIGIL_AI_REWRITE=require and no on-device model could rewrite the question \
+            (none installed on this device, or it failed). Install a small local model (e.g. qwen3:1.7b) or relax the setting.".into()));
+        return;
+    }
+    let mut messages = vec![json!({"role":"system","content":system})];
+    match &rewritten {
+        Some(q) => {
+            let _ = tx.send(StreamEv::ToolRan(format!("🕶 rewritten on this device before it left — the model is asked only: {q}")));
+            messages.push(json!({"role":"user","content":q}));
+        }
+        None => {
+            if remote && mode == flux_moe::RewriteMode::Auto {
+                let _ = tx.send(StreamEv::ToolRan("🕶 no on-device rewriter — sending your words with identifiers hidden (install qwen3:1.7b locally to send an anonymous rewrite instead)".into()));
+            }
+            for (role, content) in history { messages.push(json!({"role": role, "content": content})); }
+            messages.push(json!({"role":"user","content":user}));
+        }
+    }
+    let dest = format!("{}{}", flux_moe::route_label(ollama_base, route), if rewritten.is_some() { " [rewritten on-device]" } else { "" });
     let mut veil = if remote {
         match flux_moe::veil_outbound(&mut messages, &dest, ledger) {
             Ok(m) => Some(m),
@@ -314,6 +338,76 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
 mod tests {
     use super::*;
 
+    /// Minimal HTTP server: answers each accepted request with the next reply and
+    /// returns the request bodies it saw.
+    fn fake_http(replies: Vec<(&'static str, String)>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for (ctype, reply) in replies {
+                let Ok((c, _)) = listener.accept() else { break };
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" { break; }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap_or(0); }
+                }
+                let mut body = vec![0u8; len];
+                let _ = r.read_exact(&mut body);
+                bodies.push(String::from_utf8_lossy(&body).to_string());
+                let mut c = c;
+                let _ = c.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", reply.len(), reply).as_bytes());
+            }
+            bodies
+        });
+        (port, h)
+    }
+
+    #[test]
+    fn off_box_model_receives_only_the_on_device_rewrite() {
+        let personal = "I'm Viktor, I live in Frederikshavn and my mum says my wallet send fails with HTTP 413 — why?";
+        let history = vec![("user".to_string(), "earlier I told you my address is Rådhusgade 3".to_string()),
+                           ("assistant".to_string(), "noted".to_string())];
+        let (rw_port, rw) = fake_http(vec![("application/json",
+            json!({"message":{"content":"Why would a cryptocurrency wallet's send request fail with HTTP 413?"},"done":true}).to_string())]);
+        let (m_port, model_srv) = fake_http(vec![("application/x-ndjson",
+            format!("{}\n{}\n", json!({"message":{"content":"Payload too large: the body exceeds a proxy limit."}}), json!({"done":true})))]);
+        let dir = std::env::temp_dir().join(format!("veil-rw-{}", std::process::id()));
+        let ledger = dir.join("veil-egress.jsonl");
+        let rewriter = flux_moe::Rewriter { base: format!("http://127.0.0.1:{rw_port}"), model: "qwen3:1.7b".into() };
+        let (tx, rx) = std::sync::mpsc::channel();
+        chat_agent_at("m", &history, personal, "", "http://127.0.0.1:1", &format!("http://127.0.0.1:{m_port}"),
+                      &flux_moe::AiRoute::Direct, Some(&ledger), Some(&rewriter), flux_moe::RewriteMode::Auto, &tx);
+        drop(tx);
+        let events: Vec<StreamEv> = rx.into_iter().collect();
+        let to_rewriter = rw.join().unwrap();
+        let to_model = model_srv.join().unwrap();
+        assert!(to_rewriter[0].contains("Frederikshavn") && to_rewriter[0].contains("Rådhusgade"), "the ON-DEVICE rewriter gets the context");
+        let wire = &to_model[0];
+        assert!(wire.contains("Why would a cryptocurrency wallet"), "{wire}");
+        for leak in ["Viktor", "Frederikshavn", "Rådhusgade", "mum", "earlier I told you"] {
+            assert!(!wire.contains(leak), "{leak} reached the off-box model: {wire}");
+        }
+        assert!(events.iter().any(|e| matches!(e, StreamEv::ToolRan(t) if t.contains("rewritten on this device"))), "the user sees what was asked");
+        assert!(std::fs::read_to_string(&ledger).unwrap().contains("[rewritten on-device]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn require_mode_without_a_rewriter_sends_nothing() {
+        let (m_port, model_srv) = fake_http(vec![]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        chat_agent_at("m", &[], "anything", "", "http://127.0.0.1:1", &format!("http://127.0.0.1:{m_port}"),
+                      &flux_moe::AiRoute::Direct, None, None, flux_moe::RewriteMode::Require, &tx);
+        drop(tx);
+        let events: Vec<StreamEv> = rx.into_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, StreamEv::Whole(t) if t.contains("Not sent"))));
+        assert!(model_srv.join().unwrap().is_empty(), "the off-box model must never be contacted");
+    }
+
     /// The AI tab's REAL path, end to end, against a fake OFF-BOX model server: the
     /// first request and the follow-up carrying the tool result must both leave
     /// without the wallet address; the tool must act on the real address; the
@@ -355,7 +449,8 @@ mod tests {
         let ledger = dir.join("veil-egress.jsonl");
         let (tx, rx) = std::sync::mpsc::channel();
         chat_agent_at("m", &[], &format!("what is the balance of {W}?"), "", "http://127.0.0.1:1",
-                      &format!("http://127.0.0.1:{port}"), &flux_moe::AiRoute::Direct, Some(&ledger), &tx);
+                      &format!("http://127.0.0.1:{port}"), &flux_moe::AiRoute::Direct, Some(&ledger),
+                      None, flux_moe::RewriteMode::Off, &tx);
         drop(tx);
         let mut shown = String::new();
         let mut receipts = Vec::new();

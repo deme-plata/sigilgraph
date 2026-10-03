@@ -952,6 +952,183 @@ pub(crate) fn route_label(base: &str, route: &AiRoute) -> String {
     }
 }
 
+// ── SIGIL Veil L4: the provider must not recognise YOU in the question ──────
+//
+// Hiding identifiers is not enough: zkAPI's own write-up says sessions "may be re-linked
+// by the inference provider if the same personal details, writing style, reused
+// conversation history, or project documents are presented", and names local models as
+// the mitigation without building it. Here: when the model is off-box and a small model
+// runs ON this device, the latest message (with local context) is rewritten into ONE
+// self-contained, de-identified question, and only that leaves — no history.
+
+pub(crate) const REWRITE_SYSTEM: &str = "You prepare a question for an outside expert who must not learn who is asking. \
+Rewrite the user's LATEST request as ONE self-contained question. Keep every fact the expert needs to answer \
+correctly: numbers, amounts, error messages, code, technical terms, placeholders like [HEX_1]. Remove names of \
+people, places, employers, dates and personal anecdotes, and anything else that identifies the asker. Use plain, \
+neutral wording, not the user's own style. Output ONLY the rewritten question.";
+
+/// The on-device model that rewrites outbound questions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rewriter {
+    pub base: String,
+    pub model: String,
+}
+
+/// `SIGIL_AI_REWRITE`: "0|off|false|no" disables, "require" refuses to send when a
+/// rewrite cannot be made, anything else = auto (use one when available).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RewriteMode { Off, Auto, Require }
+
+pub(crate) fn rewrite_mode_from(v: Option<&str>) -> RewriteMode {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("0") | Some("off") | Some("false") | Some("no") => RewriteMode::Off,
+        Some("require") | Some("required") | Some("strict") => RewriteMode::Require,
+        _ => RewriteMode::Auto,
+    }
+}
+
+/// Pure: the rewriter endpoint. It sees the RAW question, so it must be on this
+/// device — a non-loopback URL is refused (None), never used.
+pub(crate) fn rewriter_base_from(v: Option<&str>) -> Option<String> {
+    let base = v.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("http://localhost:11434").trim_end_matches('/').to_string();
+    host_of(&base).filter(|h| is_loopback_host(h)).map(|_| base)
+}
+
+/// Pure: which installed model rewrites. Small and fast first — this is a
+/// paraphrase, not an answer.
+pub(crate) fn pick_rewriter(models: &[String], forced: Option<&str>) -> Option<String> {
+    if let Some(f) = forced.map(str::trim).filter(|f| !f.is_empty()) {
+        return Some(f.to_string());
+    }
+    // Measured on Epsilon 2026-10-03 (CPU, load ~60, think off): qwen3:0.6b rewrote in
+    // 25–32 s; qwen3:4b took 133–148 s AND ignored think:false, answering with its
+    // reasoning (which quoted the original). Small first.
+    for want in ["qwen3:1.7b", "qwen3:0.6b", "llama3.2:3b", "qwen3:4b", "qwen3:8b"] {
+        if let Some(m) = models.iter().find(|m| m.as_str() == want || m.starts_with(&format!("{want}-"))) {
+            return Some(m.clone());
+        }
+    }
+    models.first().cloned()
+}
+
+/// Pure: what the rewriter is asked — the last few turns as private context.
+pub(crate) fn rewrite_request_messages(history: &[(String, String)], user: &str) -> Vec<serde_json::Value> {
+    let ctx: Vec<String> = history.iter().rev().filter(|(r, _)| r == "user" || r == "assistant").take(6)
+        .collect::<Vec<_>>().into_iter().rev()
+        .map(|(r, c)| format!("{r}: {}", c.chars().take(600).collect::<String>())).collect();
+    let mut prompt = String::new();
+    if !ctx.is_empty() {
+        prompt.push_str("Conversation so far (private context, do not repeat personal details):\n");
+        prompt.push_str(&ctx.join("\n"));
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("Latest request:\n");
+    prompt.push_str(user);
+    vec![
+        serde_json::json!({"role":"system","content":REWRITE_SYSTEM}),
+        serde_json::json!({"role":"user","content":prompt}),
+    ]
+}
+
+/// Pure: accept a rewrite only if it looks like one question, not an essay, an
+/// answer or a refusal.
+pub(crate) fn clean_rewrite(raw: &str, original: &str) -> Option<String> {
+    let mut t = strip_think_blocks(raw).trim().to_string();
+    for label in ["Rewritten question:", "Rewritten request:", "Question:"] {
+        if let Some(rest) = t.strip_prefix(label) { t = rest.trim().to_string(); }
+    }
+    let t = t.trim_matches(|c| c == '"' || c == '“' || c == '”').trim().to_string();
+    let limit = (original.chars().count() * 4).max(600);
+    if t.is_empty() || t.chars().count() > limit {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    if lower.starts_with("i can't") || lower.starts_with("i cannot") || lower.starts_with("sorry") {
+        return None;
+    }
+    // A model that "thinks out loud" instead of rewriting (measured: qwen3:4b with
+    // think:false) talks ABOUT the task — and quotes the original while doing it.
+    // Whole-word match: a substring test rejected "wallet's" for containing "let's".
+    let words = format!(" {} ", lower.chars().map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "));
+    for meta in ["the user", "rewrite", "rewriting", "rewritten", "original", "let's", "steps", "self contained",
+                 "output only", "translating", "translation", "here is", "here's"] {
+        if words.contains(&format!(" {meta} ")) {
+            return None;
+        }
+    }
+    // Any 6-word run copied verbatim from the original means it was not rewritten.
+    let norm = |x: &str| x.to_lowercase().split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric())).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
+    let (o, r) = (norm(original), norm(&t));
+    if o.len() >= 6 {
+        let rj = format!(" {} ", r.join(" "));
+        if o.windows(6).any(|w| rj.contains(&format!(" {} ", w.join(" ")))) {
+            return None;
+        }
+    }
+    Some(t)
+}
+
+/// Proper-noun-like words of the original: Capitalised, not sentence-initial, not an
+/// ACRONYM (SIGIL, HTTP), at least 3 letters. Names, places, employers.
+pub(crate) fn proper_nouns(original: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut sentence_start = true;
+    for raw in original.split_whitespace() {
+        let w: String = raw.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+        let first_upper = w.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        let all_caps = w.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
+        if !sentence_start && first_upper && !all_caps && w.chars().count() >= 3 && w.chars().all(|c| c.is_alphabetic()) {
+            if !out.contains(&w) { out.push(w.clone()); }
+        }
+        sentence_start = raw.ends_with('.') || raw.ends_with('!') || raw.ends_with('?') || raw.ends_with(':');
+    }
+    out
+}
+
+/// Deterministic backstop for a small rewriter that misses some (measured: qwen3:0.6b
+/// kept "Aalborg Sygehus"): any proper noun of the original that survived becomes [NAME].
+pub(crate) fn scrub_carried_names(rewrite: &str, original: &str) -> (String, usize) {
+    let mut out = rewrite.to_string();
+    let mut n = 0;
+    for name in proper_nouns(original) {
+        if out.contains(&name) {
+            out = out.replace(&name, "[NAME]");
+            n += 1;
+        }
+    }
+    (out, n)
+}
+
+/// Ask the on-device rewriter. None on any failure (caller decides by mode).
+pub(crate) fn rewrite_with(rw: &Rewriter, history: &[(String, String)], user: &str) -> Option<String> {
+    // think:false + a short budget: a paraphrase needs no chain of thought, and on a CPU
+    // box thinking alone blew a 240 s budget (measured, qwen3:4b).
+    let body = serde_json::json!({"model": rw.model, "messages": rewrite_request_messages(history, user),
+        "stream": false, "think": false, "options": {"num_predict": 160, "temperature": 0.2}});
+    let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(2)).no_proxy().build().ok()?;
+    let r = http.post(format!("{}/api/chat", rw.base)).json(&body).send().ok()?;
+    if !r.status().is_success() { return None; }
+    let j: serde_json::Value = r.json().ok()?;
+    let t = clean_rewrite(j.pointer("/message/content")?.as_str()?, user)?;
+    Some(scrub_carried_names(&t, user).0)
+}
+
+/// The production rewriter: SIGIL_AI_REWRITE_URL (loopback only) + an installed
+/// small model (or SIGIL_AI_REWRITE_MODEL). None when there is no local model.
+pub(crate) fn find_rewriter() -> Option<Rewriter> {
+    let base = rewriter_base_from(std::env::var("SIGIL_AI_REWRITE_URL").ok().as_deref())?;
+    let forced = std::env::var("SIGIL_AI_REWRITE_MODEL").ok();
+    let models = if forced.as_deref().map(|f| !f.trim().is_empty()).unwrap_or(false) { Vec::new() } else { list_models_at(&base) };
+    let model = pick_rewriter(&models, forced.as_deref())?;
+    Some(Rewriter { base, model })
+}
+
+pub(crate) fn rewrite_mode() -> RewriteMode {
+    rewrite_mode_from(std::env::var("SIGIL_AI_REWRITE").ok().as_deref())
+}
+
 /// `$SIGIL_TOP_HOME/veil-egress.jsonl` (default `~/.sigil-top/`) — "what did my AI send out?"
 pub(crate) fn veil_ledger_path() -> std::path::PathBuf {
     std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
@@ -1326,6 +1503,87 @@ mod tests {
         let (host, p, req) = server.join().unwrap();
         assert_eq!((host.as_str(), p), ("remote-model.example", 11434));
         assert!(req.starts_with("POST /api/chat") && req.contains("[QNK_1]"), "{req}");
+    }
+
+    #[test]
+    fn rewrite_config_and_picking() {
+        assert_eq!(rewrite_mode_from(None), RewriteMode::Auto);
+        assert_eq!(rewrite_mode_from(Some("off")), RewriteMode::Off);
+        assert_eq!(rewrite_mode_from(Some("require")), RewriteMode::Require);
+        assert_eq!(rewriter_base_from(None).as_deref(), Some("http://localhost:11434"));
+        assert_eq!(rewriter_base_from(Some("http://127.0.0.1:11500/")).as_deref(), Some("http://127.0.0.1:11500"));
+        assert_eq!(rewriter_base_from(Some("http://gpu.example:11434")), None, "the rewriter sees the RAW question: never off-box");
+        assert_eq!(rewriter_base_from(Some("http://localhost@evil.example")), None);
+        let m = vec!["qwen3:8b".to_string(), "qwen3:1.7b".to_string()];
+        assert_eq!(pick_rewriter(&m, None).as_deref(), Some("qwen3:1.7b"));
+        assert_eq!(pick_rewriter(&m, Some("phi4:mini")).as_deref(), Some("phi4:mini"));
+        assert_eq!(pick_rewriter(&[], None), None);
+    }
+
+    /// Real outputs measured on Epsilon (2026-10-03), pinned as regressions.
+    #[test]
+    fn measured_rewrites_are_judged_correctly() {
+        let q1 = "I'm Viktor from Frederikshavn, my mum lent me 200 SIGIL and now my wallet send to [HEX_1] fails with HTTP 413 — what's going on?";
+        let good = "What is going on with the wallet sending to [HEX_1] when a 413 HTTP error occurs?";
+        assert_eq!(clean_rewrite(good, q1).as_deref(), Some(good), "qwen3:0.6b's good rewrite passes");
+        assert_eq!(scrub_carried_names(good, q1).1, 0);
+        let q2 = "Hej, jeg hedder Anna og arbejder på Aalborg Sygehus. Min chef Lars siger min mining rig laver 525 MH/s men jeg får 0 SIGIL — hvorfor?";
+        let leaky = "What is the reason for receiving a 0 SIGIL error when a mining rig produces 525 MH/s at Aalborg Sygehus?";
+        let ok = clean_rewrite(leaky, q2).expect("form is fine");
+        let (scrubbed, n) = scrub_carried_names(&ok, q2);
+        assert_eq!(n, 2);
+        assert!(!scrubbed.contains("Aalborg") && !scrubbed.contains("Sygehus") && scrubbed.contains("525 MH/s"), "{scrubbed}");
+        // qwen3:4b with think:false answered with its reasoning, quoting the original
+        let reasoning = "We are rewriting the user's latest request as ONE self-contained question.\n Steps:\n 1. Remove names \
+                         Original user request: \"I'm Viktor from Frederikshavn, my mum lent me 200 SIGIL";
+        assert_eq!(clean_rewrite(reasoning, q1), None);
+        let reasoning2 = "Okay, let's tackle this. The user wants me to rewrite their latest request";
+        assert_eq!(clean_rewrite(reasoning2, q2), None);
+        // ...but ordinary words that merely CONTAIN a meta word are fine
+        let fine = "Why would a cryptocurrency wallet's send request fail with HTTP 413?";
+        assert_eq!(clean_rewrite(fine, q1).as_deref(), Some(fine), "\"wallet's\" is not \"let's\"");
+        // copying the original verbatim is not a rewrite
+        assert_eq!(clean_rewrite("my mum lent me 200 SIGIL and now my wallet send fails", q1), None);
+    }
+
+    /// Real model, real machine: `fluxc test -p sigil-top --bin sigil-top -- --ignored real_local_rewrite`.
+    /// Needs ollama on localhost with qwen3:0.6b (or SIGIL_AI_REWRITE_MODEL).
+    #[test]
+    #[ignore]
+    fn real_local_rewrite_smoke() {
+        let model = std::env::var("SIGIL_AI_REWRITE_MODEL").unwrap_or_else(|_| "qwen3:0.6b".into());
+        let rw = Rewriter { base: "http://localhost:11434".into(), model };
+        for q in ["I'm Viktor from Frederikshavn, my mum lent me 200 SIGIL and now my wallet send to [HEX_1] fails with HTTP 413 — what's going on?",
+                  "Hej, jeg hedder Anna og arbejder på Aalborg Sygehus. Min chef Lars siger min mining rig laver 525 MH/s men jeg får 0 SIGIL — hvorfor?"] {
+            let t0 = std::time::Instant::now();
+            let out = rewrite_with(&rw, &[], q);
+            eprintln!("[{:.0}s] {q}\n   → {out:?}", t0.elapsed().as_secs_f64());
+            if let Some(o) = out {
+                for leak in ["Viktor", "Frederikshavn", "Anna", "Aalborg", "Sygehus", "Lars"] {
+                    assert!(!o.contains(leak), "{leak} survived: {o}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn proper_noun_heuristic() {
+        assert_eq!(proper_nouns("Hej, jeg hedder Anna og arbejder på Aalborg Sygehus. Min chef Lars siger"),
+                   vec!["Anna", "Aalborg", "Sygehus", "Lars"]);
+        assert!(proper_nouns("why does SIGIL show HTTP 413?").is_empty(), "acronyms are not names");
+    }
+
+    #[test]
+    fn rewrite_output_is_vetted() {
+        let orig = "my name is Viktor in Frederikshavn — why does my send fail with error 413?";
+        assert_eq!(clean_rewrite("<think>hmm</think>Rewritten question: \"Why would a send fail with HTTP 413?\"", orig).as_deref(),
+            Some("Why would a send fail with HTTP 413?"));
+        assert_eq!(clean_rewrite("", orig), None);
+        assert_eq!(clean_rewrite("I can't help with that.", orig), None);
+        assert_eq!(clean_rewrite(&"x".repeat(5000), orig), None, "an essay is not a rewrite");
+        let msgs = rewrite_request_messages(&[("user".into(), "hi".into()), ("tool".into(), "{secret}".into())], orig);
+        let p = msgs[1]["content"].as_str().unwrap();
+        assert!(p.contains("Latest request:") && p.contains("user: hi") && !p.contains("{secret}"), "{p}");
     }
 
     #[test]

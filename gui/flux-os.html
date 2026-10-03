@@ -803,7 +803,10 @@ function veilPrivacyView(){
   let L=[]; try{ L=JSON.parse(localStorage.getItem('veil-egress')||'[]'); }catch(e){}
   const here=veilIsLocalJS(OLLAMA)
     ? '🕶 Your model runs <b>on this device</b> ('+esc(OLLAMA)+') — conversations never leave it.'
-    : '⚠️ Your model is <b>off this device</b> ('+esc(OLLAMA)+') — every message to it passes SIGIL Veil first: recovery phrases and keys are refused, addresses, e-mails, tokens, IPs and paths leave only as placeholders.';
+    : '⚠️ Your model is <b>off this device</b> ('+esc(OLLAMA)+') — every message to it passes SIGIL Veil first: recovery phrases and keys are refused, addresses, e-mails, tokens, IPs and paths leave only as placeholders.'
+      + (/\.onion(:\d+)?$/i.test((()=>{ try{ return new URL(OLLAMA).host; }catch(e){ return ''; } })())
+          ? '<br>🧅 Network: a <b>.onion</b> endpoint — the connection itself travels over Tor; the provider does not see your IP.'
+          : '<br>Network: your browser connects <b>directly</b>, so '+esc(OLLAMA)+' sees your IP address. Open this page in <b>Tor Browser</b> (or use a .onion endpoint) to hide it.');
   if(!L.length) return here+'<br><br>Nothing has ever left this browser for an AI model.';
   const ago=t=>{ const d=Math.max(0,Date.now()/1000-t); return !t?'?':d<120?Math.round(d)+'s ago':d<7200?Math.round(d/60)+'m ago':d<172800?Math.round(d/3600)+'h ago':Math.round(d/86400)+'d ago'; };
   const dest={}, hid={}; let bytes=0;

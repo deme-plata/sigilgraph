@@ -34,7 +34,10 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 # v0.3.5: rustls + webpki-roots for ALL platforms. Bundles Mozilla CA certs in the
 # binary — no OS cert store dependency.
-reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots"], default-features = false }
+# "socks": SIGIL Veil L3 — an off-box AI request rides a local Tor SOCKS proxy so the
+# provider never sees the user's IP. reqwest 0.12.28 implements SOCKS itself (`socks = []`):
+# zero new crates in the lockfile.
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots", "socks"], default-features = false }
 # v0.6.5: tokio runtime — required by flux-p2p's async NetworkManager for real block sync
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 futures    = "0.3"

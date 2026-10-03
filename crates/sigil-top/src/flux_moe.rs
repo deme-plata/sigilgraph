@@ -596,7 +596,9 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
     }
     messages.push(serde_json::json!({"role":"user","content":user}));
     // SIGIL Veil: only when the model is OFF this machine (SIGIL_OLLAMA_ALLOW_REMOTE).
-    let veil = if ollama_is_local() { None } else { Some(veil_outbound(&mut messages, &ollama_base(), Some(&veil_ledger_path()))?) };
+    let route = current_ai_route();
+    if let AiRoute::Refuse(msg) = &route { return Err(msg.clone()); }
+    let veil = if ollama_is_local() { None } else { Some(veil_outbound(&mut messages, &route_label(&ollama_base(), &route), Some(&veil_ledger_path()))?) };
 
     // No `think` key unless the user explicitly asked for one: measured, forcing it
     // off is a regression and forcing it on is already ollama's default. `think` is
@@ -612,7 +614,8 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
     }
     let body = body;
     let url = format!("{}/api/chat", ollama_base());
-    let send = |b: &serde_json::Value| client().post(&url).json(b).send();
+    let http = chat_client(&route)?;
+    let send = |b: &serde_json::Value| http.post(&url).json(b).send();
 
     // SELF-HEAL (v8.0.1): "ollama is installed but not running" is not an error worth
     // reporting — it is a two-second fix the tab can perform itself, holding the very
@@ -777,10 +780,12 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
         messages.push(serde_json::json!({"role": role, "content": content}));
     }
     messages.push(serde_json::json!({"role":"user","content":user}));
+    let route = current_ai_route();
+    if let AiRoute::Refuse(msg) = &route { let _ = tx.send(StreamEv::Whole(msg.clone())); return; }
     let veil = if ollama_is_local() {
         None
     } else {
-        match veil_outbound(&mut messages, &ollama_base(), Some(&veil_ledger_path())) {
+        match veil_outbound(&mut messages, &route_label(&ollama_base(), &route), Some(&veil_ledger_path())) {
             Ok(m) => Some(m),
             Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; }
         }
@@ -794,7 +799,8 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
         let r = match chat(model, history, user, extra_system) { Ok(r) => r, Err(e) => format!("⚠ {e}") };
         let _ = tx.send(StreamEv::Whole(r));
     };
-    let resp = match client().post(&url).json(&body).send() {
+    let http = match chat_client(&route) { Ok(c) => c, Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; } };
+    let resp = match http.post(&url).json(&body).send() {
         Ok(r) if r.status().is_success() => r,
         _ => return fallback(tx),
     };
@@ -840,6 +846,111 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
 // a recovery phrase or labelled key in anything the user/tools wrote refuses the
 // request outright; every other identifier becomes a placeholder before the bytes
 // leave and is restored in the answer here; every send lands in a local ledger.
+
+// ── SIGIL Veil L3: the provider must not learn WHERE you are ─────────────────
+//
+// zkAPI's answer to "the provider sees your IP" is "use Tor yourself". Here it is
+// the default whenever Tor is reachable: an off-box AI request rides a local Tor
+// SOCKS proxy (socks5h — DNS resolves inside Tor too). Without Tor the request goes
+// direct and the privacy view says so; SIGIL_AI_REQUIRE_TOR=1 refuses instead.
+
+/// How an off-box AI request travels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AiRoute {
+    /// Model on this device: nothing leaves, nothing to hide.
+    Local,
+    /// Through this SOCKS proxy (Tor).
+    Proxied(String),
+    /// Straight to the provider, who sees this machine's IP.
+    Direct,
+    /// Strict mode with no proxy: do not send.
+    Refuse(String),
+}
+
+/// Pure: validate a configured proxy URL. Only SOCKS (where DNS can stay inside
+/// Tor) — an http:// proxy would leak the hostname and isn't what this is for.
+pub(crate) fn validate_ai_proxy(v: &str) -> Result<String, String> {
+    let v = v.trim();
+    let lower = v.to_ascii_lowercase();
+    if lower.starts_with("socks5h://") || lower.starts_with("socks5://") {
+        Ok(v.to_string())
+    } else {
+        Err(format!("SIGIL_AI_PROXY must be socks5h://host:port (got {v:?}) — e.g. socks5h://127.0.0.1:9050 for Tor"))
+    }
+}
+
+/// Pure: the routing decision.
+pub(crate) fn decide_ai_route(local: bool, proxy: Option<String>, require_tor: bool, host: &str) -> AiRoute {
+    if local {
+        return AiRoute::Local;
+    }
+    match proxy {
+        Some(p) => AiRoute::Proxied(p),
+        None if require_tor => AiRoute::Refuse(format!(
+            "🕶 Not sent: SIGIL_AI_REQUIRE_TOR=1 and no Tor proxy is reachable, so {host} would see this machine's IP address. \
+             Start Tor (port 9050), or set SIGIL_AI_PROXY=socks5h://host:port."
+        )),
+        None => AiRoute::Direct,
+    }
+}
+
+/// The configured or auto-detected Tor SOCKS proxy: SIGIL_AI_PROXY if set (and
+/// valid), else a SOCKS port answering on loopback (9050 tor, 9150 Tor Browser).
+pub(crate) fn ai_proxy() -> Result<Option<String>, String> {
+    if let Ok(v) = std::env::var("SIGIL_AI_PROXY") {
+        if !v.trim().is_empty() {
+            return validate_ai_proxy(&v).map(Some);
+        }
+    }
+    for port in [9050u16, 9150] {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+            return Ok(Some(format!("socks5h://127.0.0.1:{port}")));
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn current_ai_route() -> AiRoute {
+    let require = matches!(std::env::var("SIGIL_AI_REQUIRE_TOR").as_deref(), Ok("1") | Ok("true") | Ok("yes"));
+    let local = ollama_is_local();
+    let proxy = if local { None } else {
+        match ai_proxy() {
+            Ok(p) => p,
+            Err(e) => return AiRoute::Refuse(format!("🕶 Not sent: {e}")),
+        }
+    };
+    decide_ai_route(local, proxy, require, &ollama_base())
+}
+
+/// HTTP client for one chat turn along `route`. Tor circuits take longer to
+/// build than a loopback connect, so the connect budget grows with it.
+/// FAIL CLOSED: a proxied route whose proxy cannot be configured is an error,
+/// never a silent direct connection — the privacy view would otherwise claim Tor
+/// while the provider saw this machine's IP.
+pub(crate) fn chat_client(route: &AiRoute) -> Result<reqwest::blocking::Client, String> {
+    let b = reqwest::blocking::Client::builder().timeout(Duration::from_secs(chat_timeout_secs()));
+    let b = match route {
+        AiRoute::Proxied(p) => {
+            let px = reqwest::Proxy::all(p.as_str())
+                .map_err(|e| format!("🕶 Not sent: the Tor proxy {p} could not be configured ({e}), and Veil does not fall back to a direct connection."))?;
+            b.connect_timeout(Duration::from_secs(45)).proxy(px)
+        }
+        // never let a system HTTP(S)_PROXY env var silently reroute a local model
+        AiRoute::Local => b.connect_timeout(Duration::from_secs(2)).no_proxy(),
+        _ => b.connect_timeout(Duration::from_secs(2)),
+    };
+    b.build().map_err(|e| format!("🕶 Not sent: could not build the HTTP client ({e})."))
+}
+
+/// What the ledger records as the destination: host plus how it travelled.
+fn route_label(base: &str, route: &AiRoute) -> String {
+    match route {
+        AiRoute::Proxied(p) => format!("{base} via Tor ({p})"),
+        AiRoute::Direct => format!("{base} (direct: provider sees this IP)"),
+        _ => base.to_string(),
+    }
+}
 
 /// `$SIGIL_TOP_HOME/veil-egress.jsonl` (default `~/.sigil-top/`) — "what did my AI send out?"
 pub(crate) fn veil_ledger_path() -> std::path::PathBuf {
@@ -900,10 +1011,16 @@ pub(crate) fn is_privacy_command(s: &str) -> bool {
 pub(crate) fn privacy_report() -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let path = veil_ledger_path();
-    let where_ = if ollama_is_local() {
-        format!("Your model runs ON THIS DEVICE ({}) — conversations never leave it.", ollama_base())
-    } else {
-        format!("⚠ Your model is OFF this device ({}) — every message to it passes SIGIL Veil first.", ollama_base())
+    let where_ = match current_ai_route() {
+        AiRoute::Local => format!("Your model runs ON THIS DEVICE ({}) — conversations never leave it.", ollama_base()),
+        AiRoute::Proxied(p) => format!(
+            "Your model is OFF this device ({}). Every message passes SIGIL Veil first, and travels through Tor ({p}) — the provider does not see your IP.",
+            ollama_base()),
+        AiRoute::Direct => format!(
+            "⚠ Your model is OFF this device ({}). Every message passes SIGIL Veil first — but the connection is DIRECT, so the provider sees this machine's IP. \
+             Start Tor (port 9050) and it is used automatically; SIGIL_AI_REQUIRE_TOR=1 refuses to send without it.",
+            ollama_base()),
+        AiRoute::Refuse(m) => m,
     };
     let ledger = std::fs::read_to_string(&path).unwrap_or_default();
     let body = sigil_veil::render_summary(&sigil_veil::ledger_summary(&ledger, 5), now);
@@ -1125,9 +1242,10 @@ pub(crate) fn pick_model_tiered(
 
 #[cfg(test)]
 mod tests {
-    /// SIGIL_AI_MODEL is process-global and cargo runs tests in parallel threads:
-    /// one test's remove_var landed mid-another's assert (explicit_choice_always_wins
-    /// failed in the suite, passed alone — 2026-10-03). Every test touching it holds this.
+    /// Env vars are process-global and cargo runs tests in parallel threads: one
+    /// test's remove_var landed mid-another's assert (explicit_choice_always_wins,
+    /// then small_tier_only_for_phones_and_tiny_boxes — both failed in the suite and
+    /// passed alone, 2026-10-03). EVERY test here that calls set_var/remove_var holds this.
     static AI_MODEL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
     pub(crate) fn ai_model_env() -> std::sync::MutexGuard<'static, ()> {
         AI_MODEL_ENV.lock().unwrap_or_else(|p| p.into_inner())
@@ -1148,6 +1266,70 @@ mod tests {
         assert!(r.unwrap_err().contains("recovery phrase"));
         assert!(!ledger.exists(), "a refused request must not even be ledgered as sent");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ai_route_decisions() {
+        assert_eq!(decide_ai_route(true, Some("socks5h://127.0.0.1:9050".into()), true, "h"), AiRoute::Local,
+            "a local model is never proxied — Tor cannot reach loopback ollama");
+        assert_eq!(decide_ai_route(false, Some("socks5h://127.0.0.1:9050".into()), false, "h"),
+            AiRoute::Proxied("socks5h://127.0.0.1:9050".into()));
+        assert_eq!(decide_ai_route(false, None, false, "h"), AiRoute::Direct);
+        assert!(matches!(decide_ai_route(false, None, true, "gpu.example"), AiRoute::Refuse(m) if m.contains("gpu.example")));
+    }
+
+    /// The property users rely on, measured instead of assumed: a request on the
+    /// Proxied route really goes THROUGH the SOCKS proxy, and the proxy is handed the
+    /// HOSTNAME (socks5h) — so not even the DNS lookup leaves outside Tor.
+    #[test]
+    fn proxied_route_really_travels_through_socks_with_the_hostname() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || -> (String, u16, String) {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut b = [0u8; 2];
+            c.read_exact(&mut b).unwrap();                       // VER, NMETHODS
+            let mut m = vec![0u8; b[1] as usize];
+            c.read_exact(&mut m).unwrap();
+            c.write_all(&[5, 0]).unwrap();                        // no auth
+            let mut h = [0u8; 4];
+            c.read_exact(&mut h).unwrap();                        // VER CMD RSV ATYP
+            assert_eq!(h[3], 3, "ATYP must be DOMAIN — the client must not resolve DNS itself");
+            let mut l = [0u8; 1];
+            c.read_exact(&mut l).unwrap();
+            let mut host = vec![0u8; l[0] as usize];
+            c.read_exact(&mut host).unwrap();
+            let mut p = [0u8; 2];
+            c.read_exact(&mut p).unwrap();
+            c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap(); // granted
+            let mut req = vec![0u8; 4096];
+            let n = c.read(&mut req).unwrap();
+            let body = r#"{"message":{"content":"ok"},"done":true}"#;
+            let _ = c.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).as_bytes());
+            (String::from_utf8_lossy(&host).to_string(), u16::from_be_bytes(p), String::from_utf8_lossy(&req[..n]).to_string())
+        });
+        let route = AiRoute::Proxied(format!("socks5h://127.0.0.1:{port}"));
+        let client = chat_client(&route).expect("socks proxy must configure in this build");
+        let r = client.post("http://remote-model.example:11434/api/chat").body("{\"q\":\"[QNK_1]\"}").send().expect("through the proxy");
+        assert!(r.status().is_success());
+        let (host, p, req) = server.join().unwrap();
+        assert_eq!((host.as_str(), p), ("remote-model.example", 11434));
+        assert!(req.starts_with("POST /api/chat") && req.contains("[QNK_1]"), "{req}");
+    }
+
+    #[test]
+    fn only_socks_proxies_are_accepted() {
+        assert!(validate_ai_proxy("socks5h://127.0.0.1:9050").is_ok());
+        assert!(validate_ai_proxy(" SOCKS5://10.0.0.2:1080 ").is_ok());
+        assert!(validate_ai_proxy("http://proxy.example:8080").is_err(), "http proxies leak the hostname");
+        assert!(validate_ai_proxy("127.0.0.1:9050").is_err());
+    }
+
+    #[test]
+    fn ledger_labels_say_how_it_travelled() {
+        assert!(route_label("http://gpu.example:11434", &AiRoute::Proxied("socks5h://127.0.0.1:9050".into())).contains("via Tor"));
+        assert!(route_label("http://gpu.example:11434", &AiRoute::Direct).contains("provider sees this IP"));
     }
 
     #[test]
@@ -1279,6 +1461,7 @@ mod tests {
 
     #[test]
     fn ollama_base_defaults_to_localhost() {
+        let _env = ai_model_env();
         // Without the override, it targets the user's own machine.
         std::env::remove_var("SIGIL_OLLAMA");
         assert_eq!(ollama_base(), "http://localhost:11434");
@@ -1330,6 +1513,7 @@ mod tests {
 
     #[test]
     fn timeout_is_generous_and_overridable() {
+        let _env = ai_model_env();
         std::env::remove_var("SIGIL_OLLAMA_TIMEOUT");
         // The old 120 s was BELOW one measured qwen3:4b turn on CPU.
         assert!(chat_timeout_secs() > 120, "default budget must exceed a real CPU turn");
@@ -1342,6 +1526,7 @@ mod tests {
 
     #[test]
     fn think_defers_to_ollama_unless_explicitly_set() {
+        let _env = ai_model_env();
         std::env::remove_var("SIGIL_OLLAMA_THINK");
         // MEASURED: forcing think:false on qwen3:4b saved no time and pushed the
         // monologue into `content`. So by default we send no `think` key at all.
@@ -1507,6 +1692,7 @@ mod oob_tests {
 
     #[test]
     fn autosetup_is_on_by_default_and_off_only_when_asked() {
+        let _env = crate::flux_moe::tests::ai_model_env();
         std::env::remove_var("SIGIL_AI_AUTOSETUP");
         assert!(autosetup_enabled());
         for v in ["0", "false", "NO", " off "] {
@@ -1520,6 +1706,7 @@ mod oob_tests {
 
     #[test]
     fn termux_is_detected_from_prefix_or_version() {
+        let _env = crate::flux_moe::tests::ai_model_env();
         std::env::remove_var("TERMUX_VERSION");
         let saved = std::env::var("PREFIX").ok();
         std::env::set_var("PREFIX", "/usr");

@@ -727,6 +727,15 @@ const AI_TOOLS=[
   aiTool('sigil_propose_private_send','PROPOSE a private payment; nothing is sent, the user signs in the wallet. Only call with a full address AND an amount.',
     {to:{type:'string',description:'64-hex or sigil1s: address exactly as given'},amount:{type:'number',description:'amount in SIGIL'},memo:{type:'string'}},['to','amount'])
 ];
+// SIGIL Veil L5 — scopes, the GrapheneOS way: a model on this device may use every tool;
+// an OFF-device model gets only network-wide facts unless this browser granted more
+// (numbers are not identifiers — a remote balance call would hand over your wealth).
+const VEIL_NET_TOOLS=['sigil_network_status','sigil_pools','sigil_shielded_status','sigil_mining_network','sigil_nation_status'];
+function veilScopeOf(n){ return VEIL_NET_TOOLS.indexOf(n)>=0?'network':(n==='sigil_propose_private_send'?'payments':'wallet'); }
+function veilRemoteScopes(){ let g=['network']; try{ (localStorage.getItem('veil-remote-scopes')||'').split(',').forEach(x=>{ x=x.trim(); if((x==='wallet'||x==='payments')&&g.indexOf(x)<0) g.push(x); }); }catch(e){} return g; }
+function veilToolAllowed(n){ return veilIsLocalJS(OLLAMA) || veilRemoteScopes().indexOf(veilScopeOf(n))>=0; }
+function veilToolsFor(){ return AI_TOOLS.filter(t=>veilToolAllowed(t.function.name)); }
+function veilToggleScope(s){ let g=veilRemoteScopes().filter(x=>x!=='network'); g = g.indexOf(s)>=0 ? g.filter(x=>x!==s) : g.concat([s]); try{ localStorage.setItem('veil-remote-scopes', g.join(',')); }catch(e){} }
 const isWallet=s=>/^[0-9a-fA-F]{64}$/.test(String(s||'').trim());
 const isShielded=s=>/^sigil1s:[0-9a-fA-F]{64}:[0-9a-fA-F]{64}$/.test(String(s||'').trim());
 async function aiRunTool(name,args){
@@ -801,12 +810,16 @@ async function veilOutbound(messages){
 // "what did my AI send out?" — read from this browser's own ledger; original values never stored.
 function veilPrivacyView(){
   let L=[]; try{ L=JSON.parse(localStorage.getItem('veil-egress')||'[]'); }catch(e){}
-  const here=veilIsLocalJS(OLLAMA)
+  let here=veilIsLocalJS(OLLAMA)
     ? '🕶 Your model runs <b>on this device</b> ('+esc(OLLAMA)+') — conversations never leave it.'
     : '⚠️ Your model is <b>off this device</b> ('+esc(OLLAMA)+') — every message to it passes SIGIL Veil first: recovery phrases and keys are refused, addresses, e-mails, tokens, IPs and paths leave only as placeholders.'
       + (/\.onion(:\d+)?$/i.test((()=>{ try{ return new URL(OLLAMA).host; }catch(e){ return ''; } })())
           ? '<br>🧅 Network: a <b>.onion</b> endpoint — the connection itself travels over Tor; the provider does not see your IP.'
           : '<br>Network: your browser connects <b>directly</b>, so '+esc(OLLAMA)+' sees your IP address. Open this page in <b>Tor Browser</b> (or use a .onion endpoint) to hide it.');
+  if(!veilIsLocalJS(OLLAMA)){
+    const g=veilRemoteScopes(), sw=(s,label)=>'<button class="btn '+(g.indexOf(s)>=0?'mag':'ghost')+'" onclick="veilToggleScope(\''+s+'\');this.className=\'btn \'+(veilRemoteScopes().indexOf(\''+s+'\')>=0?\'mag\':\'ghost\');this.textContent=\''+label+': \'+(veilRemoteScopes().indexOf(\''+s+'\')>=0?\'allowed\':\'off\')">'+label+': '+(g.indexOf(s)>=0?'allowed':'off')+'</button> ';
+    here+='<br><br><b>Permissions of the off-device model</b> (like app permissions on GrapheneOS): network facts always · '+sw('wallet','your wallet & balance')+sw('payments','propose payments');
+  }
   if(!L.length) return here+'<br><br>Nothing has ever left this browser for an AI model.';
   const ago=t=>{ const d=Math.max(0,Date.now()/1000-t); return !t?'?':d<120?Math.round(d)+'s ago':d<7200?Math.round(d/60)+'m ago':d<172800?Math.round(d/3600)+'h ago':Math.round(d/86400)+'d ago'; };
   const dest={}, hid={}; let bytes=0;
@@ -894,7 +907,7 @@ function renderAI(body){
     const timer=setInterval(tick,250);
     try{
       for(let step=0; step<4; step++){
-        const res=await aiStream(msgsOut,AI_TOOLS,ev=>{
+        const res=await aiStream(msgsOut,veilToolsFor(),ev=>{
           if(ev.thinking) thinkChars+=ev.thinking.length;
           if(ev.token){ if(!first) first=performance.now(); toks++; text+=ev.token; bubble.innerHTML=aiMd(stripThink(text)); follow(false); }
         },aiAbort.signal);
@@ -909,7 +922,8 @@ function renderAI(body){
         for(const c of res.tool_calls){
           const name=c.function&&c.function.name; let args=c.function&&c.function.arguments; if(typeof args==='string'){ try{ args=JSON.parse(args); }catch(e){ args={}; } }
           let out;
-          try{ out=await aiRunTool(name,args); }catch(e){ out=[{error:String(e&&e.message||e)},name+' → ⚠ '+(e&&e.message||e)]; }
+          if(!veilToolAllowed(name)){ const why='not permitted: the \''+veilScopeOf(name)+'\' scope is not granted to a model off this device'; out=[{error:why},'🔒 '+name+' refused — '+why]; }
+          else { try{ out=await aiRunTool(name,args); }catch(e){ out=[{error:String(e&&e.message||e)},name+' → ⚠ '+(e&&e.message||e)]; } }
           if(out[1]&&out[1].propose){ const p=out[1].propose;
             const cd=addCard('<div class="h">⚠️ Proposed private send</div><div class="row"><span class="k">amount</span><span><b>'+esc(p.amount)+' SIGIL</b></span></div><div class="row"><span class="k">to</span><span class="mono">'+esc(p.to)+'</span></div>'+(p.memo?'<div class="row"><span class="k">memo</span><span>'+esc(p.memo)+'</span></div>':'')+'<div class="btns"><button class="btn mag" data-a="go">Open wallet to sign</button><button class="btn ghost" data-a="no">Cancel</button></div><div class="note" style="margin-top:8px">Check every character of the address. Nothing has been sent — the wallet signs and shields it.</div>');
             cd.querySelector('[data-a=go]').onclick=()=>toast('Open your SIGIL wallet → Send to sign this'); cd.querySelector('[data-a=no]').onclick=()=>cd.remove();

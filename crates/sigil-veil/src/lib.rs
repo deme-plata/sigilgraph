@@ -596,7 +596,126 @@ fn json_str(s: &str) -> String {
     o
 }
 
-/// Append an entry to the local egress ledger (JSONL). Not on wasm32 — the
+// ── "what did my AI send out?" ────────────────────────────────────────────────
+
+/// Aggregate of an egress ledger, for a user-facing privacy view.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LedgerSummary {
+    pub sends: usize,
+    pub bytes: u64,
+    pub first_ts: u64,
+    pub last_ts: u64,
+    /// destination → sends
+    pub destinations: BTreeMap<String, usize>,
+    /// placeholder kind tag → number of sends that hid one
+    pub hidden: BTreeMap<String, usize>,
+    /// newest first: (ts, destination, bytes, hidden kinds)
+    pub recent: Vec<(u64, String, u64, Vec<String>)>,
+}
+
+fn field_after<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let i = line.find(key)? + key.len();
+    Some(&line[i..])
+}
+
+fn json_string_at(s: &str) -> Option<String> {
+    // s starts at the opening quote of a JSON string we wrote ourselves
+    let mut out = String::new();
+    let mut chars = s.strip_prefix('"')?.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'u' => {
+                    let h: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&h, 16).ok()?)?);
+                }
+                c => out.push(c),
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+fn number_at(s: &str) -> u64 {
+    s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)
+}
+
+/// Summarise ledger JSONL written by [`LedgerEntry::to_json_line`]. Lines that
+/// don't parse are skipped, never fatal — the view must always open.
+pub fn ledger_summary(jsonl: &str, recent: usize) -> LedgerSummary {
+    let mut s = LedgerSummary::default();
+    let mut all: Vec<(u64, String, u64, Vec<String>)> = Vec::new();
+    for line in jsonl.lines() {
+        let Some(dest) = field_after(line, "\"destination\":").and_then(json_string_at) else { continue };
+        let ts = field_after(line, "\"ts\":").map(number_at).unwrap_or(0);
+        let bytes = field_after(line, "\"bytes\":").map(number_at).unwrap_or(0);
+        let kinds: Vec<String> = field_after(line, "\"redacted\":[")
+            .and_then(|r| r.split(']').next())
+            .map(|r| r.split(',').filter_map(|k| { let k = k.trim().trim_matches('"'); (!k.is_empty()).then(|| k.to_string()) }).collect())
+            .unwrap_or_default();
+        s.sends += 1;
+        s.bytes += bytes;
+        if s.first_ts == 0 || (ts > 0 && ts < s.first_ts) {
+            s.first_ts = ts;
+        }
+        s.last_ts = s.last_ts.max(ts);
+        *s.destinations.entry(dest.clone()).or_insert(0) += 1;
+        for k in &kinds {
+            *s.hidden.entry(k.clone()).or_insert(0) += 1;
+        }
+        all.push((ts, dest, bytes, kinds));
+    }
+    all.sort_by(|a, b| b.0.cmp(&a.0));
+    s.recent = all.into_iter().take(recent).collect();
+    s
+}
+
+/// Plain-text privacy view (sigil-top's AI tab; the browser renders its own).
+pub fn render_summary(s: &LedgerSummary, now: u64) -> String {
+    let ago = |ts: u64| {
+        let d = now.saturating_sub(ts);
+        if ts == 0 { "?".to_string() }
+        else if d < 120 { format!("{d}s ago") }
+        else if d < 7200 { format!("{}m ago", d / 60) }
+        else if d < 172_800 { format!("{}h ago", d / 3600) }
+        else { format!("{}d ago", d / 86_400) }
+    };
+    if s.sends == 0 {
+        return "🕶 Nothing has ever left this machine for an AI model.".to_string();
+    }
+    let mut out = vec![format!(
+        "🕶 {} request(s) left this machine for an off-device model — {:.1} KB in total, last {}.",
+        s.sends,
+        s.bytes as f64 / 1024.0,
+        ago(s.last_ts)
+    )];
+    let dests: Vec<String> = s.destinations.iter().map(|(d, n)| format!("{d} ×{n}")).collect();
+    out.push(format!("   to: {}", dests.join(", ")));
+    if s.hidden.is_empty() {
+        out.push("   nothing needed hiding in them.".into());
+    } else {
+        let h: Vec<String> = s.hidden.iter().map(|(k, n)| format!("{k} in {n}")).collect();
+        out.push(format!("   hidden before sending (as placeholders, restored only here): {}", h.join(", ")));
+    }
+    for (ts, d, b, k) in &s.recent {
+        out.push(format!(
+            "   · {} → {} ({} B){}",
+            ago(*ts),
+            d,
+            b,
+            if k.is_empty() { String::new() } else { format!(", hid {}", k.join("+")) }
+        ));
+    }
+    out.push("   Recovery phrases and secret keys are never sent; a message containing one is refused.".into());
+    out.join("\n")
+}
+
+/// Append an entry to the local egress ledger (JSONL)./// Append an entry to the local egress ledger (JSONL). Not on wasm32 — the
 /// browser keeps its ledger in its own storage via `to_json_line`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ledger_append(path: &std::path::Path, entry: &LedgerEntry) -> std::io::Result<()> {
@@ -753,6 +872,25 @@ mod tests {
         assert!(line.contains("\"redacted\":[\"HEX\"]"));
         assert_eq!(e.bytes_blake3, blake3::hash(out.as_bytes()).to_hex().to_string());
         assert!(!line.contains(HEX), "the ledger stores what LEFT, never the original value");
+    }
+
+    #[test]
+    fn ledger_summary_reads_back_what_we_wrote() {
+        let (out, f, _) = send(&format!("explain tx {HEX} for viktor@sigilgraph.org"));
+        let a = LedgerEntry::new_at(1_000, "http://gpu.example:11434", &out, &f).to_json_line();
+        let b = LedgerEntry::new_at(2_000, "https://api.example", "{\"q\":\"hi \\\"x\\\"\"}", &[]).to_json_line();
+        let junk = "not json at all\n";
+        let s = ledger_summary(&format!("{a}{junk}{b}"), 5);
+        assert_eq!(s.sends, 2);
+        assert_eq!((s.first_ts, s.last_ts), (1_000, 2_000));
+        assert_eq!(s.destinations.get("http://gpu.example:11434"), Some(&1));
+        assert_eq!(s.hidden.get("HEX"), Some(&1));
+        assert_eq!(s.hidden.get("EMAIL"), Some(&1));
+        assert_eq!(s.recent[0].1, "https://api.example", "newest first");
+        let txt = render_summary(&s, 2_060);
+        assert!(txt.contains("2 request(s)") && txt.contains("60s ago") && txt.contains("HEX in 1"), "{txt}");
+        assert!(!txt.contains(HEX), "the view never shows original values");
+        assert_eq!(render_summary(&LedgerSummary::default(), 0), "🕶 Nothing has ever left this machine for an AI model.");
     }
 
     #[test]

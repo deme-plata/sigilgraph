@@ -890,7 +890,27 @@ pub(crate) fn veil_outbound(messages: &mut [serde_json::Value], destination: &st
     Ok(map)
 }
 
-/// Restore placeholders inside a JSON value (tool-call arguments from an
+/// Chat-box words that open the privacy view: "what did my AI send out?"
+pub(crate) fn is_privacy_command(s: &str) -> bool {
+    let w = s.trim().trim_start_matches('/').trim_end_matches('?').to_ascii_lowercase();
+    matches!(w.as_str(), "privacy" | "egress" | "veil" | "what left" | "what did you send" | "what did my ai send")
+}
+
+/// The privacy view: where the model runs right now, and the egress ledger.
+pub(crate) fn privacy_report() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let path = veil_ledger_path();
+    let where_ = if ollama_is_local() {
+        format!("Your model runs ON THIS DEVICE ({}) — conversations never leave it.", ollama_base())
+    } else {
+        format!("⚠ Your model is OFF this device ({}) — every message to it passes SIGIL Veil first.", ollama_base())
+    };
+    let ledger = std::fs::read_to_string(&path).unwrap_or_default();
+    let body = sigil_veil::render_summary(&sigil_veil::ledger_summary(&ledger, 5), now);
+    format!("{where_}\n{body}\n   ledger: {}", path.display())
+}
+
+/// Restore placeholders inside a JSON value (tool-call arguments from an/// Restore placeholders inside a JSON value (tool-call arguments from an
 /// off-box model) so the tool layer acts on the real address, never `[QNK_1]`.
 pub(crate) fn rehydrate_json(v: &mut serde_json::Value, map: &sigil_veil::VeilMap) {
     match v {
@@ -1128,6 +1148,16 @@ mod tests {
         assert!(r.unwrap_err().contains("recovery phrase"));
         assert!(!ledger.exists(), "a refused request must not even be ledgered as sent");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn privacy_command_words() {
+        for w in ["privacy", "/privacy", "Egress", "veil", "what left?", "what did my AI send?"] {
+            assert!(is_privacy_command(w), "{w:?}");
+        }
+        for w in ["private send", "send privately", "egress fee"] {
+            assert!(!is_privacy_command(w), "{w:?}");
+        }
     }
 
     #[test]

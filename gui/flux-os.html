@@ -783,7 +783,7 @@ function veilIsLocalJS(u){ try{ const h=new URL(u).hostname.toLowerCase(); retur
 function veilErr(msg){ const e=new Error(msg); e.veil=true; return e; }
 async function veilOutbound(messages){
   if(veilIsLocalJS(OLLAMA)) return {messages:messages, veil:null};
-  try{ if(!__veilMod){ const m=await import('./wasm/sigil_veil_wasm.js?v=2'); await m.default(); __veilMod=m; } }
+  try{ if(!__veilMod){ const m=await import('./wasm/sigil_veil_wasm.js?v=3'); await m.default(); __veilMod=m; } }
   catch(e){ throw veilErr('🕶 Veil (the privacy gate) could not load, so nothing was sent to the off-device model at '+OLLAMA+'. Use a model on this device, or reload the page.'); }
   if(__veilMod.veil_is_loopback(OLLAMA)) return {messages:messages, veil:null};
   if(!__veil) __veil=new __veilMod.Veil();
@@ -797,6 +797,23 @@ async function veilOutbound(messages){
   }
   try{ const L=JSON.parse(localStorage.getItem('veil-egress')||'[]'); L.push(JSON.parse(__veil.ledger_line(OLLAMA, JSON.stringify(out), Date.now()))); localStorage.setItem('veil-egress', JSON.stringify(L.slice(-200))); }catch(e){}
   return {messages:out, veil:__veil};
+}
+// "what did my AI send out?" — read from this browser's own ledger; original values never stored.
+function veilPrivacyView(){
+  let L=[]; try{ L=JSON.parse(localStorage.getItem('veil-egress')||'[]'); }catch(e){}
+  const here=veilIsLocalJS(OLLAMA)
+    ? '🕶 Your model runs <b>on this device</b> ('+esc(OLLAMA)+') — conversations never leave it.'
+    : '⚠️ Your model is <b>off this device</b> ('+esc(OLLAMA)+') — every message to it passes SIGIL Veil first: recovery phrases and keys are refused, addresses, e-mails, tokens, IPs and paths leave only as placeholders.';
+  if(!L.length) return here+'<br><br>Nothing has ever left this browser for an AI model.';
+  const ago=t=>{ const d=Math.max(0,Date.now()/1000-t); return !t?'?':d<120?Math.round(d)+'s ago':d<7200?Math.round(d/60)+'m ago':d<172800?Math.round(d/3600)+'h ago':Math.round(d/86400)+'d ago'; };
+  const dest={}, hid={}; let bytes=0;
+  L.forEach(e=>{ dest[e.destination]=(dest[e.destination]||0)+1; bytes+=e.bytes||0; (e.redacted||[]).forEach(k=>hid[k]=(hid[k]||0)+1); });
+  const lastUser=e=>{ try{ const m=JSON.parse(e.sent).filter(x=>x.role==='user').pop(); return m?String(m.content).slice(0,140):''; }catch(x){ return ''; } };
+  let h=here+'<br><br><b>'+L.length+'</b> request(s) left for an off-device model · '+(bytes/1024).toFixed(1)+' KB · last '+ago(L[L.length-1].ts)+'<br>to: '+Object.keys(dest).map(d=>esc(d)+' ×'+dest[d]).join(', ');
+  h+='<br>hidden before sending: '+(Object.keys(hid).length?Object.keys(hid).map(k=>esc(k)+' in '+hid[k]).join(', '):'nothing needed hiding');
+  h+='<br><br>Most recent — exactly what the model received:';
+  L.slice(-5).reverse().forEach(e=>{ h+='<div class="note" style="margin-top:6px">'+ago(e.ts)+' → '+esc(e.destination)+' · '+(e.bytes||0)+' B<br><span class="mono">'+esc(lastUser(e))+'</span></div>'; });
+  return h+'<div class="btns" style="margin-top:8px"><button class="btn ghost" onclick="localStorage.removeItem(\'veil-egress\');this.parentNode.innerHTML=\'ledger cleared\'">Clear this ledger</button></div>';
 }
 function veilDeep(v,o){ if(typeof o==='string') return v.rehydrate(o); if(Array.isArray(o)) return o.map(x=>veilDeep(v,x)); if(o&&typeof o==='object'){ const r={}; for(const k in o) r[k]=veilDeep(v,o[k]); return r; } return o; }
 // One streamed turn. onEv({thinking|token|tools|done}). Resolves with {content,tool_calls,done}.
@@ -835,7 +852,7 @@ function renderAI(body){
   const addCard=(html)=>{ const d=document.createElement('div'); d.className='card'; d.innerHTML=html; msgs.appendChild(d); follow(true); return d; };
   add('a','<b>SIGIL AI</b> — I run your wallet through the live chain. Try <b>balance</b>, <b>supply</b>, <b>height</b>, <b>pools</b>, <b>mining</b>, <b>nation</b>, or <b>send 1 to &lt;addr&gt;</b>. With a model connected, just ask in your own words — I can look things up myself.');
   const chipbar=body.querySelector('#aichips');
-  ['balance','supply','height','pools','mining','nation','help','new chat'].forEach(c=>{ const el=document.createElement('div'); el.className='chip'; el.textContent=c;
+  ['balance','supply','height','pools','mining','nation','privacy','help','new chat'].forEach(c=>{ const el=document.createElement('div'); el.className='chip'; el.textContent=c;
     el.onclick=()=>{ if(c==='new chat'){ aiHistory=[]; __veil=null; msgs.innerHTML=''; add('sys','new conversation — the model has forgotten the previous one'); return; } body.querySelector('#aiin').value=c; run(); }; chipbar.appendChild(el); });
   const stat=body.querySelector('#aistat');
   const prog=body.querySelector('#aiprog'), bar=body.querySelector('#aibar'), progt=body.querySelector('#aiprogt');
@@ -908,7 +925,8 @@ function renderAI(body){
   async function handle(ql, raw){
     const think=add('sys','· working ·'); const done=(cls,html)=>{ think.remove(); add(cls,html); };
     try{
-      if(/^help$|what can|^commands$/.test(ql)){ done('a','Commands (all live from the SIGIL API):<br>• <b>balance [addr]</b><br>• <b>supply</b><br>• <b>height</b><br>• <b>pools</b><br>• <b>mining</b><br>• <b>nation</b><br>• <b>send N to addr</b> (proposes; signs in wallet)<br><br>With a model connected you can also just ask — it looks numbers up with the same tools.'); return; }
+      if(/^\/?(privacy|egress|veil|what left\??|what did (you|my ai) send\??)$/.test(ql)){ done('a', veilPrivacyView()); return; }
+      if(/^help$|what can|^commands$/.test(ql)){ done('a','Commands (all live from the SIGIL API):<br>• <b>balance [addr]</b><br>• <b>supply</b><br>• <b>height</b><br>• <b>pools</b><br>• <b>mining</b><br>• <b>nation</b><br>• <b>send N to addr</b> (proposes; signs in wallet)<br>• <b>privacy</b> — what (if anything) this AI has sent off your device<br><br>With a model connected you can also just ask — it looks numbers up with the same tools.'); return; }
       if(/^(send|transfer|pay) /.test(ql)){ think.remove(); const m=raw.match(/([0-9]*\.?[0-9]+)\s+(?:sigil\s+)?(?:to\s+)?([a-zA-Z0-9:]{6,})/i);
         if(!m){ add('a','Format: <b>send 1.5 to &lt;addr&gt;</b>'); return; }
         if(!(isWallet(m[2])||isShielded(m[2]))){ add('a','That address is not complete ('+m[2].length+' characters). A SIGIL address is 64 hex characters, or <b>sigil1s:…</b>. Paste the whole thing.'); return; }

@@ -54,6 +54,9 @@ pub fn veil_is_loopback(url: &str) -> bool {
 pub struct Veil {
     map: VeilMap,
     answer: StreamRehydrator,
+    /// What gate()/pseudonymize() hid since the last ledger_line() — so the
+    /// browser ledger records WHAT was hidden without the page tracking it.
+    pending: Vec<(Kind, String)>,
 }
 
 impl Default for Veil {
@@ -66,7 +69,7 @@ impl Default for Veil {
 impl Veil {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Veil {
-        Veil { map: VeilMap::new(), answer: StreamRehydrator::new() }
+        Veil { map: VeilMap::new(), answer: StreamRehydrator::new(), pending: Vec::new() }
     }
 
     /// Gate text the USER (or a tool) wrote. JSON:
@@ -74,6 +77,7 @@ impl Veil {
     pub fn gate(&mut self, text: &str) -> String {
         match sigil_veil::gate(text, &mut self.map) {
             Verdict::Send { text, findings } => {
+                self.pending.extend(findings.iter().cloned());
                 let mut k: Vec<Kind> = findings.iter().map(|(k, _)| *k).collect();
                 k.sort();
                 k.dedup();
@@ -85,7 +89,9 @@ impl Veil {
 
     /// Text the user did not write (system prompt, page context): hidden, never refused.
     pub fn pseudonymize(&mut self, text: &str) -> String {
-        sigil_veil::pseudonymize(text, &mut self.map).0
+        let (t, f) = sigil_veil::pseudonymize(text, &mut self.map);
+        self.pending.extend(f);
+        t
     }
 
     /// Restore placeholders in a complete answer.
@@ -111,9 +117,10 @@ impl Veil {
     /// One egress-ledger JSON line for what was actually sent (the page keeps
     /// these in its own storage — "what did my AI send out?").
     /// `now_ms` = JavaScript `Date.now()` — wasm has no clock of its own.
-    pub fn ledger_line(&self, destination: &str, sent: &str, now_ms: f64) -> String {
+    pub fn ledger_line(&mut self, destination: &str, sent: &str, now_ms: f64) -> String {
         let ts = if now_ms.is_finite() && now_ms > 0.0 { (now_ms / 1000.0) as u64 } else { 0 };
-        sigil_veil::LedgerEntry::new_at(ts, destination, sent, &[]).to_json_line()
+        let found = std::mem::take(&mut self.pending);
+        sigil_veil::LedgerEntry::new_at(ts, destination, sent, &found).to_json_line()
     }
 }
 
@@ -143,5 +150,7 @@ mod tests {
         assert_eq!(v.hidden_count(), 1);
         let l = v.ledger_line("https://remote.example", "{}", 1_791_000_000_000.0);
         assert!(l.contains("\"ts\":1791000000"), "{l}");
+        assert!(l.contains("\"redacted\":[\"QNK\"]"), "the ledger must record what was hidden: {l}");
+        assert!(v.ledger_line("x", "{}", 1.0).contains("\"redacted\":[]"), "drained after one line");
     }
 }

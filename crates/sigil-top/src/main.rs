@@ -3674,6 +3674,11 @@ fn ai_submit(app: &mut App) {
     // Typed setup commands: `setup` / `install` / `retry` / `f5`. A phone or a terminal
     // that swallows function keys has no F5, so the keypress can never be the ONLY way to
     // (re)run the out-of-the-box flow.
+    // `privacy` / `egress` / `veil`: what (if anything) this AI has sent off the machine.
+    if flux_moe::is_privacy_command(&msg) {
+        app.ai_msgs.push(("assistant".to_string(), flux_moe::privacy_report()));
+        return;
+    }
     if flux_moe::is_setup_command(&msg) {
         if app.ai_setup_running {
             app.ai_msgs.push(("assistant".to_string(), "Auto-setup is already running — progress is above.".to_string()));

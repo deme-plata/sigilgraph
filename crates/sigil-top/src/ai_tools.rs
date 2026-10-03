@@ -58,6 +58,70 @@ wallet address or an amount, ASK — never guess, never use a placeholder. Copy 
 Actions (create wallet, start/stop mining) are confirmed by the user, so just call them when asked. Never ask for, \
 accept or repeat a seed or secret key.";
 
+// ── Scopes: least privilege for the AI, the GrapheneOS way ─────────────────
+//
+// GrapheneOS's strength is that an app only gets the scopes the user grants. Here
+// the "app" is the model: ON this device it may use every tool (nothing leaves);
+// OFF this device it gets only network-wide facts by default. Tool RESULTS go back
+// to an off-box model with identifiers hidden — but numbers are not identifiers, so
+// a remote model calling sigil_balance would learn the user's wealth. Wallet,
+// payment and action tools must be granted: SIGIL_AI_REMOTE_SCOPES=wallet,payments,actions.
+
+/// What a tool exposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// Chain-wide public facts: height, supply, pools, pool size, mining network, nation.
+    Network,
+    /// The user's own wallet: address, balance.
+    Wallet,
+    /// Proposing a payment (who the user pays, how much).
+    Payments,
+    /// Changing this node: create a wallet, start/stop mining.
+    Actions,
+}
+
+pub(crate) fn scope_of(tool: &str) -> Scope {
+    match tool {
+        "sigil_network_status" | "sigil_pools" | "sigil_shielded_status" | "sigil_mining_network" | "sigil_nation_status" => Scope::Network,
+        "sigil_propose_private_send" => Scope::Payments,
+        t if is_action(t) => Scope::Actions,
+        // sigil_balance, sigil_my_wallet — and anything unknown defaults to the
+        // personal scope (deny-by-default for a tool nobody classified)
+        _ => Scope::Wallet,
+    }
+}
+
+/// Pure: the scopes granted for a model on (`remote == false`) or off this device.
+pub(crate) fn granted_scopes(remote: bool, remote_scopes_env: Option<&str>) -> Vec<Scope> {
+    if !remote {
+        return vec![Scope::Network, Scope::Wallet, Scope::Payments, Scope::Actions];
+    }
+    let mut g = vec![Scope::Network];
+    for part in remote_scopes_env.unwrap_or("").split(',').map(|x| x.trim().to_ascii_lowercase()) {
+        let sc = match part.as_str() {
+            "wallet" => Some(Scope::Wallet),
+            "payments" | "payment" => Some(Scope::Payments),
+            "actions" | "action" => Some(Scope::Actions),
+            _ => None,
+        };
+        if let Some(sc) = sc { if !g.contains(&sc) { g.push(sc); } }
+    }
+    g
+}
+
+/// The tool list offered to the model, filtered to what is granted.
+pub(crate) fn tool_defs_for(granted: &[Scope]) -> Value {
+    let all = tool_defs();
+    let kept: Vec<Value> = all.as_array().cloned().unwrap_or_default().into_iter()
+        .filter(|t| t.pointer("/function/name").and_then(|n| n.as_str()).map(|n| granted.contains(&scope_of(n))).unwrap_or(false))
+        .collect();
+    Value::Array(kept)
+}
+
+pub(crate) fn scope_label(s: Scope) -> &'static str {
+    match s { Scope::Network => "network", Scope::Wallet => "wallet", Scope::Payments => "payments", Scope::Actions => "actions" }
+}
+
 pub(crate) fn is_action(name: &str) -> bool {
     matches!(name, "sigil_create_wallet" | "sigil_start_mining" | "sigil_stop_mining")
 }
@@ -263,8 +327,10 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
     } else { None };
     let http = match flux_moe::chat_client(route) { Ok(c) => c, Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; } };
     let url = format!("{}/api/chat", ollama_base);
+    let granted = granted_scopes(remote, std::env::var("SIGIL_AI_REMOTE_SCOPES").ok().as_deref());
+    let tools = tool_defs_for(&granted);
     for step in 0..MAX_STEPS {
-        let body = json!({"model": model, "messages": messages, "stream": true, "tools": tool_defs()});
+        let body = json!({"model": model, "messages": messages, "stream": true, "tools": tools});
         let resp = match http.post(&url).json(&body).send() {
             Ok(r) if r.status().is_success() => r,
             _ if step == 0 => return flux_moe::chat_stream(model, history, user, extra_system, tx),
@@ -311,6 +377,14 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
             let name = c.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("").to_string();
             let args = c.pointer("/function/arguments").cloned().unwrap_or(json!({}));
             let mut args = match args { Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})), v => v };
+            // Model output is DATA: a tool it was not given is refused, not run — even
+            // if it names one anyway (prompt injection, hallucination, a hostile provider).
+            if !granted.contains(&scope_of(&name)) {
+                let why = format!("not permitted: the '{}' scope is not granted to a model off this device", scope_label(scope_of(&name)));
+                if tx.send(StreamEv::ToolRan(format!("🔒 {name} refused — {why}"))).is_err() { return; }
+                messages.push(json!({"role":"tool","tool_name": name, "content": json!({"error": why}).to_string()}));
+                continue;
+            }
             // the tool acts on the REAL address, never on "[QNK_1]"
             if let Some(m) = &veil { flux_moe::rehydrate_json(&mut args, m); }
             if is_action(&name) {
@@ -337,6 +411,21 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scopes_default_to_least_privilege_off_device() {
+        assert_eq!(granted_scopes(false, None).len(), 4, "on-device: everything — nothing leaves");
+        assert_eq!(granted_scopes(true, None), vec![Scope::Network]);
+        assert_eq!(granted_scopes(true, Some("wallet, Payments ,bogus")), vec![Scope::Network, Scope::Wallet, Scope::Payments]);
+        let names = |v: Value| v.as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let remote = names(tool_defs_for(&granted_scopes(true, None)));
+        assert!(remote.contains(&"sigil_network_status".to_string()));
+        for personal in ["sigil_balance", "sigil_my_wallet", "sigil_propose_private_send", "sigil_create_wallet", "sigil_start_mining"] {
+            assert!(!remote.contains(&personal.to_string()), "{personal} offered to an off-device model");
+        }
+        assert_eq!(names(tool_defs_for(&granted_scopes(false, None))).len(), tool_defs().as_array().unwrap().len());
+        assert_eq!(scope_of("some_new_tool_nobody_classified"), Scope::Wallet, "unknown tools are personal (deny by default)");
+    }
 
     /// Minimal HTTP server: answers each accepted request with the next reply and
     /// returns the request bodies it saw.
@@ -368,6 +457,7 @@ mod tests {
 
     #[test]
     fn off_box_model_receives_only_the_on_device_rewrite() {
+        let _env = crate::flux_moe::tests::ai_model_env();
         let personal = "I'm Viktor, I live in Frederikshavn and my mum says my wallet send fails with HTTP 413 — why?";
         let history = vec![("user".to_string(), "earlier I told you my address is Rådhusgade 3".to_string()),
                            ("assistant".to_string(), "noted".to_string())];
@@ -397,7 +487,29 @@ mod tests {
     }
 
     #[test]
+    fn an_off_box_model_calling_an_ungranted_tool_is_refused_not_run() {
+        let _env = crate::flux_moe::tests::ai_model_env();
+        std::env::remove_var("SIGIL_AI_REMOTE_SCOPES");
+        let (port, srv) = fake_http(vec![
+            ("application/x-ndjson", format!("{}\n{}\n",
+                json!({"message":{"content":"","tool_calls":[{"function":{"name":"sigil_balance","arguments":{}}}]}}), json!({"done":true}))),
+            ("application/x-ndjson", format!("{}\n{}\n", json!({"message":{"content":"I can't see balances."}}), json!({"done":true}))),
+        ]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        chat_agent_at("m", &[], "what's my balance?", "", "http://127.0.0.1:1", &format!("http://127.0.0.1:{port}"),
+                      &flux_moe::AiRoute::Direct, None, None, flux_moe::RewriteMode::Off, &tx);
+        drop(tx);
+        let events: Vec<StreamEv> = rx.into_iter().collect();
+        let bodies = srv.join().unwrap();
+        assert!(!bodies[0].contains("\"sigil_balance\""), "the tool was never even offered");
+        assert!(events.iter().any(|e| matches!(e, StreamEv::ToolRan(t) if t.contains("refused") && t.contains("wallet"))));
+        assert!(!events.iter().any(|e| matches!(e, StreamEv::ToolRan(t) if t.contains("balance") && t.contains("SIGIL"))), "and it never ran");
+        assert!(bodies[1].contains("not permitted"), "the model is told why");
+    }
+
+    #[test]
     fn require_mode_without_a_rewriter_sends_nothing() {
+        let _env = crate::flux_moe::tests::ai_model_env();
         let (m_port, model_srv) = fake_http(vec![]);
         let (tx, rx) = std::sync::mpsc::channel();
         chat_agent_at("m", &[], "anything", "", "http://127.0.0.1:1", &format!("http://127.0.0.1:{m_port}"),
@@ -448,6 +560,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("veil-agent-{}", std::process::id()));
         let ledger = dir.join("veil-egress.jsonl");
         let (tx, rx) = std::sync::mpsc::channel();
+        let _env = crate::flux_moe::tests::ai_model_env();
+        std::env::set_var("SIGIL_AI_REMOTE_SCOPES", "wallet");
         chat_agent_at("m", &[], &format!("what is the balance of {W}?"), "", "http://127.0.0.1:1",
                       &format!("http://127.0.0.1:{port}"), &flux_moe::AiRoute::Direct, Some(&ledger),
                       None, flux_moe::RewriteMode::Off, &tx);
@@ -469,6 +583,7 @@ mod tests {
             "the tool must have acted on the REAL wallet, not fallen back to the node's own: {receipts:?}");
         assert_eq!(shown, format!("Balance of {W} is unknown."), "the screen shows the real address");
         assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 2, "both steps ledgered");
+        std::env::remove_var("SIGIL_AI_REMOTE_SCOPES");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1199,9 +1199,17 @@ pub(crate) fn privacy_report() -> String {
             ollama_base()),
         AiRoute::Refuse(m) => m,
     };
+    let remote = !matches!(current_ai_route(), AiRoute::Local);
+    let granted = crate::ai_tools::granted_scopes(remote, std::env::var("SIGIL_AI_REMOTE_SCOPES").ok().as_deref());
+    let names: Vec<&str> = granted.iter().map(|s| crate::ai_tools::scope_label(*s)).collect();
+    let perms = if remote {
+        format!("   permissions of the off-device model: {} (wallet, payments and actions only if granted: SIGIL_AI_REMOTE_SCOPES=wallet,payments,actions)", names.join(", "))
+    } else {
+        "   permissions: everything — the model is on this device, so nothing it sees leaves.".to_string()
+    };
     let ledger = std::fs::read_to_string(&path).unwrap_or_default();
     let body = sigil_veil::render_summary(&sigil_veil::ledger_summary(&ledger, 5), now);
-    format!("{where_}\n{body}\n   ledger: {}", path.display())
+    format!("{where_}\n{perms}\n{body}\n   ledger: {}", path.display())
 }
 
 /// Ledger one more outbound request of an agent turn (a follow-up step that carries
@@ -1428,7 +1436,7 @@ pub(crate) fn pick_model_tiered(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// Env vars are process-global and cargo runs tests in parallel threads: one
     /// test's remove_var landed mid-another's assert (explicit_choice_always_wins,
     /// then small_tier_only_for_phones_and_tiny_boxes — both failed in the suite and

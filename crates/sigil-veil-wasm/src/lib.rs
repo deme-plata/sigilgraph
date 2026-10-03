@@ -110,8 +110,10 @@ impl Veil {
 
     /// One egress-ledger JSON line for what was actually sent (the page keeps
     /// these in its own storage — "what did my AI send out?").
-    pub fn ledger_line(&self, destination: &str, sent: &str) -> String {
-        sigil_veil::LedgerEntry::new(destination, sent, &[]).to_json_line()
+    /// `now_ms` = JavaScript `Date.now()` — wasm has no clock of its own.
+    pub fn ledger_line(&self, destination: &str, sent: &str, now_ms: f64) -> String {
+        let ts = if now_ms.is_finite() && now_ms > 0.0 { (now_ms / 1000.0) as u64 } else { 0 };
+        sigil_veil::LedgerEntry::new_at(ts, destination, sent, &[]).to_json_line()
     }
 }
 
@@ -139,5 +141,7 @@ mod tests {
         assert_eq!(v.push("ok [QN"), "ok ");
         assert!(v.push("K_1].").starts_with("qnk4973"));
         assert_eq!(v.hidden_count(), 1);
+        let l = v.ledger_line("https://remote.example", "{}", 1_791_000_000_000.0);
+        assert!(l.contains("\"ts\":1791000000"), "{l}");
     }
 }

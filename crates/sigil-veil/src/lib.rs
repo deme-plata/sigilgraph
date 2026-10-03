@@ -536,10 +536,21 @@ pub struct LedgerEntry {
 
 impl LedgerEntry {
     pub fn new(destination: &str, sent_text: &str, findings: &[(Kind, String)]) -> Self {
+        // wasm32-unknown-unknown has no clock: SystemTime::now() PANICS there, and a
+        // panic inside a wasm-bindgen method leaves the object's borrow flag stuck
+        // (found by the browser E2E, 2026-10-03). Browser callers use `new_at`.
+        #[cfg(not(target_arch = "wasm32"))]
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        #[cfg(target_arch = "wasm32")]
+        let ts = 0;
+        Self::new_at(ts, destination, sent_text, findings)
+    }
+
+    /// Same as [`new`](Self::new) with the caller's clock (unix seconds).
+    pub fn new_at(ts: u64, destination: &str, sent_text: &str, findings: &[(Kind, String)]) -> Self {
         let mut kinds: Vec<Kind> = findings.iter().map(|(k, _)| *k).collect();
         kinds.sort();
         kinds.dedup();

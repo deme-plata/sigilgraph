@@ -1,0 +1,11 @@
+[package]
+name = "sigil-veil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Veil — the egress gate for private AI: nothing leaves the device by default; when a prompt must go to a remote model, secrets are refused, identifiers are swapped for placeholders before the bytes leave and swapped back in the answer, and every outbound byte is ledgered locally."
+
+# Deliberately dependency-light (blake3 only) so it builds for wasm32 too —
+# the SIGIL OS browser AI app has an endpoint picker and needs this gate most.
+[dependencies]
+blake3 = { workspace = true }

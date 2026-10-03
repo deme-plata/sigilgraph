@@ -9285,6 +9285,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-veil"
+version = "5.1.1"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "sigil-vm"
 version = "5.1.1"
 dependencies = [

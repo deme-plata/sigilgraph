@@ -792,7 +792,7 @@ function veilIsLocalJS(u){ try{ const h=new URL(u).hostname.toLowerCase(); retur
 function veilErr(msg){ const e=new Error(msg); e.veil=true; return e; }
 async function veilOutbound(messages){
   if(veilIsLocalJS(OLLAMA)) return {messages:messages, veil:null};
-  try{ if(!__veilMod){ const m=await import('./wasm/sigil_veil_wasm.js?v=3'); await m.default(); __veilMod=m; } }
+  try{ if(!__veilMod){ const m=await import('./wasm/sigil_veil_wasm.js?v=4'); await m.default(); __veilMod=m; } }
   catch(e){ throw veilErr('🕶 Veil (the privacy gate) could not load, so nothing was sent to the off-device model at '+OLLAMA+'. Use a model on this device, or reload the page.'); }
   if(__veilMod.veil_is_loopback(OLLAMA)) return {messages:messages, veil:null};
   if(!__veil) __veil=new __veilMod.Veil();
@@ -819,6 +819,7 @@ function veilPrivacyView(){
   if(!veilIsLocalJS(OLLAMA)){
     const g=veilRemoteScopes(), sw=(s,label)=>'<button class="btn '+(g.indexOf(s)>=0?'mag':'ghost')+'" onclick="veilToggleScope(\''+s+'\');this.className=\'btn \'+(veilRemoteScopes().indexOf(\''+s+'\')>=0?\'mag\':\'ghost\');this.textContent=\''+label+': \'+(veilRemoteScopes().indexOf(\''+s+'\')>=0?\'allowed\':\'off\')">'+label+': '+(g.indexOf(s)>=0?'allowed':'off')+'</button> ';
     here+='<br><br><b>Permissions of the off-device model</b> (like app permissions on GrapheneOS): network facts always · '+sw('wallet','your wallet & balance')+sw('payments','propose payments');
+    here+='<br>On-device rewrite (a local model turns your question into an anonymous one first): <button class="btn ghost" onclick="this.textContent=\'rewrite: \'+veilCycleRewrite()">rewrite: '+veilRewriteMode()+'</button>';
   }
   if(!L.length) return here+'<br><br>Nothing has ever left this browser for an AI model.';
   const ago=t=>{ const d=Math.max(0,Date.now()/1000-t); return !t?'?':d<120?Math.round(d)+'s ago':d<7200?Math.round(d/60)+'m ago':d<172800?Math.round(d/3600)+'h ago':Math.round(d/86400)+'d ago'; };
@@ -830,6 +831,33 @@ function veilPrivacyView(){
   h+='<br><br>Most recent — exactly what the model received:';
   L.slice(-5).reverse().forEach(e=>{ h+='<div class="note" style="margin-top:6px">'+ago(e.ts)+' → '+esc(e.destination)+' · '+(e.bytes||0)+' B<br><span class="mono">'+esc(lastUser(e))+'</span></div>'; });
   return h+'<div class="btns" style="margin-top:8px"><button class="btn ghost" onclick="localStorage.removeItem(\'veil-egress\');this.parentNode.innerHTML=\'ledger cleared\'">Clear this ledger</button></div>';
+}
+// SIGIL Veil L4 in the browser — an OFF-device model gets ONE question rewritten by a model on
+// THIS device (local ollama), vetted by the same Rust rules sigil-top uses; no history leaves.
+// localStorage 'veil-rewrite' = auto (default) | off | require.
+function veilRewriteMode(){ try{ const m=localStorage.getItem('veil-rewrite'); return (m==='off'||m==='require')?m:'auto'; }catch(e){ return 'auto'; } }
+function veilCycleRewrite(){ const n={auto:'require',require:'off',off:'auto'}[veilRewriteMode()]; try{ localStorage.setItem('veil-rewrite',n); }catch(e){} return n; }
+async function veilMaybeRewrite(raw){
+  if(veilIsLocalJS(OLLAMA)) return null;
+  const mode=veilRewriteMode(); if(mode==='off') return null;
+  let out=null;
+  try{
+    if(!__veilMod){ const m=await import('./wasm/sigil_veil_wasm.js?v=4'); await m.default(); __veilMod=m; }
+    const LOCAL='http://localhost:11434';
+    const tags=await fetch(LOCAL+'/api/tags',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+    const model=tags? __veilMod.veil_pick_rewriter((tags.models||[]).map(m=>m.name).join('\n')) : '';
+    if(model){
+      const hist=aiHistory.slice(0,-1).slice(-12).map(m=>m.role+'\t'+String(m.content).replace(/\n/g,'\\n')).join('\n');
+      const ac=new AbortController(), tm=setTimeout(()=>ac.abort(),90000);
+      const r=await fetch(LOCAL+'/api/chat',{method:'POST',headers:{'content-type':'application/json'},signal:ac.signal,
+        body:JSON.stringify({model:model,stream:false,think:false,options:{num_predict:160,temperature:0.2},
+          messages:[{role:'system',content:__veilMod.veil_rewrite_system()},{role:'user',content:__veilMod.veil_rewrite_prompt(hist,raw)}]})});
+      clearTimeout(tm);
+      if(r.ok){ const j=await r.json(); const v=__veilMod.veil_vet_rewrite((j.message||{}).content||'', raw); if(v) out=v; }
+    }
+  }catch(e){}
+  if(!out && mode==='require') throw veilErr('🕶 Not sent: rewriting is required and no model on this device could rewrite the question. Start a local ollama (OLLAMA_ORIGINS=* ollama serve) with a small model such as qwen3:0.6b.');
+  return out;
 }
 function veilDeep(v,o){ if(typeof o==='string') return v.rehydrate(o); if(Array.isArray(o)) return o.map(x=>veilDeep(v,x)); if(o&&typeof o==='object'){ const r={}; for(const k in o) r[k]=veilDeep(v,o[k]); return r; } return o; }
 // One streamed turn. onEv({thinking|token|tools|done}). Resolves with {content,tool_calls,done}.
@@ -906,6 +934,11 @@ function renderAI(body){
       progt.textContent=toks+' tok · '+rate.toFixed(1)+' tok/s · eta ~'+Math.max(0,(tgt-toks)/rate).toFixed(0)+'s (est.) · '+el.toFixed(0)+'s'; };
     const timer=setInterval(tick,250);
     try{
+      const rw=await veilMaybeRewrite(raw);
+      if(rw){ msgsOut.length=0; msgsOut.push({role:'system',content:AI_SYS},{role:'user',content:rw});
+        const n=document.createElement('div'); n.className='msg tool'; n.textContent='🕶 rewritten on this device before it left — the model is asked only: '+rw; msgs.insertBefore(n,bubble); }
+      else if(!veilIsLocalJS(OLLAMA) && veilRewriteMode()==='auto'){
+        const n=document.createElement('div'); n.className='msg tool'; n.textContent='🕶 no model on this device to rewrite with — sending your words with identifiers hidden'; msgs.insertBefore(n,bubble); }
       for(let step=0; step<4; step++){
         const res=await aiStream(msgsOut,veilToolsFor(),ev=>{
           if(ev.thinking) thinkChars+=ev.thinking.length;

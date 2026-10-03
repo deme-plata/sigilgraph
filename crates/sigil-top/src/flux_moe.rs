@@ -961,11 +961,8 @@ pub(crate) fn route_label(base: &str, route: &AiRoute) -> String {
 // runs ON this device, the latest message (with local context) is rewritten into ONE
 // self-contained, de-identified question, and only that leaves — no history.
 
-pub(crate) const REWRITE_SYSTEM: &str = "You prepare a question for an outside expert who must not learn who is asking. \
-Rewrite the user's LATEST request as ONE self-contained question. Keep every fact the expert needs to answer \
-correctly: numbers, amounts, error messages, code, technical terms, placeholders like [HEX_1]. Remove names of \
-people, places, employers, dates and personal anecdotes, and anything else that identifies the asker. Use plain, \
-neutral wording, not the user's own style. Output ONLY the rewritten question.";
+// The vetting rules live in sigil-veil (shared with the browser): one implementation.
+pub(crate) use sigil_veil::rewrite::{clean_rewrite, proper_nouns, scrub_carried_names, REWRITE_SYSTEM};
 
 /// The on-device model that rewrites outbound questions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -994,110 +991,17 @@ pub(crate) fn rewriter_base_from(v: Option<&str>) -> Option<String> {
     host_of(&base).filter(|h| is_loopback_host(h)).map(|_| base)
 }
 
-/// Pure: which installed model rewrites. Small and fast first — this is a
-/// paraphrase, not an answer.
+/// Pure: which installed model rewrites (ladder measured in sigil_veil::rewrite).
 pub(crate) fn pick_rewriter(models: &[String], forced: Option<&str>) -> Option<String> {
-    if let Some(f) = forced.map(str::trim).filter(|f| !f.is_empty()) {
-        return Some(f.to_string());
-    }
-    // Measured on Epsilon 2026-10-03 (CPU, load ~60, think off): qwen3:0.6b rewrote in
-    // 25–32 s; qwen3:4b took 133–148 s AND ignored think:false, answering with its
-    // reasoning (which quoted the original). Small first.
-    for want in ["qwen3:1.7b", "qwen3:0.6b", "llama3.2:3b", "qwen3:4b", "qwen3:8b"] {
-        if let Some(m) = models.iter().find(|m| m.as_str() == want || m.starts_with(&format!("{want}-"))) {
-            return Some(m.clone());
-        }
-    }
-    models.first().cloned()
+    sigil_veil::rewrite::pick_rewriter(models, forced)
 }
 
 /// Pure: what the rewriter is asked — the last few turns as private context.
 pub(crate) fn rewrite_request_messages(history: &[(String, String)], user: &str) -> Vec<serde_json::Value> {
-    let ctx: Vec<String> = history.iter().rev().filter(|(r, _)| r == "user" || r == "assistant").take(6)
-        .collect::<Vec<_>>().into_iter().rev()
-        .map(|(r, c)| format!("{r}: {}", c.chars().take(600).collect::<String>())).collect();
-    let mut prompt = String::new();
-    if !ctx.is_empty() {
-        prompt.push_str("Conversation so far (private context, do not repeat personal details):\n");
-        prompt.push_str(&ctx.join("\n"));
-        prompt.push_str("\n\n");
-    }
-    prompt.push_str("Latest request:\n");
-    prompt.push_str(user);
     vec![
         serde_json::json!({"role":"system","content":REWRITE_SYSTEM}),
-        serde_json::json!({"role":"user","content":prompt}),
+        serde_json::json!({"role":"user","content":sigil_veil::rewrite::rewrite_prompt(history, user)}),
     ]
-}
-
-/// Pure: accept a rewrite only if it looks like one question, not an essay, an
-/// answer or a refusal.
-pub(crate) fn clean_rewrite(raw: &str, original: &str) -> Option<String> {
-    let mut t = strip_think_blocks(raw).trim().to_string();
-    for label in ["Rewritten question:", "Rewritten request:", "Question:"] {
-        if let Some(rest) = t.strip_prefix(label) { t = rest.trim().to_string(); }
-    }
-    let t = t.trim_matches(|c| c == '"' || c == '“' || c == '”').trim().to_string();
-    let limit = (original.chars().count() * 4).max(600);
-    if t.is_empty() || t.chars().count() > limit {
-        return None;
-    }
-    let lower = t.to_lowercase();
-    if lower.starts_with("i can't") || lower.starts_with("i cannot") || lower.starts_with("sorry") {
-        return None;
-    }
-    // A model that "thinks out loud" instead of rewriting (measured: qwen3:4b with
-    // think:false) talks ABOUT the task — and quotes the original while doing it.
-    // Whole-word match: a substring test rejected "wallet's" for containing "let's".
-    let words = format!(" {} ", lower.chars().map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
-        .collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "));
-    for meta in ["the user", "rewrite", "rewriting", "rewritten", "original", "let's", "steps", "self contained",
-                 "output only", "translating", "translation", "here is", "here's"] {
-        if words.contains(&format!(" {meta} ")) {
-            return None;
-        }
-    }
-    // Any 6-word run copied verbatim from the original means it was not rewritten.
-    let norm = |x: &str| x.to_lowercase().split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric())).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
-    let (o, r) = (norm(original), norm(&t));
-    if o.len() >= 6 {
-        let rj = format!(" {} ", r.join(" "));
-        if o.windows(6).any(|w| rj.contains(&format!(" {} ", w.join(" ")))) {
-            return None;
-        }
-    }
-    Some(t)
-}
-
-/// Proper-noun-like words of the original: Capitalised, not sentence-initial, not an
-/// ACRONYM (SIGIL, HTTP), at least 3 letters. Names, places, employers.
-pub(crate) fn proper_nouns(original: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut sentence_start = true;
-    for raw in original.split_whitespace() {
-        let w: String = raw.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
-        let first_upper = w.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-        let all_caps = w.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
-        if !sentence_start && first_upper && !all_caps && w.chars().count() >= 3 && w.chars().all(|c| c.is_alphabetic()) {
-            if !out.contains(&w) { out.push(w.clone()); }
-        }
-        sentence_start = raw.ends_with('.') || raw.ends_with('!') || raw.ends_with('?') || raw.ends_with(':');
-    }
-    out
-}
-
-/// Deterministic backstop for a small rewriter that misses some (measured: qwen3:0.6b
-/// kept "Aalborg Sygehus"): any proper noun of the original that survived becomes [NAME].
-pub(crate) fn scrub_carried_names(rewrite: &str, original: &str) -> (String, usize) {
-    let mut out = rewrite.to_string();
-    let mut n = 0;
-    for name in proper_nouns(original) {
-        if out.contains(&name) {
-            out = out.replace(&name, "[NAME]");
-            n += 1;
-        }
-    }
-    (out, n)
 }
 
 /// Ask the on-device rewriter. None on any failure (caller decides by mode).

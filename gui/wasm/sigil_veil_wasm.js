@@ -158,6 +158,90 @@ export function veil_is_loopback(url) {
     const ret = wasm.veil_is_loopback(ptr0, len0);
     return ret !== 0;
 }
+
+/**
+ * Which installed model rewrites (models = newline-separated names).
+ * @param {string} models
+ * @returns {string}
+ */
+export function veil_pick_rewriter(models) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(models, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.veil_pick_rewriter(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * The rewriter's user turn. `history` = lines "role<TAB>content" (oldest first);
+ * only user/assistant lines are used, the last 6, each capped at 600 chars.
+ * @param {string} history
+ * @param {string} user
+ * @returns {string}
+ */
+export function veil_rewrite_prompt(history, user) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(history, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(user, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.veil_rewrite_prompt(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * The rewriter's system prompt.
+ * @returns {string}
+ */
+export function veil_rewrite_system() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.veil_rewrite_system();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Vet a rewrite: the cleaned, name-scrubbed question, or "" = do not use it.
+ * @param {string} raw
+ * @param {string} original
+ * @returns {string}
+ */
+export function veil_vet_rewrite(raw, original) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(raw, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(original, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.veil_vet_rewrite(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

@@ -44,6 +44,27 @@ export class Veil {
  */
 export function veil_is_loopback(url: string): boolean;
 
+/**
+ * Which installed model rewrites (models = newline-separated names).
+ */
+export function veil_pick_rewriter(models: string): string;
+
+/**
+ * The rewriter's user turn. `history` = lines "role<TAB>content" (oldest first);
+ * only user/assistant lines are used, the last 6, each capped at 600 chars.
+ */
+export function veil_rewrite_prompt(history: string, user: string): string;
+
+/**
+ * The rewriter's system prompt.
+ */
+export function veil_rewrite_system(): string;
+
+/**
+ * Vet a rewrite: the cleaned, name-scrubbed question, or "" = do not use it.
+ */
+export function veil_vet_rewrite(raw: string, original: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -55,9 +76,13 @@ export interface InitOutput {
     readonly veil_is_loopback: (a: number, b: number) => number;
     readonly veil_ledger_line: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly veil_new: () => number;
+    readonly veil_pick_rewriter: (a: number, b: number) => [number, number];
     readonly veil_pseudonymize: (a: number, b: number, c: number) => [number, number];
     readonly veil_push: (a: number, b: number, c: number) => [number, number];
     readonly veil_rehydrate: (a: number, b: number, c: number) => [number, number];
+    readonly veil_rewrite_prompt: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly veil_rewrite_system: () => [number, number];
+    readonly veil_vet_rewrite: (a: number, b: number, c: number, d: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

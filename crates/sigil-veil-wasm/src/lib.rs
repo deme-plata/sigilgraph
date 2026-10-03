@@ -50,6 +50,36 @@ pub fn veil_is_loopback(url: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost") || host == "::1" || host.starts_with("127.")
 }
 
+// ── L4 in the browser: the SAME rewrite rules sigil-top uses ──────────────────
+
+/// The rewriter's system prompt.
+#[wasm_bindgen]
+pub fn veil_rewrite_system() -> String {
+    sigil_veil::rewrite::REWRITE_SYSTEM.to_string()
+}
+
+/// The rewriter's user turn. `history` = lines "role<TAB>content" (oldest first);
+/// only user/assistant lines are used, the last 6, each capped at 600 chars.
+#[wasm_bindgen]
+pub fn veil_rewrite_prompt(history: &str, user: &str) -> String {
+    let h: Vec<(String, String)> = history.lines().filter_map(|l| l.split_once('\t'))
+        .map(|(r, c)| (r.to_string(), c.replace("\\n", "\n"))).collect();
+    sigil_veil::rewrite::rewrite_prompt(&h, user)
+}
+
+/// Vet a rewrite: the cleaned, name-scrubbed question, or "" = do not use it.
+#[wasm_bindgen]
+pub fn veil_vet_rewrite(raw: &str, original: &str) -> String {
+    sigil_veil::rewrite::vet(raw, original).unwrap_or_default()
+}
+
+/// Which installed model rewrites (models = newline-separated names).
+#[wasm_bindgen]
+pub fn veil_pick_rewriter(models: &str) -> String {
+    let m: Vec<String> = models.lines().map(str::to_string).filter(|x| !x.is_empty()).collect();
+    sigil_veil::rewrite::pick_rewriter(&m, None).unwrap_or_default()
+}
+
 #[wasm_bindgen]
 pub struct Veil {
     map: VeilMap,
@@ -136,6 +166,17 @@ mod tests {
         for bad in ["http://gpu.example:11434", "http://10.0.0.5:11434", "http://localhost@evil.example", "https://api.deepseek.com"] {
             assert!(!veil_is_loopback(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn rewrite_exports_match_the_shared_rules() {
+        let q = "Hej, jeg hedder Anna og arbejder på Aalborg Sygehus. Min chef Lars siger min mining rig laver 525 MH/s men jeg får 0 SIGIL — hvorfor?";
+        assert!(veil_vet_rewrite("Why 0 SIGIL at 525 MH/s at Aalborg Sygehus?", q).contains("[NAME] [NAME]"));
+        assert_eq!(veil_vet_rewrite("Okay, let's tackle this. The user wants", q), "");
+        assert_eq!(veil_pick_rewriter("qwen3:8b\nqwen3:0.6b\n"), "qwen3:0.6b");
+        let p = veil_rewrite_prompt("user\thi\ntool\t{secret}\n", "q?");
+        assert!(p.contains("user: hi") && !p.contains("{secret}") && p.ends_with("Latest request:\nq?"));
+        assert!(veil_rewrite_system().contains("Output ONLY"));
     }
 
     #[test]

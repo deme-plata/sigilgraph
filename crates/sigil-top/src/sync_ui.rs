@@ -395,11 +395,24 @@ struct DoneRange {
     at: Instant,
     /// Reached `Verified` before leaving, as opposed to merely being staged/dropped.
     verified: bool,
+    /// Network tip when the range completed. Blocks above it did not exist yet, so the
+    /// reply cannot have carried them.
+    tip: u64,
+}
+
+/// How many blocks of `[start, end)` could exist at network height `tip`. A sync range near
+/// the live tip asks for 10,000 blocks and receives only the few hundred that exist; counting
+/// the request instead of the reply is what made the Queues tab read 7,680–22,936 blk/s on a
+/// chain that makes 8 a second (Viktor's photo, 2026-09-25: every row was exactly 10,000/WAIT).
+/// `tip == 0` means unknown: fall back to the requested size rather than invent a number.
+pub(crate) fn existing_blocks(start: u64, end: u64, tip: u64) -> u64 {
+    let cap = if tip == 0 { end } else { end.min(tip.saturating_add(1)) };
+    cap.saturating_sub(start)
 }
 
 impl DoneRange {
     fn blocks(&self) -> u64 {
-        self.end.saturating_sub(self.start)
+        existing_blocks(self.start, self.end, self.tip)
     }
     /// Blocks per second for this range alone. The number that makes a row interesting:
     /// it says which peer is actually fast, not just which one answered.
@@ -441,7 +454,7 @@ fn seen_map() -> &'static std::sync::Mutex<SeenMap> {
 
 /// Diff this frame's live rows against the previous frame; anything that disappeared has
 /// completed, so move it into the retained log.
-fn reap_completed(rows: &[sigil_sync::RangeRow]) {
+fn reap_completed(rows: &[sigil_sync::RangeRow], tip: u64) {
     let now = Instant::now();
     let mut current: SeenMap = SeenMap::new();
     for r in rows {
@@ -463,6 +476,7 @@ fn reap_completed(rows: &[sigil_sync::RangeRow]) {
                 wait_ms: *age_ms,
                 at: now,
                 verified: *verified,
+                tip,
             });
         }
     }
@@ -478,9 +492,10 @@ fn reap_completed(rows: &[sigil_sync::RangeRow]) {
 pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = &app.p2p_state;
     let t = sigil_sync::live_telemetry();
+    let net_tip = s.peer_best_height.max(app.target_height);
     // Move anything that left the live queue since the last frame into the retained log,
     // so the table keeps showing completed work instead of blanking it instantly.
-    reap_completed(&t.rows);
+    reap_completed(&t.rows, net_tip);
 
     // `card_block` wants a &'static str. Build the title once and keep it — leaking on
     // every frame would be a slow memory leak in a program that redraws continuously.
@@ -637,7 +652,7 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
             // and how long it had waited, but not how BIG it was — so a slow row and a
             // huge row looked identical. Per-range throughput is what identifies a slow
             // peer rather than merely a slow moment.
-            let blocks = r.end.saturating_sub(r.start);
+            let blocks = existing_blocks(r.start, r.end, net_tip);
             let live_rate = if r.age_ms > 0 { blocks as f64 / (r.age_ms as f64 / 1000.0) } else { 0.0 };
             let rate_txt = if matches!(r.state, sigil_sync::RangeState::InFlight { .. }) && live_rate > 0.0 {
                 format!("{:.0}", live_rate)
@@ -821,7 +836,7 @@ pub(crate) struct QueueExtra { pub pos: String, pub ahead: String, pub mb: Strin
 
 /// Pure: compute the derived columns for a range row from counters already on screen.
 pub(crate) fn queue_extra(r: &sigil_sync::RangeRow, tip: u64, verified: u64, bytes_per_block: f64, avg_wait_ms: Option<f64>) -> QueueExtra {
-    let blocks = r.end.saturating_sub(r.start);
+    let blocks = existing_blocks(r.start, r.end, tip);
     let pos = if tip > 0 { format!("{:.1}%", 100.0 * r.start as f64 / tip as f64) } else { "—".into() };
     let ahead_n = r.start.saturating_sub(verified);
     let ahead = if ahead_n == 0 { "at frontier".into() } else { format!("+{}", group(ahead_n)) };
@@ -1118,5 +1133,25 @@ mod synced_tests {
         assert!(!is_synced(false, 0, true, false), "not following the network");
         assert!(!is_synced(true, 0, false, false), "no valid tip-proof");
         assert!(!is_synced(true, 0, true, true), "a verify break outranks everything");
+    }
+}
+
+#[cfg(test)]
+mod existing_blocks_tests {
+    use super::existing_blocks;
+
+    /// Viktor's photo, 2026-09-25: verified 25,979,107, tip 25,979,638, every range 10,000 wide.
+    #[test]
+    fn a_range_past_the_tip_counts_only_blocks_that_exist() {
+        assert_eq!(existing_blocks(25_979_107, 25_989_107, 25_979_638), 532);
+        // 532 blocks in 0.436 s is ~1,220 blk/s, not the 22,936 the old formula printed.
+        assert!(532.0 / 0.436 < 1_300.0);
+    }
+
+    #[test]
+    fn a_range_below_the_tip_is_unchanged_and_unknown_tip_falls_back() {
+        assert_eq!(existing_blocks(1_000, 11_000, 50_000), 10_000);
+        assert_eq!(existing_blocks(1_000, 11_000, 0), 10_000);
+        assert_eq!(existing_blocks(60_000, 70_000, 50_000), 0, "entirely above the tip: nothing existed");
     }
 }

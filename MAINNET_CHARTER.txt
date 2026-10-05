@@ -1,0 +1,39 @@
+SIGIL MAINNET CHARTER
+
+DRAFT. Not signed, not final. Values below equal the testnet code on 2026-10-05.
+
+This charter states what a holder of SIGIL gets and what the protocol takes. Its exact bytes are hashed with BLAKE3, and that hash is written into the mainnet genesis block, so a different charter means a different chain. The node will not compile if a number in its code disagrees with a parameter line below.
+
+Parameter lines start with "* ". Everything else is prose for people.
+
+Supply
+
+There is no premine, sale, or founder, team or investor allocation. The genesis block creates zero coins. Every coin is created by mining, under a time-based halving schedule.
+
+* network_id = sigil-m1
+* decimals = 10
+* max_supply_glyphs = 210000000000000000
+* premine_glyphs = 0
+* seconds_per_halving = 126230400
+* max_reward_per_block_glyphs = 20000000000
+
+Fees taken from each block reward
+
+Each block reward is split by a fixed rule. Before height welfare_from_height, the project wallet takes dev_fee_bps_initial. From that height it takes dev_fee_bps, of which welfare_bps goes to a citizen-stipend pool instead. A further commons_bps goes to a commons treasury that pays contributors, including AI agents. operator_pool_bps is defined for node operators but is not paid out yet. The miner receives the rest. One basis point (bps) is 0.01 %.
+
+* dev_fee_bps_initial = 500
+* welfare_from_height = 900000
+* dev_fee_bps = 750
+* welfare_bps = 200
+* commons_bps = 120
+* operator_pool_bps = 10
+
+Fees taken from DEX swaps
+
+Every swap pays dex_protocol_fee_bps of its output to the project wallet, in addition to the fee that goes to liquidity providers.
+
+* dex_protocol_fee_bps = 30
+
+Changing this charter
+
+A change is published as a new charter that names the hash of the one it replaces. Old charters are never deleted. A change to a parameter line is a change of consensus and takes effect only at a stated block height.

@@ -86,6 +86,25 @@ pub const GENESIS_TIMESTAMP_MS: u64 = 1787777640000;
 /// node — no wall-clock, no randomness, no environment dependence. Anything
 /// that would break that determinism (a `now_ms()` timestamp, an unordered
 /// map iteration, etc.) is a bug in this function, not an acceptable variance.
+/// The document block 0 commits to, in its `fluxc_artifact_proof.artifact_blake3` field.
+///
+/// On the live testnet (`sigil-g2`) this stays 32 zero bytes, exactly as g2's genesis was
+/// minted; `g2_genesis_hash_is_pinned` fails if that ever changes. Every other network
+/// (the `sigil-m1` mainnet, the `sigil-r1` rehearsal) commits the BLAKE3 hash of
+/// `MAINNET_CHARTER.txt`, so that network's identity is bound to its contract: a different
+/// charter gives a different genesis hash, and therefore a different chain.
+///
+/// 2026-10-05: before this, no code hashed any document into genesis. Comments that say
+/// `SIGIL_GENESIS_v0.md` is "BLAKE3-committed into the genesis header" describe an intent
+/// that was never implemented; the AI-citizen table lives in this source file only.
+pub fn genesis_charter_commitment() -> [u8; 32] {
+    if NETWORK_ID == *b"sigil-g2" {
+        [0u8; 32]
+    } else {
+        sigil_charter::charter_hash()
+    }
+}
+
 pub fn build_genesis() -> Result<Block> {
     let producer = [0u8; 32];
     let parent = [0u8; 32];
@@ -175,7 +194,7 @@ pub fn build_genesis() -> Result<Block> {
         tx_count: 0,
 
         fluxc_artifact_proof: ProofBundle {
-            artifact_blake3: [0u8; 32],
+            artifact_blake3: genesis_charter_commitment(),
             sqisign_sig: vec![],
             sqisign_pubkey: vec![],
             settle_tx: None,
@@ -202,6 +221,30 @@ pub fn build_genesis() -> Result<Block> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The live testnet's genesis must never change. Hash read from the running g2
+    /// producer's binary on 2026-10-05 (`sigil-node mint-genesis`).
+    #[test]
+    fn g2_genesis_hash_is_pinned() {
+        if NETWORK_ID != *b"sigil-g2" {
+            return;
+        }
+        let hash = build_genesis().expect("genesis").hash();
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "d647e45c6d5da3fbc824920ffd7acb18050fa01c353327114287dafff38fede2");
+        assert_eq!(genesis_charter_commitment(), [0u8; 32]);
+    }
+
+    /// Any other network commits the charter, so changing the charter changes the chain.
+    #[test]
+    fn non_g2_genesis_commits_the_charter() {
+        if NETWORK_ID == *b"sigil-g2" {
+            return;
+        }
+        let g = build_genesis().expect("genesis");
+        assert_eq!(g.header.fluxc_artifact_proof.artifact_blake3, sigil_charter::charter_hash());
+        assert_ne!(g.header.fluxc_artifact_proof.artifact_blake3, [0u8; 32]);
+    }
 
     /// The whole point of this module: two independent calls (standing in for
     /// two independent nodes/binaries) must mint byte-for-byte the same

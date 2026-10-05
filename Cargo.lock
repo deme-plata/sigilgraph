@@ -8504,6 +8504,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-charter"
+version = "5.1.1"
+dependencies = [
+ "blake3",
+ "sigil-bank",
+ "sigil-emission",
+ "sigil-header",
+ "sigil-state",
+]
+
+[[package]]
 name = "sigil-chronos"
 version = "5.1.1"
 dependencies = [
@@ -8903,6 +8914,7 @@ dependencies = [
  "sigil-api",
  "sigil-bank",
  "sigil-braidpool",
+ "sigil-charter",
  "sigil-chronos",
  "sigil-dagknight",
  "sigil-dandelion",

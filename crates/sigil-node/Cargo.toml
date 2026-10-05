@@ -49,6 +49,7 @@ sigil-shield = { path = "../sigil-shield" }
 sigil-state   = { path = "../sigil-state" }
 sigil-emission = { path = "../sigil-emission" } # ONE-CHAIN step 1: block reward for braid coinbase
 sigil-bank    = { path = "../sigil-bank" } # pool-share coinbase: master/commons dev-fee split
+sigil-charter = { path = "../sigil-charter" } # mainnet charter: hash committed in non-g2 genesis; const-checks the economics
 flux-vdf      = { workspace = true } # test-only: constructing AcceptedSolve for the mint_next_block integration test
 sigil-api = { path = "../sigil-api" }
 sigil-events  = { path = "../sigil-events" }

@@ -1,0 +1,13 @@
+[package]
+name = "sigil-charter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The SIGIL mainnet charter: a plain-text contract with parameter lines (Ricardian style). Its BLAKE3 hash goes into the mainnet genesis block, and const assertions make the build fail if the code's economic constants disagree with it."
+
+[dependencies]
+blake3 = "1"
+sigil-header = { path = "../sigil-header" }
+sigil-state = { path = "../sigil-state" }
+sigil-emission = { path = "../sigil-emission" }
+sigil-bank = { path = "../sigil-bank" }

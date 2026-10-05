@@ -15,8 +15,27 @@
 use serde::{Deserialize, Serialize};
 
 /// Network ID baked into every header. Prevents replay across the
-/// Quillon/SIGIL boundary. See genesis §1 lock #3.
-pub const NETWORK_ID: [u8; 8] = *b"sigil-g2";
+/// Quillon/SIGIL boundary, and between SIGIL networks. See genesis §1 lock #3.
+///
+/// Chosen at build time by `SIGIL_NETWORK` (see `build.rs`); unset = `sigil-g2`.
+/// It is part of the genesis header, so each network has its own genesis hash, and
+/// `precheck` refuses a header from any other network.
+pub const NETWORK_ID: [u8; 8] = network_id_bytes(NETWORK_ID_STR);
+
+/// String form of [`NETWORK_ID`].
+pub const NETWORK_ID_STR: &str = env!("SIGIL_NET_ID");
+
+const fn network_id_bytes(s: &str) -> [u8; 8] {
+    let b = s.as_bytes();
+    assert!(b.len() == 8, "network id must be exactly 8 bytes");
+    let mut out = [0u8; 8];
+    let mut i = 0;
+    while i < 8 {
+        out[i] = b[i];
+        i += 1;
+    }
+    out
+}
 
 /// Header schema version. Bumped only when the on-wire layout changes.
 /// Code that reads a foreign-version header MUST refuse and not guess.

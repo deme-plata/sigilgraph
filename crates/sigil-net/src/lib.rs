@@ -37,27 +37,52 @@ pub use tor_policy::{route_egress, EgressClass, EgressRoute};
 /// shape for `network_id`. Lives in block headers (per SIGIL_GENESIS_v0.md §2).
 pub mod peer_view;
 
-pub const NETWORK_ID: &[u8] = b"sigil-g2";
+pub const NETWORK_ID: &[u8] = NETWORK_ID_STR.as_bytes();
 
 /// String form of [`NETWORK_ID`], for paths/topics/log messages.
-pub const NETWORK_ID_STR: &str = "sigil-g2";
+///
+/// Chosen at build time by `SIGIL_NETWORK` (see `build.rs`); unset = `sigil-g2`.
+/// Every string below is derived from it, so a binary built for one network
+/// never joins another's topics or protocols.
+pub const NETWORK_ID_STR: &str = env!("SIGIL_NET_ID");
+
+// sigil-header has its own copy of the build script; they must agree, or blocks this
+// crate gossips would carry a network id the header precheck refuses.
+const _: () = assert!(
+    bytes_eq(NETWORK_ID, &sigil_header::NETWORK_ID),
+    "sigil-net and sigil-header were built for different SIGIL_NETWORK values"
+);
+
+const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// libp2p protocol prefix. All SIGIL streams negotiate under this prefix so a
 /// Quillon node and a SIGIL node sharing a TCP port (or running on the same
 /// host) ignore each other cleanly.
-pub const PROTOCOL_PREFIX: &str = "/sigil/g2/";
+pub const PROTOCOL_PREFIX: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/");
 
 // ── Gossipsub topics ────────────────────────────────────────────────────────
 //
 // One topic per concern. Keep them dense (publishers know exactly where their
 // message belongs) and stable (changing a topic string is a wire-break).
 
-pub const TOPIC_BLOCKS: &str = "/sigil/g2/blocks";
-pub const TOPIC_PEER_HEIGHTS: &str = "/sigil/g2/peer-heights";
-pub const TOPIC_TIP_PROOFS: &str = "/sigil/g2/tip-proofs";
-pub const TOPIC_TXS: &str = "/sigil/g2/txs";
+pub const TOPIC_BLOCKS: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/blocks");
+pub const TOPIC_PEER_HEIGHTS: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/peer-heights");
+pub const TOPIC_TIP_PROOFS: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/tip-proofs");
+pub const TOPIC_TXS: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/txs");
 /// `sigil-updater` broadcasts `ReleaseAnnouncement` JSON on this topic.
-pub const TOPIC_RELEASE: &str = "/sigil/g2/release";
+pub const TOPIC_RELEASE: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/release");
 /// Finality votes (`sigil_finality::FinalityVote`, JSON). Phase 2 of SIGIL
 /// True Instant Finality — see `crates/sigil-node/src/finality_wire.rs`.
 ///
@@ -67,7 +92,7 @@ pub const TOPIC_RELEASE: &str = "/sigil/g2/release";
 /// deliberate — an observer that does not vote still needs to *receive*
 /// votes, since measuring how fast a certificate assembles is the entire
 /// point of Phase 2.
-pub const TOPIC_FINALITY_VOTES: &str = "/sigil/g2/finality-votes";
+pub const TOPIC_FINALITY_VOTES: &str = concat!("/sigil/", env!("SIGIL_NET_SHORT"), "/finality-votes");
 
 /// All SIGIL topics, in the order a freshly-booted node should subscribe.
 /// Subscribing to blocks before tip-proofs would mean accepting block-data
@@ -407,6 +432,42 @@ impl SigilNetConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A default build (no `SIGIL_NETWORK`) must speak exactly the live g2 wire. If this
+    /// fails, the network selector changed what the running testnet nodes hear.
+    #[test]
+    fn default_build_is_byte_identical_to_the_g2_wire() {
+        if option_env!("SIGIL_NETWORK").is_some() {
+            return; // a deliberate non-default build; covered by the derivation test below
+        }
+        assert_eq!(NETWORK_ID_STR, "sigil-g2");
+        assert_eq!(NETWORK_ID, b"sigil-g2");
+        assert_eq!(sigil_header::NETWORK_ID, *b"sigil-g2");
+        assert_eq!(PROTOCOL_PREFIX, "/sigil/g2/");
+        assert_eq!(
+            ALL_TOPICS,
+            &[
+                "/sigil/g2/tip-proofs",
+                "/sigil/g2/peer-heights",
+                "/sigil/g2/release",
+                "/sigil/g2/blocks",
+                "/sigil/g2/txs",
+                "/sigil/g2/finality-votes",
+            ]
+        );
+    }
+
+    /// Whatever network a binary is built for, every wire string is derived from its id.
+    #[test]
+    fn every_wire_string_derives_from_the_network_id() {
+        let short = NETWORK_ID_STR.strip_prefix("sigil-").expect("id starts with sigil-");
+        assert_eq!(PROTOCOL_PREFIX, format!("/sigil/{short}/"));
+        assert_eq!(NETWORK_ID, NETWORK_ID_STR.as_bytes());
+        assert_eq!(&sigil_header::NETWORK_ID[..], NETWORK_ID);
+        for t in ALL_TOPICS {
+            assert!(t.starts_with(PROTOCOL_PREFIX), "topic {t} is not under {PROTOCOL_PREFIX}");
+        }
+    }
 
     #[test]
     fn all_topics_start_with_protocol_prefix() {

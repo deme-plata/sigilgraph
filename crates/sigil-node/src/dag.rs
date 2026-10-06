@@ -368,11 +368,16 @@ pub const TOPOLOGY_COMMITMENT_WINDOW: u64 = 32;
 /// **Honest note on what this actually computes on SIGIL today:** with a
 /// single producer, every block in every window shares one producer id, so
 /// `braid_word` always yields the empty word on 1 strand — the Alexander
-/// polynomial of the unknot, a fixed, non-informative value. This becomes a
-/// real, block-to-block-varying invariant the moment a second real producer
-/// joins the mesh. It is computed and committed now anyway so the field's
-/// history is tamper-evident (part of `signing_bytes()`) from the moment it
-/// starts appearing, not retroactively once it becomes interesting.
+/// polynomial of the unknot, a fixed, non-informative value. ⚠ Corrected
+/// 2026-10-06: a SECOND producer does NOT change that. This V1 convention emits
+/// a generator only while a strand travels to sit next to another, and two
+/// strands are always adjacent, so with two producers the word is empty for
+/// every DAG shape (pinned by present.rs `adjacent_strand_merge_yields_no_crossing`
+/// and `two_producer_alternation_v1_is_blind_reference_braid_counts`). Only
+/// the producer list in the hash varies. It first varies at three producers.
+/// `sigil_dagknight::present::ReferenceBraid` (analysis only, `sigil-knot`)
+/// is the convention that sees two. It is computed and committed now anyway
+/// so the field's history is tamper-evident (part of `signing_bytes()`).
 pub fn compute_topology_commitment(braid: Option<&Braid>, next_height: u64) -> Option<[u8; 32]> {
     let braid = braid?;
     if next_height == 0 {

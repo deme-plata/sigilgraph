@@ -172,6 +172,114 @@ impl Braid {
     }
 }
 
+/// The REFERENCE-TWIST presentation (QTFT-2.1, analysis only — 2026-10-06).
+///
+/// Why a second convention: [`Braid::braid_word`] (V1, the one committed in
+/// `topology_commitment`) emits a generator only while a strand TRAVELS to sit
+/// next to another, and nothing for the merge itself. Two strands are always
+/// adjacent, so with two producers V1 yields the empty word for every DAG
+/// shape — pinned by `adjacent_strand_merge_yields_no_crossing`. Two
+/// producers is exactly the next step on the roadmap, so V1 would be blind
+/// the moment it first had something to see.
+///
+/// The convention, over the same strands (producers, ascending byte order)
+/// and the same deterministic linearization as V1:
+///
+/// - Every parent edge — the spine parent AND each merge parent — from a
+///   block on strand `s` to a resident, in-window block on strand `t ≠ s`
+///   means "producer s built on producer t's block". Each such edge is one
+///   full positive twist of the two strands: the pure-braid generator
+///   `A_ij = σ_{j−1}⋯σ_{i+1} σ_i² σ_{i+1}⁻¹⋯σ_{j−1}⁻¹` (1-based `i < j`).
+/// - Same-strand and out-of-window edges contribute nothing, so one producer
+///   still yields the empty word on one strand — byte-identical to V1.
+///
+/// Every `A_ij` returns every strand to its starting place, so the word is a
+/// PURE braid and its closure is a link with one component per producer.
+/// The abelianization of the pure braid group is exactly the pairwise linking
+/// numbers, so `lk(s, t)` of the closure = the number of cross references
+/// between `s` and `t` in the window. Two producers that never built on each
+/// other close to the unlink (split, Alexander polynomial 0). Direction is NOT
+/// topological (`A_ij` is symmetric), so it is carried beside the word, in
+/// `directed`, as a plain count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceBraid {
+    /// Number of strands (distinct in-window producers).
+    pub strands: u32,
+    /// Pure braid word, `±(i+1)` = `σ_i^{±1}` (the `flux-topology` encoding).
+    pub word: Vec<i32>,
+    /// Strand index → producer id (ascending byte order — same ranking as V1).
+    pub producers: Vec<[u8; 32]>,
+    /// `directed[s][t]` = parent edges from strand `s`'s blocks to strand
+    /// `t`'s blocks (s built on t). The diagonal is always 0.
+    pub directed: Vec<Vec<u32>>,
+    /// Distinct heights in the window that were resident (same meaning as
+    /// [`BraidPresentation::heights_resident`]).
+    pub heights_resident: usize,
+}
+
+/// `A_ij` for 0-based strands `a < b`, appended to `word`.
+fn push_full_twist(word: &mut Vec<i32>, a: usize, b: usize) {
+    let (i, j) = (a as i32 + 1, b as i32 + 1);
+    word.extend((i + 1..j).rev());
+    word.extend([i, i]);
+    word.extend((i + 1..j).map(|k| -k));
+}
+
+impl Braid {
+    /// The reference-twist presentation of `[from_height, to_height]`. See
+    /// [`ReferenceBraid`]. Deterministic: a pure function of the DAG contents
+    /// and the window bounds.
+    pub fn reference_braid(&self, from_height: u64, to_height: u64) -> ReferenceBraid {
+        if from_height > to_height {
+            return ReferenceBraid {
+                strands: 0,
+                word: Vec::new(),
+                producers: Vec::new(),
+                directed: Vec::new(),
+                heights_resident: 0,
+            };
+        }
+        let in_window = |h: u64| h >= from_height && h <= to_height;
+        let ordered: Vec<_> = self
+            .order_from_height(from_height)
+            .into_iter()
+            .filter_map(|hash| self.view_of(&hash))
+            .filter(|v| in_window(v.height))
+            .collect();
+        let heights_resident = {
+            let mut hs: Vec<u64> = ordered.iter().map(|v| v.height).collect();
+            hs.sort_unstable();
+            hs.dedup();
+            hs.len()
+        };
+        let mut producers: Vec<[u8; 32]> = ordered.iter().map(|v| v.producer).collect();
+        producers.sort_unstable();
+        producers.dedup();
+        let strand_of: HashMap<[u8; 32], usize> =
+            producers.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let n = producers.len();
+        let mut directed = vec![vec![0u32; n]; n];
+        let mut word = Vec::new();
+        for view in &ordered {
+            let s = strand_of[&view.producer];
+            for p in std::iter::once(&view.parent).chain(view.merge_parents.iter()) {
+                let Some(pv) = self.view_of(p) else { continue };
+                if !in_window(pv.height) {
+                    continue;
+                }
+                let Some(&t) = strand_of.get(&pv.producer) else { continue };
+                if t == s {
+                    continue;
+                }
+                directed[s][t] += 1;
+                push_full_twist(&mut word, s.min(t), s.max(t));
+            }
+        }
+        ReferenceBraid { strands: n as u32, word, producers, directed, heights_resident }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +454,95 @@ mod tests {
         let sub_a = feed(&views).braid_word(1, 2);
         let sub_b = feed(&reversed).braid_word(1, 2);
         assert_eq!(sub_a, sub_b);
+    }
+
+    // ── reference-twist presentation (QTFT-2.1) ─────────────────────────────
+
+    #[test]
+    fn full_twist_words_are_the_artin_pure_generators() {
+        let mut w = Vec::new();
+        push_full_twist(&mut w, 0, 1);
+        assert_eq!(w, vec![1, 1], "A_12 = σ1²");
+        w.clear();
+        push_full_twist(&mut w, 0, 2);
+        assert_eq!(w, vec![2, 1, 1, -2], "A_13 = σ2 σ1² σ2⁻¹");
+        w.clear();
+        push_full_twist(&mut w, 1, 3);
+        assert_eq!(w, vec![3, 2, 2, -3], "A_24 = σ3 σ2² σ3⁻¹");
+    }
+
+    #[test]
+    fn one_producer_reference_braid_is_empty_like_v1() {
+        // g2 today: one producer, linear chain → empty word on one strand,
+        // the same as the committed V1 convention.
+        let views: Vec<_> = (0..6u8)
+            .map(|k| v(h(k), if k == 0 { [0u8; 32] } else { h(k - 1) }, vec![], k as u64, PA))
+            .collect();
+        let b = feed(&views);
+        let r = b.reference_braid(0, 5);
+        let p = b.braid_word(0, 5);
+        assert_eq!((r.strands, &r.word), (1, &Vec::new()));
+        assert_eq!((p.strands, &p.word), (1, &Vec::new()));
+        assert_eq!(r.directed, vec![vec![0]]);
+    }
+
+    #[test]
+    fn two_producer_alternation_v1_is_blind_reference_braid_counts() {
+        // A, B, A, B … each building on the other's block. The producers see
+        // each other on every block; V1 says nothing, the reference braid
+        // gives σ1^(2·edges).
+        let views: Vec<_> = (0..7u8)
+            .map(|k| {
+                let parent = if k == 0 { [0u8; 32] } else { h(k - 1) };
+                v(h(k), parent, vec![], k as u64, if k % 2 == 0 { PA } else { PB })
+            })
+            .collect();
+        let b = feed(&views);
+        assert!(b.braid_word(0, 6).word.is_empty(), "V1 is blind to two strands");
+        let r = b.reference_braid(0, 6);
+        assert_eq!(r.strands, 2);
+        assert_eq!(r.word, vec![1; 12], "6 cross edges → σ1¹²");
+        assert_eq!(r.directed, vec![vec![0, 3], vec![3, 0]], "B built on A 3×, A on B 3×");
+    }
+
+    #[test]
+    fn one_way_reference_is_directed_but_still_linked() {
+        // A builds its own spine and merges B's blocks; B never references A.
+        let views = vec![
+            v(h(0), [0u8; 32], vec![], 0, PA),
+            v(h(1), h(0), vec![], 1, PA),
+            v(h(2), h(0), vec![], 1, PB),
+            v(h(3), h(1), vec![h(2)], 2, PA),
+            v(h(4), h(2), vec![], 2, PB),
+            v(h(5), h(3), vec![h(4)], 3, PA),
+        ];
+        let r = feed(&views).reference_braid(1, 3);
+        assert_eq!(r.strands, 2);
+        assert_eq!(r.word, vec![1, 1, 1, 1]);
+        let (a, bb) = (r.producers.iter().position(|p| *p == PA).unwrap(), r.producers.iter().position(|p| *p == PB).unwrap());
+        assert_eq!(r.directed[a][bb], 2, "A merged B twice");
+        assert_eq!(r.directed[bb][a], 0, "B never built on A");
+    }
+
+    #[test]
+    fn reference_braid_deterministic_across_arrival_orders() {
+        let views = vec![
+            v(h(0), [0u8; 32], vec![], 0, PA),
+            v(h(1), h(0), vec![], 1, PA),
+            v(h(2), h(0), vec![], 1, PB),
+            v(h(3), h(0), vec![], 1, PC),
+            v(h(4), h(1), vec![h(3)], 2, PA),
+            v(h(5), h(2), vec![h(1)], 2, PB),
+            v(h(6), h(3), vec![h(5), h(4)], 3, PC),
+        ];
+        let forward = feed(&views).reference_braid(0, 3);
+        let mut reversed = views.clone();
+        reversed.reverse();
+        assert_eq!(forward, feed(&reversed).reference_braid(0, 3));
+        assert_eq!(forward.strands, 3);
+        let total: u32 = forward.directed.iter().flatten().sum();
+        assert_eq!(total, 4, "A→C, B→A, C→B, C→A");
+        // A_13 (len 4) ×2 + A_12 (len 2) + A_23 (len 2)
+        assert_eq!(forward.word.len(), 12);
     }
 }

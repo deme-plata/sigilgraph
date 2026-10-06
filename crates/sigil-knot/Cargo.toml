@@ -1,0 +1,16 @@
+[package]
+name = "sigil-knot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QTFT-2.1 — read the SIGIL block DAG as a braid and say what its knot means: one strand (one producer), split (producers that never built on each other), one-way (A sees B, B never sees A) or braided. Uses the reference-twist presentation (sigil-dagknight::present::ReferenceBraid) and exact invariants from flux-topology (linking matrix, writhe, Alexander polynomial). Analysis only: nothing here is committed in a header."
+
+[dependencies]
+flux-topology   = { workspace = true }
+sigil-dagknight = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+
+[[bin]]
+name = "sigil-knot"
+path = "src/main.rs"

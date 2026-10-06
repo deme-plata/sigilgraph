@@ -4,6 +4,54 @@
 >
 > Viktor directive, 2026-05-30. Drafted by rocky. Builds on DeepSeek V4's QTFT design papers (`qtft-quillon-integration.tex`, `qtft-technical-overview.tex`, `/opt/orobit/shared/QTFT/` on Beta) + project_sigil_chain lock #21 (QTFT → Flux primitive first, SIGIL inherits).
 
+## Status, measured 2026-10-06 (read this before the vision below)
+
+| lane | state | evidence |
+|---|---|---|
+| QTFT-1 `flux-topology` (permutation, writhe, linking, Burau, exact Alexander) | ✅ shipped | 6/6 knot KATs (unknot, trefoil, figure-eight, Hopf) |
+| QTFT-2 `topology_commitment` in the header, recomputed on receipt | ✅ live, **vacuous** | g2 and r1 both have ONE producer → 1 strand → Δ = 1 on every block. Enforce is off (`SIGIL_TOPOLOGY_ENFORCE`) |
+| Path C peer-producer affinity for backfill | ✅ live in sigil-node | `topology.rs` |
+| **QTFT-2.1 reference-twist braid + `sigil-knot` analyzer** | ✅ committed, analysis only | sigil-dagknight 84/84, sigil-knot 5/5 |
+| QTFT-3 Khovanov deep-fork adjudication | ❌ not started | |
+| QTFT-4 braided-settlement fairness proof | ❌ not started | |
+| QTFT-5 the braid in the browser viz | ❌ not started | |
+
+**The finding that made QTFT-2.1 necessary.** The committed V1 convention
+(`present.rs::braid_word`) emits a crossing only while a strand *travels* to
+sit next to another, never for the merge itself. Two strands are always
+adjacent, so **with two producers V1 gives the empty word for every DAG
+shape** (the test `adjacent_strand_merge_yields_no_crossing` pins it). The
+roadmap's next step is a second producer, so the header's knot would have
+stayed the unknot exactly when it first had something to see.
+
+**QTFT-2.1, the reference-twist convention** (`ReferenceBraid`): every time
+producer s builds on producer t's block (spine or merge parent), strands s and
+t get one full twist, the pure-braid generator A_st. The closure is a link with
+one loop per producer, and because the abelianization of the pure braid group
+is exactly the pairwise linking numbers, **lk(s,t) = number of times s and t
+built on each other** (tested on 40 random DAGs). A split link has Δ = 0 (a
+theorem), so two producers that never reference each other close to the
+unlink. One producer stays the empty word — byte-identical to V1 on g2.
+
+What it reads (run `sigil-knot --demo` for all four):
+
+| shape | invariant | meaning |
+|---|---|---|
+| one producer | unknot, Δ = 1 | g2 and r1 today |
+| two producers, healthy | torus link T(2,2k), lk = k, Δ = (t^2k − 1)/(t + 1) | they see each other k times |
+| one-way gossip | still linked (lk = k), but `directed` is k / 0 | A sees B, B never sees A |
+| partitioned | split, Δ = 0 | groups that never built on each other |
+
+**Where the topology stops and counting starts (honest).** A full twist is
+symmetric, so direction is not a knot property: the one-way case is a plain
+count carried beside the braid. And for two strands the braid group is just
+the integers, so the whole knot is one number (the reference count). Δ adds
+information only from three producers up, where the order of references matters.
+
+**Not done:** the header still commits V1. Moving `topology_commitment` to the
+reference-twist convention is a consensus change: it needs a height gate, the
+rehearsal chain first (never g2's live producer first), and Viktor's go.
+
 ## The convergence nobody planned but everyone was circling
 
 Three threads from this session quietly point at the same object:

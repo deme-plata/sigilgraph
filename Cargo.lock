@@ -8763,6 +8763,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-knot"
+version = "5.1.1"
+dependencies = [
+ "flux-topology",
+ "serde",
+ "serde_json",
+ "sigil-dagknight",
+]
+
+[[package]]
 name = "sigil-mail"
 version = "5.1.1"
 dependencies = [

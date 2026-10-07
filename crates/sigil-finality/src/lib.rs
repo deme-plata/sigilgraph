@@ -37,22 +37,48 @@
 //! arbitrarily (rogue votes, equivocation, abstention, any mix) never
 //! produce two conflicting certificates for one height.
 //!
-//! **A stronger result this crate's tests found, beyond what the design doc
-//! assumed:** because `assemble()` excludes an equivocator's votes from
-//! EVERY tally (not just the tuple it "loses"), and because `2*quorum(n) >
-//! n` for every committee size (an arithmetic fact of the `n=3f+1`-style
-//! formula, proven for `n` up to 64 in
-//! [`tests::quorum_formula_makes_two_conflicting_certificates_structurally_impossible`]),
-//! two conflicting certificates cannot assemble at ANY dishonest count —
-//! not just `<=f` — up to and including a fully dishonest (`n`-of-`n`)
-//! committee. This is strictly stronger than the `<=f` framing for this one
-//! failure mode. It does NOT mean safety is unconditional: a fully
-//! dishonest committee that unanimously signs the SAME false claim still
-//! certifies that one wrong tuple (see
-//! [`tests::fully_dishonest_committee_can_certify_one_wrong_tuple_but_never_two`])
-//! — no signature scheme can detect coordinated unanimous lying, which is
-//! exactly why the design doc's §Validator set insists the operator
-//! directly control every key.
+//! **Caveat on "by construction" (2026-10-07).** The premise is a property
+//! of the SIGNER, and today's `sigil-node` does not have it: a keyed
+//! validator calls `own_vote` for every block it accepts into its braid,
+//! with no "already voted at this height" guard. With one producer that
+//! is one vote per height. With two producers it is two different tuples
+//! at one height from an HONEST validator. That is what froze the
+//! certificates on the 4-node rehearsal chain on 2026-10-07 (2,508
+//! equivocations), and it also removes the honest validator that the
+//! overlap argument above relies on. The fix belongs in the signer: vote
+//! at most once per height, and persist that record before publishing.
+//!
+//! **What equivocator exclusion buys, and where it stops (corrected
+//! 2026-10-07 after an external review).** `assemble()` excludes an
+//! equivocator's votes from EVERY tally, and `2*quorum(n) > n` for every
+//! committee size (checked for `n` up to 64 in
+//! [`tests::one_vote_set_never_certifies_two_conflicting_tuples`]). Together
+//! these mean that **within one call to `assemble()`**, i.e. within one
+//! node's view of the votes, two conflicting certificates cannot form at any
+//! dishonest count. That is a property of a single vote set, NOT of the
+//! network, and an earlier version of this comment overclaimed it as one.
+//!
+//! Different nodes assemble from the votes THEY have received, and a node
+//! only excludes an equivocator once it has seen both of its votes. With
+//! more than `f` Byzantine validators that is enough to break safety across
+//! nodes. At `n = 4, quorum = 3`: Byzantine `X` and `Y` sign both A and B,
+//! honest `H1` signs A, honest `H2` signs B. A node that receives
+//! `{X, Y, H1}` certifies A, a node that receives `{X, Y, H2}` certifies B,
+//! and neither has seen an equivocation
+//! ([`tests::distributed_views_can_certify_conflicting_tuples_beyond_f`]).
+//! The guarantee across nodes is therefore the classical one: safe while at
+//! most `f` validators are Byzantine, because then two quorums overlap in an
+//! honest validator. The smallest Byzantine count at which two views can
+//! conflict is exactly `2*quorum(n) - n`, which is greater than `f` for every
+//! committee size tested
+//! ([`tests::conflicting_views_need_more_than_f_byzantine`]).
+//!
+//! A fully dishonest committee that unanimously signs the SAME false claim
+//! also certifies that one wrong tuple
+//! ([`tests::fully_dishonest_committee_can_certify_a_wrong_tuple`]). No
+//! signature scheme can detect coordinated unanimous lying, which is exactly
+//! why the design doc's §Validator set insists the operator directly
+//! control every key.
 
 use std::collections::{HashMap, HashSet};
 
@@ -554,11 +580,13 @@ mod tests {
         assemble(&committee, &votes)
     }
 
-    /// THE headline property. For every `n` the design doc's own table
-    /// names (4, 5, 7, 10) and every trial where the Byzantine count stays
-    /// at or below `max_byzantine(n)`, no two conflicting certificates can
-    /// ever assemble for the same height — regardless of how the Byzantine
-    /// minority behaves (rogue votes, equivocation, abstention, any mix).
+    /// For every `n` the design doc's own table names (4, 5, 7, 10) and
+    /// every trial where the Byzantine count stays at or below
+    /// `max_byzantine(n)`, no two conflicting certificates assemble for the
+    /// same height from one vote set, however the Byzantine minority behaves
+    /// (rogue votes, equivocation, abstention, any mix). This feeds every
+    /// vote to ONE `assemble()` call, so it tests one node's view; the
+    /// cross-node property is [`conflicting_views_need_more_than_f_byzantine`].
     /// 8,000 seeded trials total (2,000 per `n`), fully reproducible from
     /// the seed if one ever fails.
     #[test]
@@ -606,43 +634,24 @@ mod tests {
         }
     }
 
-    /// **A genuine, better-than-planned finding from writing this exact
-    /// test.** The design doc's honest-risk framing calls for a boundary
-    /// check proving the `<=f` assumption is load-bearing, and this test
-    /// started out trying to find a seed at `byzantine_count = f+1` that
-    /// breaks safety (per the classical `(2f+1)+(2f+1)-(3f+1) = f+1`
-    /// quorum-overlap argument). It never found one, at ANY dishonest
-    /// count up to and including a FULLY dishonest committee (`n`-of-`n`) —
-    /// not a search that got lucky, a structural fact about THIS
-    /// `assemble()`, proven below both mathematically and by exhaustive-ish
-    /// fuzzing:
+    /// A property of ONE vote set, and only that. `assemble()` excludes an
+    /// equivocating validator's votes from EVERY tally, not just the
+    /// "losing" one. For two conflicting certificates to come out of a
+    /// single call, they would need two DISJOINT groups of non-equivocating
+    /// validators, each of size >= `quorum(n)`, which needs
+    /// `2*quorum(n) <= n`. But `2*quorum(n) > n` for every `n` (checked
+    /// below), so it cannot happen within one call, at any dishonest count.
     ///
-    /// `assemble()` excludes an equivocating validator's votes from EVERY
-    /// tally, not just the "losing" one — a validator that double-signs
-    /// contributes to NEITHER candidate certificate. For two conflicting
-    /// certificates to assemble, they would need two DISJOINT (non-
-    /// equivocating, since equivocating = fully excluded) groups of
-    /// validators, each of size >= `quorum(n)`. That needs
-    /// `2*quorum(n) <= n` validators total. But `quorum(n) = n -
-    /// floor((n-1)/3)`, and `2*quorum(n) > n` for EVERY `n >= 1` (checked
-    /// exhaustively below) — so two disjoint quorum-sized groups can never
-    /// fit inside a committee of size `n`, regardless of how many
-    /// validators are dishonest or how they behave. This is a STRONGER
-    /// guarantee than the design doc's own `<=f` framing for this specific
-    /// failure mode (two conflicting certificates) — a direct, positive
-    /// consequence of the "exclude equivocators entirely" design choice in
-    /// `assemble()`, not something the design doc predicted.
-    ///
-    /// **What this does NOT mean** (careful, so this isn't overclaimed): a
-    /// FULLY dishonest committee can still certify a single WRONG tuple, if
-    /// every dishonest validator signs the SAME false claim in unison
-    /// (see [`fully_dishonest_committee_can_certify_one_wrong_tuple_but_never_two`]).
-    /// No signature scheme can distinguish coordinated unanimous lying from
-    /// truth — that is exactly why the design doc's §Validator set insists
-    /// the operator directly control every key (Option A), not a claim this
-    /// crate can or does relax.
+    /// **Corrected 2026-10-07 (external review).** An earlier version of
+    /// this doc called this a network-wide guarantee "stronger than `<=f`".
+    /// It is not. Exclusion only works on equivocations a node has SEEN, and
+    /// two nodes can each receive a quorum for a different tuple without
+    /// either seeing an equivocation; see
+    /// [`distributed_views_can_certify_conflicting_tuples_beyond_f`]. Across
+    /// nodes the guarantee is the classical `<=f` one, pinned by
+    /// [`conflicting_views_need_more_than_f_byzantine`].
     #[test]
-    fn quorum_formula_makes_two_conflicting_certificates_structurally_impossible() {
+    fn one_vote_set_never_certifies_two_conflicting_tuples() {
         // The arithmetic fact itself, for every committee size 1..=64 (well
         // past the design doc's own table of 4/5/7/10).
         for n in 1..=64usize {
@@ -650,34 +659,121 @@ mod tests {
             assert!(2 * q > n, "n={n}: 2*quorum={} must exceed n={n} for the exclusion argument to hold", 2 * q);
         }
 
-        // The empirical confirmation: sweep byzantine_count from 0 up to
-        // and including n itself (i.e. INCLUDING beyond the f assumption,
-        // all the way to a fully dishonest committee) — conflicting
-        // certificates must never appear, at any point in that range.
+        // Sweep byzantine_count from 0 up to n (a fully dishonest committee),
+        // all votes into ONE assemble() call: conflicting certificates must
+        // never come out of a single vote set.
         for &n in &[4usize, 5, 7, 10] {
             for byzantine_count in 0..=n {
                 for seed in 0..200u64 {
                     let report = adversarial_trial(seed * 97 + byzantine_count as u64, n, byzantine_count);
                     assert!(
                         report.conflicting_heights().is_empty(),
-                        "n={n} byzantine_count={byzantine_count} seed={seed}: conflicting certificates formed — \
-                         the structural-impossibility argument above is wrong, or assemble() regressed"
+                        "n={n} byzantine_count={byzantine_count} seed={seed}: conflicting certificates from ONE \
+                         vote set — the exclusion argument above is wrong, or assemble() regressed"
                     );
                 }
             }
         }
     }
 
-    /// The honestly-scoped companion to the test above: a FULLY dishonest
-    /// committee (no equivocation involved — every validator simply signs
-    /// the SAME false tuple) certifies that ONE wrong tuple without any
-    /// trouble, and this is correct, expected behavior, not a bug — a
-    /// signature-based finality gadget cannot detect "everyone is lying in
-    /// unison" from the signatures alone; nothing about who signs what can.
-    /// Crucially, even here, only ONE certificate ever exists — the
-    /// structural-impossibility argument covers this case too.
+    /// The external review's counterexample (2026-10-07), as a test. `n = 4`,
+    /// `quorum = 3`, `f = 1`. Byzantine `X` and `Y` sign both A and B; honest
+    /// `H1` signs A; honest `H2` signs B. Two nodes that each receive one
+    /// side certify CONFLICTING tuples, and neither has seen an equivocation.
+    /// Only a node that sees all six votes catches `X` and `Y`, and that node
+    /// certifies nothing. Two Byzantine validators is more than `f`, so this
+    /// does not break the classical guarantee; it shows that equivocator
+    /// exclusion does not extend it.
     #[test]
-    fn fully_dishonest_committee_can_certify_one_wrong_tuple_but_never_two() {
+    fn distributed_views_can_certify_conflicting_tuples_beyond_f() {
+        let mut rng = StdRng::seed_from_u64(20_261_007);
+        let keys: Vec<SigningKey> = (0..4).map(|_| gen_key(&mut rng)).collect();
+        let committee = committee_of(&keys);
+        assert_eq!((quorum_for(4), max_byzantine_for(4)), (3, 1));
+        let height = 1_111_478u64;
+        let (spine_a, order_a) = ([0xAAu8; 32], [0x01u8; 32]);
+        let (spine_b, order_b) = ([0xBBu8; 32], [0x02u8; 32]);
+        let (x, y, h1, h2) = (&keys[0], &keys[1], &keys[2], &keys[3]);
+
+        let view_1 = vec![
+            FinalityVote::sign(x, height, spine_a, order_a),
+            FinalityVote::sign(y, height, spine_a, order_a),
+            FinalityVote::sign(h1, height, spine_a, order_a),
+        ];
+        let view_2 = vec![
+            FinalityVote::sign(x, height, spine_b, order_b),
+            FinalityVote::sign(y, height, spine_b, order_b),
+            FinalityVote::sign(h2, height, spine_b, order_b),
+        ];
+        let node_1 = assemble(&committee, &view_1);
+        let node_2 = assemble(&committee, &view_2);
+        assert!(node_1.equivocations.is_empty() && node_2.equivocations.is_empty(),
+            "neither node has seen both votes of X or Y");
+        assert_eq!(node_1.certificate_for_height(height).map(|c| c.spine_block_hash), Some(spine_a));
+        assert_eq!(node_2.certificate_for_height(height).map(|c| c.spine_block_hash), Some(spine_b));
+
+        let everything: Vec<FinalityVote> = view_1.iter().chain(view_2.iter()).cloned().collect();
+        let all_seen = assemble(&committee, &everything);
+        assert_eq!(all_seen.equivocations.len(), 2, "a node that sees all six votes catches X and Y");
+        assert!(all_seen.certificates.is_empty(), "with X and Y excluded, H1 and H2 alone reach no quorum");
+    }
+
+    /// Cross-node safety, exhaustive for the design doc's committee sizes.
+    /// Byzantine validators sign BOTH tuples; each honest validator signs
+    /// one. The views most favourable to an attacker are one node that sees
+    /// every A-vote and no B-vote, and another that sees every B-vote and no
+    /// A-vote: neither sees an equivocation. For every Byzantine count and
+    /// every split of the honest validators, this builds exactly those two
+    /// views, runs the real `assemble()` on each, and records the smallest
+    /// Byzantine count at which BOTH certify. It must exceed `f` (the
+    /// classical `(2f+1)+(2f+1)-(3f+1) = f+1` overlap), and it is exactly
+    /// `2*quorum(n) - n`.
+    #[test]
+    fn conflicting_views_need_more_than_f_byzantine() {
+        for &n in &[4usize, 5, 7, 10] {
+            let (f, q) = (max_byzantine_for(n), quorum_for(n));
+            let mut rng = StdRng::seed_from_u64(4_242 + n as u64);
+            let keys: Vec<SigningKey> = (0..n).map(|_| gen_key(&mut rng)).collect();
+            let committee = committee_of(&keys);
+            let height = 77u64;
+            let (spine_a, order_a) = ([0xA1u8; 32], [0xA2u8; 32]);
+            let (spine_b, order_b) = ([0xB1u8; 32], [0xB2u8; 32]);
+
+            let mut smallest_splitting_byzantine = None;
+            'byzantine: for byz in 0..=n {
+                let honest = n - byz;
+                for honest_a in 0..=honest {
+                    // keys[..byz] Byzantine, then honest_a honest for A, the rest honest for B.
+                    let view_a: Vec<FinalityVote> = keys[..byz].iter().chain(keys[byz..byz + honest_a].iter())
+                        .map(|k| FinalityVote::sign(k, height, spine_a, order_a)).collect();
+                    let view_b: Vec<FinalityVote> = keys[..byz].iter().chain(keys[byz + honest_a..].iter())
+                        .map(|k| FinalityVote::sign(k, height, spine_b, order_b)).collect();
+                    let a = assemble(&committee, &view_a).certificate_for_height(height).is_some();
+                    let b = assemble(&committee, &view_b).certificate_for_height(height).is_some();
+                    if a && b {
+                        assert!(byz > f, "n={n} f={f}: two views certified conflicting tuples with only {byz} Byzantine");
+                        smallest_splitting_byzantine = Some(byz);
+                        break 'byzantine;
+                    }
+                }
+            }
+            let smallest = smallest_splitting_byzantine
+                .expect("a fully dishonest committee can always split two views");
+            assert_eq!(smallest, 2 * q - n, "n={n}: smallest Byzantine count that splits two views");
+            assert!(smallest > f, "n={n}: the classical <=f guarantee must hold across nodes");
+        }
+    }
+
+    /// A FULLY dishonest committee (no equivocation involved; every
+    /// validator simply signs the SAME false tuple) certifies that wrong
+    /// tuple without any trouble. That is expected, not a bug: a
+    /// signature-based finality gadget cannot detect "everyone is lying in
+    /// unison" from the signatures alone. Within this one vote set only one
+    /// certificate exists; across nodes, a dishonest committee can also
+    /// certify different tuples to different nodes (see
+    /// [`conflicting_views_need_more_than_f_byzantine`]).
+    #[test]
+    fn fully_dishonest_committee_can_certify_a_wrong_tuple() {
         let mut rng = StdRng::seed_from_u64(9999);
         let n = 5;
         let keys: Vec<SigningKey> = (0..n).map(|_| gen_key(&mut rng)).collect();
@@ -690,6 +786,6 @@ mod tests {
 
         let cert = report.certificate_for_height(height).expect("unanimous agreement certifies, honest or not — inherent to any signature scheme");
         assert_eq!(cert.spine_block_hash, false_spine, "the (false) tuple certifies exactly as any unanimous tuple would");
-        assert!(report.conflicting_heights().is_empty(), "even full compromise produces exactly ONE certificate, never two");
+        assert!(report.conflicting_heights().is_empty(), "one unanimous vote set yields exactly one certificate");
     }
 }

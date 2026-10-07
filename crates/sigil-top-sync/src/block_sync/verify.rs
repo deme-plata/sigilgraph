@@ -9,7 +9,7 @@ use sigil_header::{BlockHash, SigilBlockHeaderV0};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-pub(crate) fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
+pub fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
     // v0.95 (SPINE hardening): RESTORE the 64 MiB cap. v0.39 cut it to 12 MiB on the
     // assumption "a real chunk is <= ~8 MB" — that assumption is WRONG for SIGIL. Every
@@ -47,8 +47,8 @@ pub(crate) fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
 // 2026-08-23 (grogu-producer-network): widened super→crate so `producer::run`'s
 // network-connected loop (feature-gated, off by default) can decode the SAME
 // gossip envelope shape the light-client sync engine already handles — zero
-// behavior change for every existing caller, still `pub(crate)` not `pub`.
-pub(crate) fn inflate_gossip_frame(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+// behavior change for every existing caller, still `pub` not `pub`.
+pub fn inflate_gossip_frame(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
     match data.first() {
         Some(&b'Z') => zstd_decompress_body(&data[1..]).map(std::borrow::Cow::Owned),
         _ => Some(std::borrow::Cow::Borrowed(data)), // legacy JSON `{…}` — pass through untouched

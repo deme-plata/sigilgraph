@@ -21,13 +21,5 @@ pub(crate) fn read_sync_mode() -> Option<String> {
     std::fs::read_to_string(sync_mode_path()).ok().map(|s| s.trim().to_string())
 }
 
-/// v0.64: append a startup breadcrumb to %TEMP%/sigil-top-startup.log (best-effort).
-/// The Windows-startup boot trace flushes per line (each call opens+appends+closes),
-/// so the LAST written line is a reliable "died here" marker under wine-verify.
-pub(crate) fn boot_trace(msg: &str) {
-    use std::io::Write;
-    let p = std::env::temp_dir().join("sigil-top-startup.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-        let _ = writeln!(f, "{}", msg);
-    }
-}
+// v0.64 boot_trace moved to sigil-top-base (2026-10-07 crate split); re-exported here.
+pub(crate) use sigil_top_base::boot_trace;

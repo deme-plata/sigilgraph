@@ -14,7 +14,7 @@ use sigil_header::SkeletonRecord as SigilSkel;
 
 /// sigil-top-owned adapter so SIGIL's 72-B record drives the flux-db skeleton store.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SkelRec(pub SigilSkel);
+pub struct SkelRec(pub SigilSkel);
 
 impl flux_db::skeleton::SkeletonRecord for SkelRec {
     /// height(8) + block_hash(32) + parent_hash(32) — the cross-crate 72-B invariant.
@@ -53,7 +53,7 @@ impl flux_db::skeleton::SkeletonRecord for SkelRec {
 /// local `block_sync::skeleton_store::SkeletonStore` (same open/append/read_at/count
 /// surface), plus `archive_root()` for the anchor commitment.
 #[allow(dead_code)]
-pub(crate) type FluxSkeletonStore = flux_db::skeleton::SkeletonStore<SkelRec>;
+pub type FluxSkeletonStore = flux_db::skeleton::SkeletonStore<SkelRec>;
 
 #[cfg(test)]
 mod tests {

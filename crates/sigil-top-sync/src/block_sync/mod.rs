@@ -20,10 +20,10 @@ use std::collections::HashMap;
 // the wire structs, and shared infra (HTTP clients, sane_raise/SANE_LEAD). Each
 // submodule is one lane's surface; the glob `use`s keep launch()'s calls unqualified.
 mod fetch;   // LANE-A net/transport  (rocky-sync-A)
-// pub(crate) (2026-08-23): producer::run reaches verify::inflate_gossip_frame
+// pub (2026-08-23): producer::run reaches verify::inflate_gossip_frame
 // through this path — everything else about this module stays exactly as
-// private as before (only that one already-pub(crate) fn is reachable).
-pub(crate) mod verify;  // LANE-B decode+verify  (rocky-sync-B)
+// private as before (only that one already-pub fn is reachable).
+pub mod verify;  // LANE-B decode+verify  (rocky-sync-B)
 mod commit;  // LANE-C storage/commit (rocky-sync-C)
 mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s path to 100k)
 mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
@@ -32,7 +32,7 @@ mod fast_forward; // V7-INGEST: PASS-2 body sink routed through LANE-1 SST-inges
 pub use sigil_sync as sync_store; // extracted to its own lib crate so sigil-chronos can drive it
 pub mod ledger; // ONE-CHAIN P2: persistent verified sync of the LEDGER header chain (rocky)
 #[allow(unused_imports)]
-pub(crate) use skeleton_store::SkeletonStore;
+pub use skeleton_store::SkeletonStore;
 use fetch::*;
 use verify::*;
 use commit::*;
@@ -3398,7 +3398,7 @@ mod lane3_decode_batch_bench {
 /// something on the PC — Windows Firewall or, far more often, an antivirus network shield —
 /// forbids THIS program from opening sockets; no network or peer fix can help (field-proven
 /// 2026-10-02: Avast/AVG/McAfee blocked every dial and every HTTPS request from a fresh exe).
-pub(crate) fn dial_error_hint(e: &str) -> String {
+pub fn dial_error_hint(e: &str) -> String {
     if e.contains("10013") {
         return "your antivirus/firewall blocks this program (Windows error 10013) — allow sigil-top in Avast/AVG/McAfee/Defender".into();
     }

@@ -1,0 +1,35 @@
+[package]
+name = "sigil-top-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sigil-top's sync engine: block_sync (P2P backfill, fetch, verify, commit, fast-forward, archive), chain_verify, gap_sync and store_lifecycle. Moved out of the sigil-top binary crate on 2026-10-07 (git mv, contents unchanged except visibility) so it compiles in parallel with the rest and an edit elsewhere does not recompile it."
+
+[dependencies]
+sigil-top-base = { path = "../sigil-top-base" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots", "socks"], default-features = false }
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+crossterm  = "0.28"
+blake3     = "1"
+hex        = "0.4"
+bincode    = "1"
+rayon      = { workspace = true }
+ruzstd     = "0.7"
+sigil-net        = { path = "../sigil-net" }
+sigil-dns-anchor = { path = "../sigil-dns-anchor" }
+sigil-header     = { path = "../sigil-header" }
+sigil-record     = { path = "../sigil-record", default-features = false, features = ["pure"] }
+sigil-block-store = { path = "../sigil-block-store" }
+sigil-synctune   = { path = "../sigil-synctune" }
+sigil-sync       = { path = "../sigil-sync" }
+flux-turbo-sync  = { path = "../flux-turbo-sync" }
+flux-db   = { path = "../../../flux/crates/flux-db" }
+flux-p2p  = { path = "../../../flux/crates/flux-p2p" }
+flux-sync = { path = "../../../flux/crates/flux-sync" }
+
+[dev-dependencies]
+# Interop tests: encode with the C-backed zstd the node uses, decode with the pure-Rust path.
+zstd = "0.13"
+sigil-record = { path = "../sigil-record", features = ["c-zstd", "pure"] }

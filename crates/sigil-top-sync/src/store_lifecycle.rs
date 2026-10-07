@@ -1,12 +1,14 @@
 //! Light-client block-store lifecycle: where it lives, resetting it on a network-id
 //! change, healing a wedged store, and the light-boot size guards. Extracted from
-//! main.rs. `use super::*` reaches the SIGIL_* env consts + network-id helpers.
+//! main.rs (into sigil-top-sync on 2026-10-07).
 use super::*;
+use sigil_top_base::boot_trace;
+use std::fs;
 
 /// Cross-platform persistent path for the light client's block store. Windows has no
 /// /tmp or /dev/shm (the old hardcoded paths), so the store never persisted there →
 /// re-sync from 0 every launch. Prefer a per-user dir; override with SIGIL_TOP_DB.
-pub(crate) fn sigil_top_db_path() -> String {
+pub fn sigil_top_db_path() -> String {
     if let Ok(p) = std::env::var("SIGIL_TOP_DB") {
         if !p.trim().is_empty() { return p; }
     }
@@ -56,7 +58,7 @@ pub(crate) fn sigil_top_db_path() -> String {
 /// cheerfully displayed `sigil-g0` while refusing every g0 block for not being g1 — the
 /// header contradicting the error two lines below it. A label that can disagree with the
 /// binary is worse than no label.
-pub(crate) fn build_network_id() -> String {
+pub fn build_network_id() -> String {
     String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string()
 }
 
@@ -65,7 +67,7 @@ pub(crate) fn build_network_id() -> String {
 /// reset trusts that sidecar, so nothing ever cleared it and the client sat at "SPINE BREAK — STUCK" for good.
 /// Invalidate the sidecar: the NEXT launch's `reset_store_on_network_change` then clears the store and re-syncs.
 /// (Deleting a store that is open right now is not safe, so this only marks it.)
-pub(crate) fn mark_store_foreign(path: &str) {
+pub fn mark_store_foreign(path: &str) {
     let _ = std::fs::write(format!("{path}.netid"), "foreign-chain-detected");
 }
 
@@ -73,16 +75,16 @@ pub(crate) fn mark_store_foreign(path: &str) {
 /// (`in_tui`: its start-up path runs the reset; headless `full-sync` opens the store directly and would not clear it),
 /// only for the wrong-chain break, and never twice in one process chain (`already_restarted`), so a store that is
 /// still foreign after a clean start cannot make sigil-top restart forever.
-pub(crate) fn should_self_restart(in_tui: bool, already_restarted: bool, reason: &str) -> bool {
+pub fn should_self_restart(in_tui: bool, already_restarted: bool, reason: &str) -> bool {
     in_tui && !already_restarted && is_foreign_chain_break(reason)
 }
 
 /// True when a verify-break reason is the "store from another chain" case.
-pub(crate) fn is_foreign_chain_break(reason: &str) -> bool {
+pub fn is_foreign_chain_break(reason: &str) -> bool {
     reason.contains("wrong network id")
 }
 
-pub(crate) fn reset_store_on_network_change(path: &str) {
+pub fn reset_store_on_network_change(path: &str) {
     let current = String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string();
     let netid_path = format!("{path}.netid");
     let reason = match std::fs::read_to_string(&netid_path) {
@@ -150,7 +152,7 @@ pub(crate) fn reset_store_on_network_change(path: &str) {
 /// not yet fully closed) — it is the same "clear the landmine" recovery this project has
 /// already shipped once, re-armed so it fires again for stores that picked up NEW damage
 /// since the last time.
-pub(crate) fn heal_wedged_store_once(path: &str) {
+pub fn heal_wedged_store_once(path: &str) {
     // RE-ARMED 2026-08-27 (v7.1.75 -> v7.2.5). The marker is a ONE-SHOT per exact string,
     // so every store that has launched since v7.1.75 is immune to a repeat wipe even when
     // it picks up NEW damage — which is exactly what happened. Live: an operator's client
@@ -180,7 +182,7 @@ pub(crate) fn heal_wedged_store_once(path: &str) {
     ));
 }
 
-pub(crate) fn light_boot_store_limit_bytes() -> u64 {
+pub fn light_boot_store_limit_bytes() -> u64 {
     if let Ok(raw) = std::env::var("SIGIL_TOP_BOOT_STORE_LIMIT_MB") {
         if let Ok(mb) = raw.trim().parse::<u64>() {
             return if mb == 0 { u64::MAX } else { mb.saturating_mul(1024 * 1024) };
@@ -195,7 +197,7 @@ pub(crate) fn light_boot_store_limit_bytes() -> u64 {
     64u64 * 1024 * 1024 * 1024
 }
 
-pub(crate) fn dir_size_capped(path: &str, cap: u64) -> std::io::Result<u64> {
+pub fn dir_size_capped(path: &str, cap: u64) -> std::io::Result<u64> {
     let root = std::path::Path::new(path);
     if !root.exists() {
         return Ok(0);
@@ -223,7 +225,7 @@ pub(crate) fn dir_size_capped(path: &str, cap: u64) -> std::io::Result<u64> {
     Ok(total)
 }
 
-pub(crate) fn oversized_store_for_light_boot(path: &str, want_sync: bool) -> Option<u64> {
+pub fn oversized_store_for_light_boot(path: &str, want_sync: bool) -> Option<u64> {
     if want_sync || std::env::var("SIGIL_TOP_FORCE_STORE").is_ok() {
         return None;
     }
@@ -241,7 +243,7 @@ pub(crate) fn oversized_store_for_light_boot(path: &str, want_sync: bool) -> Opt
     }
 }
 
-pub(crate) fn human_bytes(bytes: u64) -> String {
+pub fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut n = bytes as f64;
     let mut unit = 0usize;
@@ -260,7 +262,7 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
 /// back through temp → volatile stores if the primary can't open. Extracted from
 /// main.rs alongside the reset/heal/size-guard helpers it drives. Always marks the
 /// `OpenProgress` finished on every exit path.
-pub(crate) fn open_store_with_fallbacks(
+pub fn open_store_with_fallbacks(
     db_path: &str,
     want_sync: bool,
     progress: std::sync::Arc<block_store::OpenProgress>,

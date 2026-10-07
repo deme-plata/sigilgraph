@@ -23,13 +23,17 @@
 // `sigil-sync` was extracted earlier. `block_store::X` below now resolves via the
 // `use sigil_block_store as block_store;` alias so every existing call site in this
 // crate is unchanged; only this module declaration and that alias line differ.
+// tlog!/log_line/IN_TUI/instant_ago/http_get/boot_trace live in sigil-top-base (2026-10-07 split).
+#[macro_use]
+extern crate sigil_top_base;
+pub(crate) use sigil_top_base::tlog;
 use sigil_block_store as block_store;
 // pub(crate) (2026-08-23): producer::run reaches block_sync::verify::inflate_gossip_frame
 // through this path — everything else stays exactly as private as before.
-pub(crate) mod block_sync;
-mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
+pub(crate) use sigil_top_sync::block_sync; // moved to crates/sigil-top-sync (2026-10-07)
+pub(crate) use sigil_top_sync::chain_verify; // moved to sigil-top-sync · v0.9.0: full verifying sync — spine continuity + precheck walk
 mod ledger_verify; // ONE-CHAIN P2a: verify the MONEY chain's header spine + real /supply truth
-mod gap_sync;     // SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
+pub(crate) use sigil_top_sync::gap_sync; // moved to sigil-top-sync · SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
 mod help;
 mod serve;
 mod heroes;
@@ -83,18 +87,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// v0.7.21: Windows-safe "Instant N seconds in the past".
-/// `Instant::now() - Duration` panics with "overflow when subtracting duration
-/// from instant" when the monotonic clock is younger than the duration — which
-/// happens at process start on Windows (QPC epoch is near process/boot start),
-/// crashing sigil-top before the TUI even draws. `checked_sub` returns None in
-/// that case; we fall back to `now`. The intent of these call sites is "make the
-/// first periodic check overdue"; on the rare clamp the first tick is merely
-/// delayed by one interval instead of firing immediately — never a crash.
-fn instant_ago(secs: u64) -> Instant {
-    let now = Instant::now();
-    now.checked_sub(Duration::from_secs(secs)).unwrap_or(now)
-}
+// instant_ago, IN_TUI, log_line, tlog!, http_get, boot_trace: moved to sigil-top-base (2026-10-07).
+pub(crate) use sigil_top_base::{instant_ago, log_line, IN_TUI};
 
 /// LANE-B v0.50: how long the SIGIL rune animation stays on screen per play
 /// (draw-on → hold → fade). Kept inside the 3–5 s band the side-mission specifies.
@@ -137,62 +131,7 @@ use flux_rev::{Store, snapshot, Genesis};
 // watchdog). 0.11.0 is valid 3-part SemVer so VERSION flows straight from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// When the ratatui TUI owns the screen, raw `eprintln!` from the background P2P
-/// thread (and elsewhere) smears the frame. Once the TUI starts we flip this and
-/// route those lines to a logfile instead, so the dashboard stays clean.
-pub(crate) static IN_TUI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-pub(crate) fn log_line(s: String) {
-    // v7.1.39 (grogu-sync-perf, 2026-08-19): `full-sync` and every other headless
-    // subcommand NEVER call run_tui(), so IN_TUI stays false for their entire
-    // lifetime — which means EVERY crate::tlog!() call anywhere in the sync/fetch
-    // code ([snap-diag], [mesh] DIAL-FAIL, [anchor], [sync] snapshot-pull, VCATCH,
-    // etc.) was a silent no-op in the one mode most suited to reproducible testing
-    // (headless full-sync, CI gates). Root-caused live: a fresh full-sync repro run
-    // showed 0 peers for 85s straight with ZERO diagnostic output anywhere, even
-    // though extensive tlog! diagnostics were added earlier this session specifically
-    // to explain exactly this kind of stall. Fix: outside the TUI, tlog! lines are
-    // harmless on stderr (nothing owns the terminal) — print them directly, same as
-    // the pre-TUI eprintln convention documented at run_tui's top ("pre-TUI prints go
-    // to stderr — exactly where pre-UI diagnostics belong"). Zero behavior change
-    // inside the TUI (still routes to the logfile only, unsmeared).
-    if !IN_TUI.load(std::sync::atomic::Ordering::Relaxed) {
-        eprintln!("{s}");
-        return;
-    }
-    if IN_TUI.load(std::sync::atomic::Ordering::Relaxed) {
-        let p = std::env::var("HOME")
-            .map(|h| format!("{h}/.sigil-top.log"))
-            .or_else(|_| std::env::var("TEMP").map(|t| format!("{t}\\sigil-top.log")))
-            .unwrap_or_else(|_| "sigil-top.log".into());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-            use std::io::Write;
-            let _ = writeln!(f, "{s}");
-        }
-        // v0.26: cap the logfile so a 24/7 run can't fill the disk. Checked cheaply once
-        // every LOG_CAP_EVERY writes; when it exceeds 4 MB, keep only the last ~1 MB.
-        static LOG_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        const LOG_CAP_EVERY: u64 = 512;
-        const LOG_MAX: u64 = 4 * 1024 * 1024;
-        const LOG_KEEP: u64 = 1024 * 1024;
-        if LOG_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % LOG_CAP_EVERY == 0 {
-            if std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0) > LOG_MAX {
-                let tail = {
-                    use std::io::{Read, Seek, SeekFrom};
-                    std::fs::File::open(&p).ok().and_then(|mut fh| {
-                        let len = fh.metadata().map(|m| m.len()).unwrap_or(0);
-                        fh.seek(SeekFrom::Start(len.saturating_sub(LOG_KEEP))).ok()?;
-                        let mut b = Vec::new(); fh.take(LOG_KEEP).read_to_end(&mut b).ok()?; Some(b)
-                    })
-                };
-                if let Some(b) = tail { let _ = std::fs::write(&p, &b); }
-            }
-        }
-    } else {
-        eprintln!("{s}");
-    }
-}
 
 fn remember_panic(msg: String) {
     let mut slot = LAST_PANIC.lock().unwrap_or_else(|e| e.into_inner());
@@ -210,12 +149,6 @@ fn last_panic_line() -> String {
 mod channel_msg;
 pub(crate) use channel_msg::{release_channel_current_msg, release_channel_stale_msg};
 
-/// `tlog!(...)` — like `eprintln!` but TUI-safe (goes to the logfile while the
-/// dashboard is up). Use for all background/diagnostic output.
-#[macro_export]
-macro_rules! tlog {
-    ($($a:tt)*) => {{ $crate::log_line(format!($($a)*)); }};
-}
 /// Offline fallback only — the *live* update signal is fetched at runtime from the
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
@@ -547,7 +480,8 @@ fn one_chain_view(st: &mut NodeStatus, spine_off: bool) -> Option<u64> {
 
 /// Minimal blocking HTTP GET — no http-client dependency.
 mod http_client;
-pub(crate) use http_client::{fetch, http_get, parse_status};
+pub(crate) use http_client::{fetch, parse_status};
+pub(crate) use sigil_top_base::http_get;
 
 mod fmt;
 pub(crate) use fmt::{bar, countdown_now, fmt_countdown, fmt_eta, fmt_supply, fmt_uptime, hex, short_hex, short_root, MAINNET_LAUNCH_LABEL, MAINNET_LAUNCH_UNIX};
@@ -708,6 +642,7 @@ fn light_monitor_toast() -> String {
 }
 
 fn main() {
+    sigil_top_base::set_version(VERSION); // http_get's user-agent keeps saying sigil-top/<this version>
     // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a
     // Windows double-click, the breadcrumb + panic land in this file so we can
     // read the EXACT reason instead of guessing.
@@ -3881,7 +3816,7 @@ pub(crate) use swarm_view::{
 
 
 
-mod store_lifecycle;
+pub(crate) use sigil_top_sync::store_lifecycle; // moved to sigil-top-sync (2026-10-07)
 pub(crate) use store_lifecycle::{
     build_network_id, dir_size_capped, heal_wedged_store_once, human_bytes,
     open_store_with_fallbacks, oversized_store_for_light_boot, reset_store_on_network_change,

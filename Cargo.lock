@@ -9221,10 +9221,45 @@ dependencies = [
  "sigil-sync",
  "sigil-synctune",
  "sigil-tip-proof",
+ "sigil-top-base",
+ "sigil-top-sync",
  "sigil-tx",
  "sigil-veil",
  "tokio",
  "winterfell",
+ "zstd",
+]
+
+[[package]]
+name = "sigil-top-base"
+version = "5.1.1"
+
+[[package]]
+name = "sigil-top-sync"
+version = "5.1.1"
+dependencies = [
+ "bincode 1.3.3",
+ "blake3",
+ "crossterm",
+ "flux-db",
+ "flux-p2p",
+ "flux-sync",
+ "flux-turbo-sync",
+ "hex",
+ "rayon",
+ "reqwest 0.12.28",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "sigil-block-store",
+ "sigil-dns-anchor",
+ "sigil-header",
+ "sigil-net",
+ "sigil-record",
+ "sigil-sync",
+ "sigil-synctune",
+ "sigil-top-base",
+ "tokio",
  "zstd",
 ]
 

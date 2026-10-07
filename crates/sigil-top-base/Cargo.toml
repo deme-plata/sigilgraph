@@ -1,0 +1,8 @@
+[package]
+name = "sigil-top-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The few helpers every sigil-top crate shares: tlog!/log_line (TUI-safe logging), IN_TUI, instant_ago and the std-only http_get. Split out of sigil-top's main.rs on 2026-10-07 so its subsystems can be separate crates (rustc's front end is single-threaded per crate; sigil-top was 1.8 MB in one)."
+
+[dependencies]

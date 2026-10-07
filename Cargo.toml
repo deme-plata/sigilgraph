@@ -119,6 +119,9 @@ codegen-units = 1
 # sigil-node is deliberately left at 1: it is the live producer's binary.
 [profile.release.package.sigil-top]
 codegen-units = 16
+# The sync engine, split out of sigil-top on 2026-10-07 (525 KB): same reasoning.
+[profile.release.package.sigil-top-sync]
+codegen-units = 16
 
 # Fast-iteration profile (added 2026-06-27): parallel codegen + no LTO + opt=1.
 # Compile sigil-top in ~19s vs ~96s for full --release. Use for the edit->build->measure

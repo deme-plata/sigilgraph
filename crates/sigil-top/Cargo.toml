@@ -88,6 +88,9 @@ flux-db = { path = "../../../flux/crates/flux-db" }
 # `use sigil_block_store as block_store;` in main.rs keeps every existing call site
 # (`block_store::BlockStore`, `crate::block_store::...`) resolving unchanged.
 sigil-block-store = { path = "../sigil-block-store" }
+# 2026-10-07 crate split: shared helpers + the sync engine, moved out of this crate.
+sigil-top-base = { path = "../sigil-top-base" }
+sigil-top-sync = { path = "../sigil-top-sync" }
 # V7-INGEST: shared backpressure spine (RateGate) + autotune knobs for the commit→DB sink.
 sigil-synctune = { path = "../sigil-synctune" }
 sigil-sync = { path = "../sigil-sync" }

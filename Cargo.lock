@@ -8461,6 +8461,7 @@ dependencies = [
  "blake3",
  "flux-db",
  "hex",
+ "rayon",
  "serde",
  "serde_json",
  "sigil-header",

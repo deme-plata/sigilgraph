@@ -90,6 +90,21 @@ fn decode_stored_block(bytes: &[u8]) -> Option<StoredBlock> {
     }
 }
 
+/// What [`BlockStore::scan_window`] found, and what the pass cost.
+#[derive(Debug)]
+pub struct WindowScan<T> {
+    /// `slots[i]` = `map` of the block at height `start + i`; `None` if its
+    /// body was not found in this pass.
+    pub slots: Vec<Option<T>>,
+    /// Consecutive indexed heights from `start` (≤ `max`).
+    pub indexed: u64,
+    pub index_ms: u64,
+    pub scan_ms: u64,
+    pub raw: flux_db::RawScan,
+    /// Wanted bodies visited (duplicates across levels included).
+    pub matched: u64,
+}
+
 pub struct BlockStore {
     db: flux_db::Database,
     best_height: u64,
@@ -1296,6 +1311,109 @@ impl BlockStore {
         })
     }
 
+    /// The blocks at heights `[start, start + max)`, read in ONE sequential pass.
+    ///
+    /// Why: a body is keyed by its hash, so `get_stored_at_height` for N
+    /// consecutive heights is N reads scattered over the whole store. On the
+    /// 4-disk RAID 0 this ran at ~220 reads/s (8–10 ms each, measured
+    /// 2026-10-07) and a 240k-block verify pass took 3–18 minutes. Here the
+    /// height index for the window is read first (adjacent keys, cheap), then
+    /// every SST is streamed once ([`flux_db::Database::for_each_raw`]) and
+    /// each wanted body is decoded and passed through `map` in parallel
+    /// chunks. The pass reads the whole store whatever the window size, so it
+    /// pays off when the window is large.
+    ///
+    /// The window ends at the first unindexed height (`indexed` < `max`).
+    /// `slots[i]` is `None` when height `start + i` is indexed but its body was
+    /// not found in this pass (absent, tombstoned, or in an SST compaction
+    /// replaced mid-pass) — callers treat that exactly like a failed
+    /// `get_stored_at_height`. Read-only; never touches the watermarks.
+    pub fn scan_window<T, F>(&self, start: u64, max: u64, map: F) -> Result<WindowScan<T>, String>
+    where
+        T: Send,
+        F: Fn(&StoredBlock) -> T + Sync,
+    {
+        use flux_db::RawStep;
+        use rayon::prelude::*;
+        // Pass 1 — the height index. Point gets cost ~160 µs each on a cold
+        // RAID (2M of them = 320 s, measured), so stream it instead: index keys
+        // (`KEY_HINDEX ++ be(height)`) sort before every other key, so each SST
+        // is read only up to the end of its index range. Last visit wins
+        // (oldest data first); an empty value is a deleted entry.
+        let t0 = std::time::Instant::now();
+        let end = start.saturating_add(max);
+        let mut index: std::collections::HashMap<u64, Option<[u8; 64]>> = std::collections::HashMap::new();
+        let mut bad: Option<u64> = None;
+        self.db.for_each_raw(|k, v| {
+            match k.first() {
+                Some(&KEY_HINDEX) if k.len() == 9 => {
+                    let h = u64::from_be_bytes(k[1..9].try_into().expect("9-byte key"));
+                    if h >= start && h < end {
+                        let entry = if v.is_empty() {
+                            None
+                        } else {
+                            match <[u8; 64]>::try_from(v) {
+                                Ok(hash) => Some(hash),
+                                Err(_) => {
+                                    bad.get_or_insert(h);
+                                    None
+                                }
+                            }
+                        };
+                        index.insert(h - start, entry);
+                    }
+                    RawStep::Continue
+                }
+                Some(&b) if b > KEY_HINDEX => RawStep::NextFile,
+                _ => RawStep::Continue,
+            }
+        })?;
+        let mut wanted: std::collections::HashMap<[u8; 64], u32> = std::collections::HashMap::new();
+        let mut indexed: u64 = 0;
+        while indexed < max {
+            let Some(Some(hash)) = index.get(&indexed) else { break };
+            if bad == Some(start + indexed) {
+                return Err(format!("height index at h={} is not a 64-char hash", start + indexed));
+            }
+            wanted.insert(*hash, indexed as u32);
+            indexed += 1;
+        }
+        drop(index);
+        let index_ms = t0.elapsed().as_millis() as u64;
+
+        const CHUNK: usize = 8192;
+        let mut slots: Vec<Option<T>> = (0..indexed).map(|_| None).collect();
+        let mut buf: Vec<(u32, Vec<u8>)> = Vec::with_capacity(CHUNK);
+        let mut matched = 0u64;
+        // Decode + map a chunk in parallel, then apply in visit order so the
+        // last visit of a key wins (the store's own merge rule).
+        let drain = |buf: &mut Vec<(u32, Vec<u8>)>, slots: &mut Vec<Option<T>>| {
+            let out: Vec<(u32, Option<T>)> = buf
+                .par_iter()
+                .map(|(i, raw)| (*i, if raw.is_empty() { None } else { decode_stored_block(raw).map(|b| map(&b)) }))
+                .collect();
+            for (i, v) in out {
+                slots[i as usize] = v;
+            }
+            buf.clear();
+        };
+        let t1 = std::time::Instant::now();
+        let raw = self.db.for_each_raw(|k, v| {
+            if let Ok(key) = <&[u8; 64]>::try_from(k) {
+                if let Some(&i) = wanted.get(key) {
+                    matched += 1;
+                    buf.push((i, v.to_vec()));
+                    if buf.len() >= CHUNK {
+                        drain(&mut buf, &mut slots);
+                    }
+                }
+            }
+            RawStep::Continue
+        })?;
+        drain(&mut buf, &mut slots);
+        Ok(WindowScan { slots, indexed, index_ms, scan_ms: t1.elapsed().as_millis() as u64, raw, matched })
+    }
+
     pub fn recent_blocks(&self, n: usize) -> Vec<StoredBlock> {
         let mut blocks: Vec<StoredBlock> = Vec::new();
         let iter = self.db.iter();
@@ -1825,6 +1943,65 @@ mod tests {
             s.advance();
             assert!(got2 >= 10, "refetched chunk accepted after heal (got {got2})");
             assert_eq!(s.synced_to(), 20, "healed — frontier passes the poisoned seam");
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// `scan_window` (one sequential pass) must return exactly what per-height
+    /// `get_stored_at_height` returns, with data spread over several SSTs and
+    /// the memtable, and must stop at the first unindexed height.
+    #[test]
+    fn scan_window_matches_per_height_reads() {
+        use sigil_header::*;
+        fn mk(height: u64, parent: BlockHash) -> SigilBlockHeaderV0 {
+            let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
+            let mut hh = blake3::Hasher::new();
+            hh.update(&parent); hh.update(nonce.as_bytes());
+            let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+            let scheme = SigScheme::SqiSign5;
+            SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents: Vec::new(), timestamp_ms: 1000 + height, nonce_sqisign: nonce,
+                vdf_input, vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 100 }, difficulty: 1,
+                wallet_state_root: [0u8;32], dex_state_root: [0u8;32], event_log_root: [0u8;32],
+                contract_state_root: [0u8;32],
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8;32] },
+                txs_merkle_root: [0u8;32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: scheme, producer: [0u8;32],
+                producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                topology_commitment: None,
+                shielded_pool_root: None,
+            }
+        }
+        let p = tmp("scan-window");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            s.set_base(1);
+            let mut chain = Vec::new();
+            let mut parent = [0u8; 32];
+            for h in 0..1500u64 { let hdr = mk(h, parent); parent = hdr.hash(); chain.push(hdr); }
+            // three SST generations + a memtable tail
+            for part in [&chain[1..500], &chain[500..1000], &chain[1000..1400]] {
+                assert_eq!(s.put_blocks_batch(part), part.len());
+                s.advance();
+                s.db_handle().flush().unwrap();
+            }
+            assert_eq!(s.put_blocks_batch(&chain[1400..1500]), 100);
+            s.advance();
+            assert_eq!(s.synced_to(), 1500);
+
+            let w = s.scan_window(1, 5000, |b| b.hash_hex.clone()).unwrap();
+            assert_eq!(w.indexed, 1499, "stops at the first unindexed height");
+            assert!(w.raw.files >= 3, "{:?}", w.raw);
+            for (i, slot) in w.slots.iter().enumerate() {
+                let h = 1 + i as u64;
+                assert_eq!(slot.as_deref(), Some(s.get_stored_at_height(h).unwrap().hash_hex.as_str()), "h={h}");
+            }
+            let mid = s.scan_window(700, 50, |b| b.header.height).unwrap();
+            assert_eq!(mid.indexed, 50);
+            assert_eq!(mid.slots, (700..750).map(Some).collect::<Vec<_>>());
         }
         let _ = std::fs::remove_dir_all(&p);
     }

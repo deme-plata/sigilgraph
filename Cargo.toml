@@ -132,3 +132,11 @@ inherits = "release"
 opt-level = 1
 lto = false
 codegen-units = 256
+# 2026-10-08 (Viktor: "reduce compile times"). Measured in an isolated worktree on Epsilon,
+# load ~37: a one-line sigil-top edit cost 62 s of rustc CPU at release-fast (the whole
+# 1.8 MB crate re-optimized); with incremental it costs 2.4–3.2 s (an edit inside main()
+# 26–36 s). Editing sigil-tx then rebuilding sigil-top: 60 s wall / 238 s CPU → 12 s / 12 s.
+# Verified: a changed --version string reaches the binary on every incremental rebuild, and
+# sigil-tx 69, sigil-top-sync 83, sigil-top 250 tests pass. Costs ~1.5 GB of
+# target/release-fast/incremental. Shipping (`release`) stays non-incremental.
+incremental = true

@@ -189,6 +189,18 @@ echo "  profiles: ${PROFILES[*]}   (release-fast is the GATE profile — prover 
 echo "  converge: every cell <= ${WARM_S}s in one pass (max ${MAX_PASSES} passes)"
 echo
 
+# ── Yield between cells (2026-10-07) ────────────────────────────────────────
+# prewarm-when-idle.sh checks for a running build ONCE, at start. A run then lasts ~30 min
+# and the timer fires every 15 (92 runs in the 24 h to 10-07). Every cell below is a cargo
+# invocation, and each one takes the box-wide ~/.cargo package-cache lock — a lock does not
+# yield to `nice`. So a real build arriving mid-run queued behind it. Measured 10-07:
+# sigil-top `check` after a UI edit = 2.7 s rustc CPU but 67–82 s wall, 24–44 s of it
+# "blocked on file locks — the box-wide package cache"; 2.1 s wall with no contender.
+# Before every cell: if anyone else is compiling, stop. The next timer tick resumes.
+foreign_build() {
+  pgrep -x rustc >/dev/null 2>&1 || pgrep -f "cargo (build|check|test|rustc)" >/dev/null 2>&1
+}
+
 TOTAL=$SECONDS
 pass=0
 converged=0
@@ -208,6 +220,11 @@ while [ "$pass" -lt "$MAX_PASSES" ]; do
     line="  $(printf '%-18s' "$crate")"
     for profile in "${PROFILES[@]}"; do
       for shape in "${SHAPES[@]}"; do
+        if [ "${PREWARM_YIELD:-1}" = 1 ] && foreign_build; then
+          echo "$line"
+          echo "  ⏸ another build is running — yielding after $((SECONDS-TOTAL))s (the next timer tick resumes)"
+          exit 0
+        fi
         r=$(timed_check "$crate" "$shape" "$profile")
         if [ "$r" = FAIL ]; then
           failed=$((failed + 1)); mark="✗"

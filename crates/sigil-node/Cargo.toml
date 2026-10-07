@@ -9,11 +9,40 @@ description = "SIGIL node — main binary. Phase 0: integration shell over Track
 name = "sigil-node"
 path = "src/main.rs"
 
+# The four chronos measurement bins are the ONLY users of sigil-chronos + flux-chronos.
+# As plain dependencies they sat on the critical path of sigil-node's lib — and so of every
+# sigil-top build (producer feature) — although neither library calls them: editing any
+# crate under sigil-tx rebuilt sigil-chronos (7.8 s check, 24 s CPU at release-fast) before
+# sigil-node could start. They also dragged 41 crates into sigil-node (wgpu, naga, ash,
+# flux-zk-stark, …: 274 s CPU per cold release-fast build, 152 s per release target). Run them with `--features chronos-bins`, e.g.
+#   fluxc build -p sigil-node --features chronos-bins --bin chronos_sim
+[[bin]]
+name = "chronos_sim"
+path = "src/bin/chronos_sim.rs"
+required-features = ["chronos-bins"]
+
+[[bin]]
+name = "chronos_search"
+path = "src/bin/chronos_search.rs"
+required-features = ["chronos-bins"]
+
+[[bin]]
+name = "chronos_block_conservation"
+path = "src/bin/chronos_block_conservation.rs"
+required-features = ["chronos-bins"]
+
+[[bin]]
+name = "chronos_prune_safety"
+path = "src/bin/chronos_prune_safety.rs"
+required-features = ["chronos-bins"]
+
 [features]
 # Pull real Arti Tor up through sigil-net → sigil-net-tor. Heavy (117 crates);
 # build with `--features arti` only when an operator actually wants Tor egress
 # (SIGIL_TRANSPORT=tor or wg+tor).
 arti = ["sigil-net/arti"]
+# The chronos measurement bins above (sigil-chronos + flux-chronos are only theirs).
+chronos-bins = ["dep:sigil-chronos", "dep:flux-chronos"]
 
 [dependencies]
 flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
@@ -85,9 +114,9 @@ flux-search   = { path = "../../../flux/crates/flux-search" }
 # embedded LSM-tree, RocksDB-style block-SSTs with per-block LZ4. The real
 # durable graph store (replaces the JSON-snapshot path). See store.rs.
 flux-db       = { path = "../../../flux/crates/flux-db" }
-# deterministic block production for the footprint simulation (chronos_sim bin)
-sigil-chronos = { path = "../sigil-chronos" }
-flux-chronos  = { path = "../../../flux/crates/flux-chronos" }
+# deterministic block production for the footprint simulation (chronos_* bins only)
+sigil-chronos = { path = "../sigil-chronos", optional = true }
+flux-chronos  = { path = "../../../flux/crates/flux-chronos", optional = true }
 
 [dev-dependencies]
 # Test-only: finality_wire.rs's committee tests construct a real

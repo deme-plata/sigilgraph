@@ -108,6 +108,18 @@ strip = "debuginfo"
 lto = "thin"
 codegen-units = 1
 
+# 2026-10-07 (Viktor: "compile time is way too much … take action"). Measured, sigil-top
+# ALONE rebuilt with every dependency cached, same box load (~37):
+#   codegen-units = 1   5 min 11 s wall · 10 min 28 s CPU
+#   codegen-units = 16  2 min 44 s wall · 10 min 51 s CPU   (−47 % wall)
+# The rest (~2 min) is rustc's single-threaded front end on a 1.77 MB crate; only splitting
+# the crate removes that. sigil-top's speed-critical code lives in OTHER crates (flux-miner,
+# sigil-block-store, sigil-header, flux-db, blake3), which keep codegen-units = 1 + thin LTO.
+# Runtime effect on sigil-top's own code: NOT measured (no benchmark exists for it).
+# sigil-node is deliberately left at 1: it is the live producer's binary.
+[profile.release.package.sigil-top]
+codegen-units = 16
+
 # Fast-iteration profile (added 2026-06-27): parallel codegen + no LTO + opt=1.
 # Compile sigil-top in ~19s vs ~96s for full --release. Use for the edit->build->measure
 # loop; ship + final throughput measurements still use --release (cgu=1, lto=thin, opt=3).

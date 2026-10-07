@@ -2865,10 +2865,21 @@ impl P2PBlockSync {
                         let mut heal_pending = false; // set by the self-heal arm inside the closure
                         let verify_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let vt0 = std::time::Instant::now();
-                            let report = crate::chain_verify::verify_to_parallel(&mut store, VERIFY_BUDGET);
+                            // 2026-10-07: with a large unverified backlog, read the store in ONE
+                            // sequential pass instead of one random read per height. Measured on the
+                            // RAID 0 array: per-height reads ran at ~220/s, so a 240k pass held this
+                            // loop 3–18 minutes and downloading stopped for all of it.
+                            let backlog = store.synced_to().saturating_sub(store.verified_to());
+                            let sequential = backlog >= crate::chain_verify::SEQUENTIAL_VERIFY_MIN_BACKLOG;
+                            let report = if sequential {
+                                crate::chain_verify::verify_sequential(&mut store, crate::chain_verify::SEQUENTIAL_VERIFY_WINDOW)
+                            } else {
+                                crate::chain_verify::verify_to_parallel(&mut store, VERIFY_BUDGET)
+                            };
                             if report.checked > 0 {
                                 let secs = vt0.elapsed().as_secs_f64().max(0.001);
-                                crate::tlog!("[verify] parallel pass: checked {} → verified_to={} in {} ms ({:.0} blk/s)",
+                                crate::tlog!("[verify] {} pass: checked {} → verified_to={} in {} ms ({:.0} blk/s)",
+                                    if sequential { "sequential" } else { "parallel" },
                                     report.checked, report.verified_to, vt0.elapsed().as_millis(), report.checked as f64 / secs);
                             }
                             let class = crate::gap_sync::classify_break(&report);

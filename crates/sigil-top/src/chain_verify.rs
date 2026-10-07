@@ -266,6 +266,95 @@ pub fn verify_to_parallel(store: &mut BlockStore, max_steps: u64) -> VerifyRepor
     VerifyReport { verified_to: verified, checked, first_break }
 }
 
+/// Unverified backlog at which [`verify_sequential`] beats per-height reads.
+/// One sequential pass reads the whole store (12 GB on the 2026-10-07 node,
+/// ~15–40 s on the RAID); per-height reads cost one seek per block (~4 ms).
+pub const SEQUENTIAL_VERIFY_MIN_BACKLOG: u64 = 1_000_000;
+/// Heights verified per sequential pass (~0.5 GB of bookkeeping RAM).
+pub const SEQUENTIAL_VERIFY_WINDOW: u64 = 2_000_000;
+
+/// [`verify_to_parallel`] with the reads done in ONE sequential pass over the
+/// store ([`BlockStore::scan_window`]) instead of one random read per height.
+///
+/// Same checks, same order, same report: precheck, then parent linkage
+/// against the previous height's stored hash, stopping at the first break; a
+/// height whose body the pass did not find breaks as `Missing`, exactly like a
+/// failed `get_stored_at_height`. If the pass itself fails (I/O), falls back
+/// to the per-height path for this tick.
+pub fn verify_sequential(store: &mut BlockStore, max_steps: u64) -> VerifyReport {
+    let base = store.base();
+    let start = store.verified_to().max(base);
+    let scan = store.scan_window(start, max_steps, |b| {
+        (
+            b.header.precheck().err().map(|e| BreakReason::Precheck(e.to_string())),
+            b.header.parent_hash,
+            decode_hash_hex(&b.hash_hex),
+        )
+    });
+    let w = match scan {
+        Ok(w) => w,
+        Err(e) => {
+            crate::tlog!("[verify] sequential pass failed ({e}) — per-height pass this tick");
+            return verify_to_parallel(store, max_steps.min(240_000));
+        }
+    };
+    crate::tlog!(
+        "[verify] sequential pass: window {} heights from {} · index {} ms · scan {} ms ({} SSTs, {} vanished, {:.1} M pairs, {} wanted bodies)",
+        w.indexed, start, w.index_ms, w.scan_ms, w.raw.files, w.raw.vanished, w.raw.pairs as f64 / 1e6, w.matched
+    );
+
+    let frontier_break = (w.indexed < max_steps).then(|| (start + w.indexed, BreakReason::Missing));
+    if w.indexed == 0 {
+        return VerifyReport { verified_to: start, checked: 0, first_break: frontier_break };
+    }
+    let mut parent_hash: Option<sigil_header::BlockHash> = if start == base {
+        None
+    } else {
+        store.get_stored_at_height(start - 1).and_then(|b| decode_hash_hex(&b.hash_hex))
+    };
+    let mut verified = start;
+    let mut checked = 0u64;
+    let mut first_break = None;
+    for (i, slot) in w.slots.iter().enumerate() {
+        let height = start + i as u64;
+        let Some((precheck, hdr_parent, stored_hash)) = slot else {
+            first_break = Some((height, BreakReason::Missing));
+            break;
+        };
+        if let Some(reason) = precheck {
+            first_break = Some((height, reason.clone()));
+            break;
+        }
+        if let Some(expected) = parent_hash.as_ref() {
+            if hdr_parent != expected {
+                first_break = Some((height, BreakReason::ParentMismatch {
+                    height,
+                    expected: hex::encode(expected),
+                    found: hex::encode(hdr_parent),
+                }));
+                break;
+            }
+        }
+        parent_hash = match stored_hash {
+            Some(ph) => Some(*ph),
+            None => {
+                first_break = Some((height, BreakReason::Precheck(
+                    format!("corrupt stored hash_hex at h={height}"))));
+                break;
+            }
+        };
+        verified = height + 1;
+        checked += 1;
+    }
+    if first_break.is_none() {
+        first_break = frontier_break;
+    }
+    if verified > start {
+        store.set_verified_to(verified);
+    }
+    VerifyReport { verified_to: verified, checked, first_break }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +486,72 @@ mod tests {
             "must break at h=3000, got {:?}",
             parallel_b.first_break
         );
+    }
+
+    /// 2026-10-07: the sequential pass must be observationally identical to the
+    /// per-height parallel walk — same verified_to, checked and first_break —
+    /// on a clean chain spread over several SSTs, in windows smaller than the
+    /// chain, and on all three break kinds (Missing via ingest refusal,
+    /// ParentMismatch and Precheck via a raw insert). Safety gate for using it.
+    #[test]
+    fn sequential_verify_matches_parallel() {
+        const N: u64 = 4_000;
+        fn store_with(tag: &str, fill: impl Fn(&mut BlockStore)) -> BlockStore {
+            let p = tmp(tag);
+            let _ = std::fs::remove_dir_all(&p);
+            let mut s = BlockStore::open(&p).unwrap();
+            fill(&mut s);
+            s.advance();
+            s
+        }
+        let check = |tag: &str, fill: &dyn Fn(&mut BlockStore), window: u64| -> VerifyReport {
+            let mut a = store_with(&format!("{tag}-par"), fill);
+            let mut b = store_with(&format!("{tag}-seq"), fill);
+            loop {
+                let pr = verify_to_parallel(&mut a, window);
+                let sr = verify_sequential(&mut b, window);
+                assert_eq!(pr.verified_to, sr.verified_to, "{tag}: verified_to");
+                assert_eq!(pr.checked, sr.checked, "{tag}: checked");
+                assert_eq!(pr.first_break, sr.first_break, "{tag}: first_break");
+                assert_eq!(a.verified_to(), b.verified_to(), "{tag}: stored watermark");
+                if pr.checked == 0 {
+                    return sr;
+                }
+            }
+        };
+
+        let chain = mk_chain(N);
+        let clean = |s: &mut BlockStore| {
+            for part in chain.chunks(1_000) {
+                s.put_blocks_batch(part);
+                s.advance();
+                s.db_handle().flush().unwrap();
+            }
+        };
+        let r = check("seq-clean", &clean, u64::MAX);
+        assert_eq!(r.verified_to, N);
+        let r = check("seq-clean-windows", &clean, 700);
+        assert_eq!(r.verified_to, N, "700-height windows reach the end");
+
+        let mut broken = mk_chain(N);
+        broken[3000].parent_hash = [0xee; 32];
+        let r = check("seq-missing", &|s: &mut BlockStore| { s.put_blocks_batch(&broken); }, u64::MAX);
+        assert!(matches!(r.first_break, Some((3000, BreakReason::Missing))), "{:?}", r.first_break);
+
+        let forged = |s: &mut BlockStore, h: usize, hdr: SigilBlockHeaderV0| {
+            s.put_blocks_batch(&chain[..h]);
+            s.force_insert_block(hdr);
+            for x in &chain[h + 1..] {
+                s.force_insert_block(x.clone());
+            }
+        };
+        let r = check("seq-parent", &|s: &mut BlockStore| forged(s, 2000, mk_header(2000, [0xaa; 32])), u64::MAX);
+        assert!(matches!(r.first_break, Some((2000, BreakReason::ParentMismatch { .. }))), "{:?}", r.first_break);
+
+        let mut bad_vdf = chain[1500].clone();
+        bad_vdf.vdf_input = [0x11; 32];
+        let r = check("seq-precheck", &|s: &mut BlockStore| forged(s, 1500, bad_vdf.clone()), u64::MAX);
+        assert!(matches!(r.first_break, Some((1500, BreakReason::Precheck(_)))), "{:?}", r.first_break);
     }
 
     #[test]

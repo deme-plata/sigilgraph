@@ -40,6 +40,9 @@ use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 pub use finality_grandpa as fg;
+// Re-exported so a caller (sigil-node) uses the exact versions the environment is built on.
+pub use futures;
+pub use parking_lot;
 use fg::voter::{Callback, CommunicationIn, CommunicationOut, RoundData};
 use fg::{
     Chain, Commit, Equivocation, Error, HistoricalVotes, Message, Precommit, Prevote,

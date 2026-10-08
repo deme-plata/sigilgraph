@@ -311,12 +311,22 @@ pub fn pending_insert(
 /// lowest-height resident body is dropped first (approximation of the design's
 /// "lowest-height off-spine first" — the linear path's 200k `pending` cap is
 /// the precedent). O(n) scan only on overflow.
+/// 2026-10-08 (roadmap step 1, M2.2): every block body the node accepts into its DAG store,
+/// reported as `(hash, parent_hash, height)`. The GRANDPA finality tree is fed from here so
+/// no call site can be forgotten. Unset (the default, and always in sigil-top) = no effect.
+#[allow(clippy::type_complexity)]
+pub static BLOCK_OBSERVER: std::sync::OnceLock<Box<dyn Fn(BlockHash, BlockHash, u64) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
 pub fn dag_store_body(
     dag_bodies: &mut HashMap<BlockHash, Block>,
     cap: usize,
     hash: BlockHash,
     block: Block,
 ) {
+    if let Some(observe) = BLOCK_OBSERVER.get() {
+        observe(hash, block.header.parent_hash, block.header.height);
+    }
     if dag_bodies.len() >= cap && !dag_bodies.contains_key(&hash) {
         if let Some(evict) = dag_bodies
             .iter()

@@ -34,6 +34,7 @@ mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effe
 mod peer_pick; // 2026-09-11: ask only peers whose advertised height covers the range — see its module doc
 mod peer_view; // 2026-09-07: tip hash + wallet state root + finalized on the peer-heights heartbeat; per-peer agreement verdicts for the K-gauge v2
 mod parent_fetch; // 2026-10-07: fetch missing DAG parents BY HASH (two producers) — see its module doc
+mod grandpa_node; // 2026-10-08: GRANDPA finality behind SIGIL_FINALITY_PROTOCOL=grandpa — see its module doc
 mod follower_reorg; // 2026-09-08: roll a forked follower back to a checkpoint below the fork so it can rejoin canonical (SIGIL_FOLLOWER_REORG=1); see its module doc
 
 use std::process::ExitCode;
@@ -1486,6 +1487,26 @@ fn run_start() -> Result<()> {
         // read by production, validation, or fork choice. See finality_wire.rs.
         let mut finality = finality_wire::FinalityWire::from_env().with_guard_dir(&snap_dir);
         eprintln!("{}", finality.gate_mode().banner());
+        // 2026-10-08 (roadmap step 1, M2.2): GRANDPA finality, rehearsal only. Its base is
+        // the settled tip (settled = final). See grandpa_node.rs.
+        let (grandpa, mut grandpa_fin_rx) = if grandpa_node::enabled() && braid.is_some() {
+            let tip_h = chain.height().saturating_sub(1);
+            let base = chain.get(tip_h).map(|b| (b.hash(), tip_h));
+            let genesis = build_genesis().ok().map(|g| g.hash());
+            match (base, genesis) {
+                (Some(base), Some(genesis)) => match grandpa_node::GrandpaNode::start(mgr.clone(), genesis, base, &snap_dir) {
+                    Some((g, rx)) => (Some(g), Some(rx)),
+                    None => (None, None),
+                },
+                _ => {
+                    eprintln!("🏁 grandpa: NOT started — no settled tip or genesis to anchor on");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+        let mut grandpa_pending_final: Option<(u64, BlockHash)> = None;
         // Fail-loud finality monitoring (2026-08-15, the P=6 k=1 investigation):
         // `below_final` was already tracked in BraidStats but nothing ever
         // surfaced it to an operator — a node could be silently orphaning
@@ -2571,7 +2592,13 @@ fn run_start() -> Result<()> {
                                     let held = vote_held(braid.as_ref(), h);
                                     // 2026-10-08: with SIGIL_FINALITY_VOTE_DEPTH > 0 the vote is
                                     // one per height on our own spine — see `spine_vote`.
-                                    let vb = if finality.vote_depth() > 0 {
+                                    if let (Some(g), Some(br)) = (grandpa.as_ref(), braid.as_mut()) {
+                                        g.set_preferred(br);
+                                        grandpa_node::apply_final(br, &mut grandpa_pending_final);
+                                    }
+                                    let vb = if grandpa.is_some() {
+                                        None // GRANDPA votes instead (grandpa_node.rs)
+                                    } else if finality.vote_depth() > 0 {
                                         braid.as_ref().and_then(|br| spine_vote(&mut finality, br, &chain, &dag_bodies))
                                     } else {
                                         (!held).then(|| finality.on_block(
@@ -3576,7 +3603,13 @@ fn run_start() -> Result<()> {
                                             // 2026-10-07 (step 1): no vote while our own view of
                                             // `bheight` is incomplete — see `vote_held`.
                                             let held = vote_held(Some(&*br), bheight);
-                                            let vb = if finality.vote_depth() > 0 {
+                                            if let Some(g) = grandpa.as_ref() {
+                                                g.set_preferred(br);
+                                                grandpa_node::apply_final(br, &mut grandpa_pending_final);
+                                            }
+                                            let vb = if grandpa.is_some() {
+                                                None // GRANDPA votes instead (grandpa_node.rs)
+                                            } else if finality.vote_depth() > 0 {
                                                 spine_vote(&mut finality, br, &chain, &dag_bodies)
                                             } else {
                                                 (!held).then(|| finality.on_block(bheight, bhash, topo, finality_wire::now_ms())).flatten()
@@ -4123,6 +4156,10 @@ fn run_start() -> Result<()> {
                                     let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::FluffIncoming { id, bytes: data });
                                 }
                             } else if topic == sigil_net::TOPIC_FINALITY_VOTES {
+                                // GRANDPA messages share this topic (JSON tagged "grandpa").
+                                if let Some(g) = grandpa.as_ref() {
+                                    g.on_gossip(&data);
+                                }
                                 // Phase 2: tally only. `on_gossip` returns a log line
                                 // for a certificate or an equivocation and `None` for
                                 // everything else — including rejected votes, which on
@@ -4189,6 +4226,34 @@ fn run_start() -> Result<()> {
                         }
                         _ => {}
                         }
+                    }
+                }
+                Some((fh, fnum, fround)) = async {
+                    match grandpa_fin_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // 2026-10-08 (M2.2): GRANDPA finalized `fh` at `fnum`. Raise the braid's line
+                    // (fork choice follows it with SIGIL_DAG_CERT_FORK_CHOICE=1) and settle.
+                    if grandpa_pending_final.is_none_or(|(n, _)| fnum > n) {
+                        grandpa_pending_final = Some((fnum, fh));
+                    }
+                    if let Some(br) = braid.as_mut() {
+                        grandpa_node::apply_final(br, &mut grandpa_pending_final);
+                        let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
+                            &mut |braw| { let _ = chain_log.append_bytes(braw); },
+                            &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                            &shielded_bridge, &mut mint_hash_to_tx_hashes);
+                        applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                        if a > 0 { publish_money!(); }
+                    }
+                    static LAST_GRANDPA_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let now = finality_wire::now_ms();
+                    if now.saturating_sub(LAST_GRANDPA_LOG.load(std::sync::atomic::Ordering::Relaxed)) >= 1000 {
+                        LAST_GRANDPA_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("🏁 grandpa: finalized H={fnum} (round {fround}) · settled H={} · pending {:?}",
+                            chain.height().saturating_sub(1), grandpa_pending_final.map(|(n, _)| n));
                     }
                 }
                 Some(vals) = bh_rx.recv() => {

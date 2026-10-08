@@ -49,7 +49,14 @@ pub enum Wire {
     Vote { set: u64, round: u64, phase: u8, v: WireVote },
     Commit { set: u64, round: u64, hash: String, number: u64, pc: Vec<WireVote> },
     CatchUp { set: u64, round: u64, base_hash: String, base_number: u64, pv: Vec<WireVote>, pc: Vec<WireVote> },
-    Neighbor { set: u64, round: u64 },
+    /// `at` (ms) makes every neighbor line unique: gossipsub drops bytes it has seen, and a
+    /// stuck voter repeating the same round would otherwise be heard only once.
+    Neighbor {
+        set: u64,
+        round: u64,
+        #[serde(default)]
+        at: u64,
+    },
 }
 
 fn h32(s: &str) -> Option<[u8; 32]> {
@@ -189,7 +196,7 @@ impl GossipTransport {
                 let c = CatchUp { round_number: round, prevotes, precommits, base_hash, base_number };
                 self.inner.lock().global_subs.retain(|tx| tx.unbounded_send(GlobalMsg::CatchUp(c.clone())).is_ok());
             }
-            Wire::Neighbor { set, round } if set == self.set_id => self.maybe_catch_up(round),
+            Wire::Neighbor { set, round, .. } if set == self.set_id => self.maybe_catch_up(round),
             _ => {}
         }
     }
@@ -229,7 +236,8 @@ impl GossipTransport {
             }
             (n.my_round, out)
         };
-        (self.publish)(serde_json::to_vec(&Wire::Neighbor { set: self.set_id, round }).unwrap_or_default());
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        (self.publish)(serde_json::to_vec(&Wire::Neighbor { set: self.set_id, round, at }).unwrap_or_default());
         for b in out {
             (self.publish)(b);
         }

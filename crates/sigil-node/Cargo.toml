@@ -103,6 +103,7 @@ sigil-dagknight = { workspace = true }
 # holds a `FinalityWire` that is inert unless SIGIL_FINALITY_COMMITTEE is set,
 # and nothing it returns is consulted by block production or validation.
 sigil-finality = { path = "../sigil-finality" }
+sigil-grandpa = { path = "../sigil-grandpa" }
 flux-topology = { path = "../flux-topology" }
 flux-p2p      = { workspace = true }
 # our own file system: Reed-Solomon erasure + encryption. Wired here for

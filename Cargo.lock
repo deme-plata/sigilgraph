@@ -9008,6 +9008,7 @@ dependencies = [
  "sigil-emission",
  "sigil-events",
  "sigil-finality",
+ "sigil-grandpa",
  "sigil-handshake",
  "sigil-header",
  "sigil-narwhal-mempool",

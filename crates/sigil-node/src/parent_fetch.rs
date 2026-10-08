@@ -68,14 +68,39 @@ pub fn parse_hashes(hexes: &[String]) -> Vec<BlockHash> {
     out
 }
 
-/// Look every hash up with `get` and return what was found, in request order.
-/// Hashes the server does not hold are simply absent from the answer; the
-/// requester will ask another peer.
-pub fn collect_by_hash<B: Clone>(
+/// Look the requested hashes up with `get` — and walk back through their parents
+/// (`parent_hash` and `merge_parents`) and returns every ancestor the server holds, up to
+/// `limit` blocks in total, OLDEST FIRST so the requester can insert them in order.
+///
+/// 2026-10-08, measured after a 40 s split on the GRANDPA rehearsal: each half had built
+/// ~300 blocks the other never received. One-block answers walk that back one parent per
+/// round trip — ~6 blocks/s against a branch growing 8 blocks/s — so the halves never
+/// re-merged and finality could not resume. With ancestors, one answer carries up to
+/// `limit` blocks. An old requester simply receives more of what it was missing.
+pub fn collect_with_ancestors<B: Clone>(
     hashes: &[BlockHash],
     get: impl Fn(&BlockHash) -> Option<B>,
+    parents_of: impl Fn(&B) -> Vec<BlockHash>,
+    height_of: impl Fn(&B) -> u64,
+    limit: usize,
 ) -> Vec<B> {
-    hashes.iter().take(BY_HASH_MAX).filter_map(|h| get(h)).collect()
+    let mut seen: std::collections::HashSet<BlockHash> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<BlockHash> = hashes.iter().copied().collect();
+    let mut out: Vec<B> = Vec::new();
+    while let Some(h) = queue.pop_front() {
+        if out.len() >= limit {
+            break;
+        }
+        if !seen.insert(h) {
+            continue;
+        }
+        if let Some(b) = get(&h) {
+            queue.extend(parents_of(&b));
+            out.push(b);
+        }
+    }
+    out.sort_by_key(|b| height_of(b));
+    out
 }
 
 /// Requester-side dedupe: the same missing parent is reported by every child
@@ -157,10 +182,26 @@ mod tests {
     }
 
     #[test]
-    fn collect_keeps_request_order_and_skips_what_we_do_not_hold() {
-        let store: HashMap<BlockHash, u32> = [(h(1), 10), (h(3), 30)].into_iter().collect();
-        let got = collect_by_hash(&[h(3), h(2), h(1)], |k| store.get(k).copied());
-        assert_eq!(got, vec![30, 10]);
+    fn ancestors_come_back_oldest_first_and_stop_at_the_limit() {
+        // A chain 1 <- 2 <- 3 <- 4 plus a side block 9 merged into 4.
+        let store: HashMap<BlockHash, (u64, Vec<BlockHash>)> = [
+            (h(1), (1, vec![])),
+            (h(2), (2, vec![h(1)])),
+            (h(3), (3, vec![h(2)])),
+            (h(9), (3, vec![h(2)])),
+            (h(4), (4, vec![h(3), h(9)])),
+        ]
+        .into_iter()
+        .collect();
+        let get = |k: &BlockHash| store.get(k).map(|v| (*k, v.clone()));
+        let parents = |b: &(BlockHash, (u64, Vec<BlockHash>))| b.1 .1.clone();
+        let height = |b: &(BlockHash, (u64, Vec<BlockHash>))| b.1 .0;
+        let all = collect_with_ancestors(&[h(4)], get, parents, height, 64);
+        let hs: Vec<u64> = all.iter().map(|b| b.1 .0).collect();
+        assert_eq!(hs, vec![1, 2, 3, 3, 4], "oldest first, side block included, no duplicates");
+        let capped = collect_with_ancestors(&[h(4)], get, parents, height, 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped.last().map(|b| b.0), Some(h(4)), "the asked-for block is always in, the cap trims ancestry");
     }
 
     #[test]

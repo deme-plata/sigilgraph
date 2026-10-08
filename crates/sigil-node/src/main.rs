@@ -2872,7 +2872,18 @@ fn run_start() -> Result<()> {
                             // no height range on our settled chain can return those. See `parent_fetch`.
                             if let Some(hexes) = req.by_hash.as_ref() {
                                 let want = crate::parent_fetch::parse_hashes(hexes);
-                                let blocks = crate::parent_fetch::collect_by_hash(&want, |h| dag_bodies.get(h).cloned());
+                                // 2026-10-08: ancestors too (oldest first) — see `collect_with_ancestors`.
+                                let blocks = crate::parent_fetch::collect_with_ancestors(
+                                    &want,
+                                    |h| dag_bodies.get(h).cloned(),
+                                    |b: &Block| {
+                                        let mut p = vec![b.header.parent_hash];
+                                        p.extend(b.header.merge_parents.iter().copied());
+                                        p
+                                    },
+                                    |b: &Block| b.header.height,
+                                    crate::parent_fetch::BY_HASH_MAX,
+                                );
                                 static BY_HASH_SERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                                 let n = BY_HASH_SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 if n % 64 == 0 {
@@ -3644,7 +3655,13 @@ fn run_start() -> Result<()> {
                                             // producer's side blocks are reachable only by hash. One gap
                                             // reported by many children is one ask (`InFlight`).
                                             // Parents we already hold parked are not worth asking for.
-                                            let missing: Vec<BlockHash> = missing.into_iter().filter(|h| !br.is_parked(h)).collect();
+                                            let mut missing: Vec<BlockHash> = missing.into_iter().filter(|h| !br.is_parked(h)).collect();
+                                            // 2026-10-08: everything this block waits on is itself parked
+                                            // (a long branch missed during a split): ask for the ROOTS of
+                                            // the parked runs instead, or nothing is ever asked again.
+                                            if missing.is_empty() {
+                                                missing = br.missing_parents();
+                                            }
                                             let want = parents_in_flight.take_new(&missing, std::time::Instant::now());
                                             if !want.is_empty() {
                                                 let connected = mgr.connected_peers();
@@ -4289,6 +4306,12 @@ fn run_start() -> Result<()> {
                         // 2026-10-08: a MissingParents list names parked parents too; asking for
                         // those again only returns Duplicate (measured: 1,345 answers, 0 inserted).
                         still_missing.retain(|h| !br.is_parked(h));
+                        // 2026-10-08: an answer of blocks we already hold parked moves nothing; ask
+                        // for the roots of the parked runs (measured after a 40 s split: 64 no-ops
+                        // per answer and 518 blocks parked behind a root nobody asked for).
+                        if still_missing.is_empty() && br.pending_floor_height().is_some() {
+                            still_missing = br.missing_parents();
+                        }
                         static BH_RECV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                         let n = BH_RECV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if n % 64 == 0 {

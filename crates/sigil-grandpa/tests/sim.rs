@@ -53,7 +53,7 @@ struct NetInner {
     targeted: Vec<(u64, Id, SigilSignedMessage)>,
     round_subs: HashMap<u64, Vec<(Id, UnboundedSender<SigilSignedMessage>)>>,
     global_hist: Vec<(Id, u64, SigilCommit)>,
-    global_subs: Vec<(Id, UnboundedSender<(u64, SigilCommit)>)>,
+    global_subs: Vec<(Id, UnboundedSender<GlobalMsg>)>,
     groups: Option<HashMap<Id, u8>>,
     held_round: Vec<(u64, Id, SigilSignedMessage)>,
     held_global: Vec<(Id, u64, SigilCommit)>,
@@ -90,7 +90,7 @@ impl MemNet {
         for (to, round, c) in std::mem::take(&mut n.held_global) {
             for (id, tx) in &n.global_subs {
                 if *id == to {
-                    let _ = tx.unbounded_send((round, c.clone()));
+                    let _ = tx.unbounded_send(GlobalMsg::Commit(round, c.clone()));
                 }
             }
         }
@@ -162,12 +162,12 @@ impl Transport for MemNet {
             }
         }
     }
-    fn subscribe_global(&self, me: Id) -> UnboundedReceiver<(u64, SigilCommit)> {
+    fn subscribe_global(&self, me: Id) -> UnboundedReceiver<GlobalMsg> {
         let (tx, rx) = unbounded();
         let mut n = self.0.lock();
         for (from, r, c) in n.global_hist.clone() {
             if n.can_talk(&from, &me) {
-                let _ = tx.unbounded_send((r, c));
+                let _ = tx.unbounded_send(GlobalMsg::Commit(r, c));
             } else {
                 n.held_global.push((me, r, c));
             }
@@ -180,7 +180,7 @@ impl Transport for MemNet {
         n.global_hist.push((from, round, commit.clone()));
         for (id, tx) in n.global_subs.clone() {
             if n.can_talk(&from, &id) {
-                let _ = tx.unbounded_send((round, commit.clone()));
+                let _ = tx.unbounded_send(GlobalMsg::Commit(round, commit.clone()));
             } else {
                 n.held_global.push((id, round, commit.clone()));
             }
@@ -199,6 +199,7 @@ struct Harness {
     truth: SpineTree,
     log: Arc<Mutex<Vec<(Id, Hash, Number)>>>,
     tips: HashMap<u8, (Hash, Number)>,
+    errors: Arc<Mutex<Vec<String>>>,
 }
 
 impl Harness {
@@ -216,6 +217,7 @@ impl Harness {
             truth: SpineTree::new(GENESIS),
             log: log.clone(),
             tips: HashMap::new(),
+            errors: Arc::new(Mutex::new(Vec::new())),
         };
         for i in 0..honest as u8 {
             let env = Arc::new(SigilEnv::new(
@@ -246,7 +248,15 @@ impl Harness {
         };
         let voter = Voter::new(env.clone(), self.voters.clone(), env.global_comms(), last_round, votes, base, fin);
         let (fut, handle) = abortable(voter);
-        self.pool.spawner().spawn_local(fut.map(|_| ())).unwrap();
+        let errors = self.errors.clone();
+        self.pool
+            .spawner()
+            .spawn_local(fut.map(move |r| {
+                if let Ok(Err(e)) = r {
+                    errors.lock().push(format!("voter {i} died: {e:?}"));
+                }
+            }))
+            .unwrap();
         self.aborts[i] = Some(handle);
     }
 
@@ -314,6 +324,7 @@ impl Harness {
 
     /// Every block any honest voter finalized lies on ONE chain of the truth tree.
     fn assert_safe(&self) {
+        assert!(self.errors.lock().is_empty(), "voter task errors: {:?}", *self.errors.lock());
         for e in &self.envs {
             let v = e.safety_violations.lock();
             assert!(v.is_empty(), "local safety violation: {:?}", *v);

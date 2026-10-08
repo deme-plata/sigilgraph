@@ -60,6 +60,17 @@ pub struct Sig(pub [u8; 64]);
 
 pub type SigilSignedMessage = SignedMessage<Hash, Number, Sig, Id>;
 pub type SigilCommit = Commit<Hash, Number, Sig, Id>;
+pub type SigilCatchUp = fg::CatchUp<Hash, Number, Sig, Id>;
+
+/// Messages outside a round: a commit (justification) or a catch-up (a completed round
+/// handed to a voter that fell behind, so it can jump forward instead of waiting forever).
+#[derive(Clone, Debug)]
+pub enum GlobalMsg {
+    Commit(u64, SigilCommit),
+    CatchUp(SigilCatchUp),
+}
+
+pub mod gossip;
 
 // ─── the spine tree ────────────────────────────────────────────────────────────────
 
@@ -68,19 +79,46 @@ pub type SigilCommit = Commit<Hash, Number, Sig, Id>;
 pub struct SpineTree {
     blocks: HashMap<Hash, (Option<Hash>, Number)>,
     children: HashMap<Hash, Vec<Hash>>,
+    /// Blocks whose parent has not arrived yet: missing parent → `(hash, number)`.
+    parked: HashMap<Hash, Vec<(Hash, Number)>>,
+    parked_count: usize,
 }
+
+/// Most blocks parked waiting for a parent (a peer cannot grow this without bound).
+const MAX_PARKED: usize = 65_536;
 
 impl SpineTree {
     pub fn new(genesis: Hash) -> Self {
+        Self::with_root(genesis, 0)
+    }
+
+    /// A tree rooted at an already-final block (a node that did not start at genesis).
+    pub fn with_root(root: Hash, number: Number) -> Self {
         let mut blocks = HashMap::new();
-        blocks.insert(genesis, (None, 0));
-        Self { blocks, children: HashMap::new() }
+        blocks.insert(root, (None, number));
+        Self { blocks, children: HashMap::new(), parked: HashMap::new(), parked_count: 0 }
     }
 
     /// Add `hash` at `number` under `parent`. Refused (false) if the parent is unknown or
     /// the number is not `parent + 1` — a vote target must have a complete, checked
-    /// ancestry ("vote only for what you hold").
+    /// ancestry ("vote only for what you hold"). Children parked on `hash` follow it in.
     pub fn insert(&mut self, hash: Hash, parent: Hash, number: Number) -> bool {
+        if !self.insert_one(hash, parent, number) {
+            return false;
+        }
+        let mut stack = vec![hash];
+        while let Some(p) = stack.pop() {
+            for (h, n) in self.parked.remove(&p).unwrap_or_default() {
+                self.parked_count = self.parked_count.saturating_sub(1);
+                if self.insert_one(h, p, n) {
+                    stack.push(h);
+                }
+            }
+        }
+        true
+    }
+
+    fn insert_one(&mut self, hash: Hash, parent: Hash, number: Number) -> bool {
         if self.blocks.contains_key(&hash) {
             return true;
         }
@@ -91,6 +129,70 @@ impl SpineTree {
         self.blocks.insert(hash, (Some(parent), number));
         self.children.entry(parent).or_default().push(hash);
         true
+    }
+
+    /// Like [`SpineTree::insert`], but a block whose parent is unknown is parked and joins
+    /// when the parent does (blocks reach a node out of order). Returns whether it is in.
+    pub fn insert_or_park(&mut self, hash: Hash, parent: Hash, number: Number) -> bool {
+        if self.blocks.contains_key(&hash) {
+            return true;
+        }
+        if self.blocks.contains_key(&parent) {
+            return self.insert(hash, parent, number);
+        }
+        if self.parked_count < MAX_PARKED {
+            self.parked.entry(parent).or_default().push((hash, number));
+            self.parked_count += 1;
+        }
+        false
+    }
+
+    /// After `fin` is final: keep its ancestors down to `keep` heights below it and every
+    /// descendant of it; everything else can never matter to finality again.
+    pub fn prune_finalized(&mut self, fin: Hash, keep: Number) {
+        let Some(fin_n) = self.number(&fin) else { return };
+        let floor = fin_n.saturating_sub(keep);
+        let mut kept: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        let mut lowest;
+        let mut cur = fin;
+        loop {
+            kept.insert(cur);
+            lowest = cur;
+            match self.blocks.get(&cur) {
+                Some((Some(p), n)) if *n > floor && self.blocks.contains_key(p) => cur = *p,
+                _ => break,
+            }
+        }
+        let mut stack = vec![fin];
+        while let Some(p) = stack.pop() {
+            for k in self.children.get(&p).cloned().unwrap_or_default() {
+                if kept.insert(k) {
+                    stack.push(k);
+                }
+            }
+        }
+        self.blocks.retain(|h, _| kept.contains(h));
+        if let Some(b) = self.blocks.get_mut(&lowest) {
+            b.0 = None; // the new root
+        }
+        self.children.retain(|p, _| kept.contains(p));
+        for kids in self.children.values_mut() {
+            kids.retain(|k| kept.contains(k));
+        }
+        let before = self.parked_count;
+        self.parked.retain(|_, v| {
+            v.retain(|(_, n)| *n > fin_n);
+            !v.is_empty()
+        });
+        self.parked_count = self.parked.values().map(|v| v.len()).sum::<usize>().min(before);
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
     }
 
     pub fn number(&self, h: &Hash) -> Option<Number> {
@@ -211,6 +313,16 @@ pub fn verify_commit_signatures(genesis: &Hash, set_id: u64, round: u64, commit:
     })
 }
 
+/// Every prevote and precommit in a catch-up is signed by its claimed voter for its round.
+pub fn verify_catch_up_signatures(genesis: &Hash, set_id: u64, c: &SigilCatchUp) -> bool {
+    let r = c.round_number;
+    c.prevotes.iter().all(|p| {
+        verify(genesis, set_id, r, &SignedMessage { message: Message::Prevote(p.prevote.clone()), signature: p.signature.clone(), id: p.id })
+    }) && c.precommits.iter().all(|p| {
+        verify(genesis, set_id, r, &SignedMessage { message: Message::Precommit(p.precommit.clone()), signature: p.signature.clone(), id: p.id })
+    })
+}
+
 // ─── the signer guard ──────────────────────────────────────────────────────────────
 
 /// At most one signed vote per `(round, phase)`, ever, for this voter-set id.
@@ -269,6 +381,12 @@ impl SignerGuard {
         self.poisoned
     }
 
+    /// The highest round anything was signed in. A restarted voter starts ABOVE it, so it
+    /// never re-enters a round whose record may have been pruned.
+    pub fn newest_round(&self) -> u64 {
+        self.votes.keys().map(|(r, _)| *r).max().unwrap_or(0)
+    }
+
     /// What may be signed for `(round, msg)`: the recorded vote if one exists, else `msg`
     /// (recorded first). `None` = sign nothing (poisoned, or the record could not be saved).
     pub fn decide(&mut self, round: u64, msg: Message<Hash, Number>) -> Option<Message<Hash, Number>> {
@@ -316,8 +434,11 @@ pub trait Transport: Send + Sync + 'static {
     /// Every signed message of `round`, including ones sent before this call.
     fn subscribe_round(&self, round: u64, me: Id) -> UnboundedReceiver<SigilSignedMessage>;
     fn broadcast_round(&self, round: u64, from: Id, msg: SigilSignedMessage);
-    fn subscribe_global(&self, me: Id) -> UnboundedReceiver<(u64, SigilCommit)>;
+    /// Commits and catch-ups.
+    fn subscribe_global(&self, me: Id) -> UnboundedReceiver<GlobalMsg>;
     fn broadcast_global(&self, from: Id, round: u64, commit: SigilCommit);
+    /// A round this voter completed, with every vote it saw: what a catch-up is made of.
+    fn note_completed(&self, _round: u64, _base: (Hash, Number), _votes: &[SigilSignedMessage]) {}
 }
 
 // ─── the environment ───────────────────────────────────────────────────────────────
@@ -356,6 +477,15 @@ pub struct SigilEnv<T: Transport> {
     pub equivocations: Mutex<Vec<(u64, Id)>>,
     pub restart: Mutex<Option<RestartState>>,
     pub faults: Arc<Mutex<Faults>>,
+    /// The node's own fork choice (the braid's selected tip, held back to a fully
+    /// validatable block). Used as the vote target when it descends from the round's base.
+    pub preferred: Arc<Mutex<Option<(Hash, Number)>>>,
+    on_finalize: Mutex<Option<Box<dyn Fn(Hash, Number, u64) + Send + Sync>>>,
+    /// Bases of the last few completed rounds. A new round's base is the voter's last
+    /// finalized block AT ITS START, which can lag far behind after a jump (a heal after a
+    /// split finalized 114 → 485 at once); pruning must keep the chain down to the oldest
+    /// base still in use, or every vote is "not a descendant of the round base" and ignored.
+    recent_bases: Mutex<std::collections::VecDeque<Number>>,
 }
 
 impl<T: Transport> SigilEnv<T> {
@@ -386,7 +516,15 @@ impl<T: Transport> SigilEnv<T> {
             equivocations: Mutex::new(Vec::new()),
             restart: Mutex::new(None),
             faults: Arc::new(Mutex::new(Faults::default())),
+            preferred: Arc::new(Mutex::new(None)),
+            on_finalize: Mutex::new(None),
+            recent_bases: Mutex::new(std::collections::VecDeque::new()),
         }
+    }
+
+    /// Called (hash, number, round) after every block this voter finalizes.
+    pub fn set_on_finalize(&self, f: Box<dyn Fn(Hash, Number, u64) + Send + Sync>) {
+        *self.on_finalize.lock() = Some(f);
     }
 
     pub fn id(&self) -> Id {
@@ -397,8 +535,8 @@ impl<T: Transport> SigilEnv<T> {
         *self.finalized.lock()
     }
 
-    /// The `(GlobalIn, GlobalOut)` pair `Voter::new` takes: commits in (signature-checked),
-    /// commits out.
+    /// The `(GlobalIn, GlobalOut)` pair `Voter::new` takes: commits and catch-ups in
+    /// (every signature checked, held until their blocks are known), commits out.
     #[allow(clippy::type_complexity)]
     pub fn global_comms(
         &self,
@@ -411,14 +549,30 @@ impl<T: Transport> SigilEnv<T> {
             self.transport.subscribe_global(self.id),
             self.tree.clone(),
             self.gossip,
-            move |(round, commit): &(u64, SigilCommit)| verify_commit_signatures(&genesis, set_id, *round, commit),
-            |(_, commit): &(u64, SigilCommit)| {
-                let mut v = vec![commit.target_hash];
-                v.extend(commit.precommits.iter().map(|p| p.precommit.target_hash));
-                v
+            move |g: &GlobalMsg| match g {
+                GlobalMsg::Commit(round, commit) => verify_commit_signatures(&genesis, set_id, *round, commit),
+                GlobalMsg::CatchUp(c) => verify_catch_up_signatures(&genesis, set_id, c),
+            },
+            |g: &GlobalMsg| match g {
+                GlobalMsg::Commit(_, commit) => {
+                    let mut v = vec![commit.target_hash];
+                    v.extend(commit.precommits.iter().map(|p| p.precommit.target_hash));
+                    v
+                }
+                GlobalMsg::CatchUp(c) => {
+                    let mut v = vec![c.base_hash];
+                    v.extend(c.prevotes.iter().map(|p| p.prevote.target_hash));
+                    v.extend(c.precommits.iter().map(|p| p.precommit.target_hash));
+                    v
+                }
             },
         )
-        .map(|(round, commit)| Ok(CommunicationIn::Commit(round, commit.into(), Callback::Blank)));
+        .map(|g| {
+            Ok(match g {
+                GlobalMsg::Commit(round, commit) => CommunicationIn::Commit(round, commit.into(), Callback::Blank),
+                GlobalMsg::CatchUp(c) => CommunicationIn::CatchUp(c, Callback::Blank),
+            })
+        });
         let (transport, me) = (self.transport.clone(), self.id);
         let outgoing = sink::unfold((), move |(), out: CommunicationOut<Hash, Number, Sig, Id>| {
             let CommunicationOut::Commit(round, commit) = out;
@@ -436,6 +590,11 @@ impl<T: Transport> Chain<Hash, Number> for SigilEnv<T> {
 }
 
 type BoxTimer = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+/// Completed rounds whose bases bound pruning (see `SigilEnv::recent_bases`).
+const RECENT_BASES: usize = 16;
+/// Heights kept below the oldest base in use.
+const PRUNE_MARGIN: Number = 64;
 
 /// Most votes held back for blocks we do not have yet, per round stream. A peer that
 /// floods votes for blocks that never arrive costs at most this much memory.
@@ -508,7 +667,12 @@ impl<T: Transport> fg::voter::Environment<Hash, Number> for SigilEnv<T> {
     type Error = Error;
 
     fn best_chain_containing(&self, base: Hash) -> Self::BestChain {
-        Box::pin(future::ready(Ok(self.tree.lock().best_chain_containing(base))))
+        let tree = self.tree.lock();
+        let pick = match *self.preferred.lock() {
+            Some((h, n)) if tree.contains(&h) && (h == base || tree.ancestry(base, h).is_ok()) => Some((h, n)),
+            _ => tree.best_chain_containing(base),
+        };
+        Box::pin(future::ready(Ok(pick)))
     }
 
     fn round_data(&self, round: u64) -> RoundData<Id, Self::Timer, Self::In, Self::Out> {
@@ -573,6 +737,14 @@ impl<T: Transport> fg::voter::Environment<Hash, Number> for SigilEnv<T> {
         votes: &HistoricalVotes<Hash, Number, Sig, Id>,
     ) -> Result<(), Error> {
         let _ = state;
+        {
+            let mut b = self.recent_bases.lock();
+            b.push_back(base.1);
+            while b.len() > RECENT_BASES {
+                b.pop_front();
+            }
+        }
+        self.transport.note_completed(round, base, votes.seen());
         *self.restart.lock() = Some(RestartState {
             last_round: round,
             last_round_votes: votes.seen().to_vec(),
@@ -611,9 +783,18 @@ impl<T: Transport> fg::voter::Environment<Hash, Number> for SigilEnv<T> {
             return Ok(());
         }
         *fin = (hash, number);
+        drop(tree);
         self.finality_log.lock().push((self.id, hash, number));
         if let Some(r) = self.restart.lock().as_mut() {
             r.last_finalized = (hash, number);
+        }
+        // Off-chain branches below this block can never matter again; the finalized chain
+        // itself is kept down to the oldest base a recent round still counts from.
+        let base_floor = self.recent_bases.lock().iter().min().copied().unwrap_or(0);
+        let keep = number.saturating_sub(base_floor.saturating_sub(PRUNE_MARGIN)).max(PRUNE_MARGIN);
+        self.tree.lock().prune_finalized(hash, keep);
+        if let Some(f) = self.on_finalize.lock().as_ref() {
+            f(hash, number, round);
         }
         Ok(())
     }

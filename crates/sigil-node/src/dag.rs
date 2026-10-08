@@ -244,7 +244,15 @@ pub fn dag_drain_apply(
     }
     // Retain bodies from the settled tip upward (the frontier needs the pending
     // spine suffix); anything below the new settled height is spent.
-    let keep = chain.height().saturating_sub(1);
+    // 2026-10-08: `SIGIL_DAG_BODY_RETAIN` keeps that many heights below the settled tip
+    // as well (default 1 = unchanged). With finality ~1 s behind the tip (GRANDPA), a
+    // peer a few seconds behind asks by hash for side blocks just below OUR settled tip;
+    // evicting them at once left it nothing to fetch.
+    static BODY_RETAIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let retain = *BODY_RETAIN.get_or_init(|| {
+        std::env::var("SIGIL_DAG_BODY_RETAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
+    });
+    let keep = chain.height().saturating_sub(retain);
     dag_bodies.retain(|_, b| b.header.height >= keep);
     (applied, skipped, failed)
 }

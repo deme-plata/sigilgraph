@@ -4400,6 +4400,18 @@ fn run_start() -> Result<()> {
                                 }
                             }
                         }
+                        // 2026-10-08 (fast finality): the node's own SETTLED chain has passed
+                        // the braid's tip — linear catch-up from final blocks got ahead of a
+                        // braid stuck on parked blocks (measured: braid 5,259, settled 6,443).
+                        // The braid is then behind its own node: re-seed it from the chain.
+                        if br.follows_certificates() {
+                            let braid_tip = br.selected_tip().and_then(|t| br.height_of(&t)).unwrap_or(0);
+                            if chain.height() > braid_tip.saturating_add(8) {
+                                eprintln!("🕸 braid re-seeded: settled H={} is past the braid tip H={braid_tip}",
+                                    chain.height().saturating_sub(1));
+                                *br = dag_seed_braid(&chain);
+                            }
+                        }
                         // Wedge self-heal: after sustained rejects AND real catch-up
                         // progress, rebuild the braid base-anchored at the current
                         // window so it re-acquires the frontier. Progress-gated so a

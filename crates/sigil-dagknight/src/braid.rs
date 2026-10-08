@@ -256,6 +256,19 @@ impl Braid {
         }
         if let Some(f) = self.computed_final() {
             if view.height <= f {
+                // 2026-10-08 (cert_fork_choice / fast finality): a late block below the line
+                // that parked blocks are WAITING for. With finality ~1 s behind the tip this is
+                // routine after any stall, and refusing it parks its children forever (measured:
+                // a producer's braid froze at H=5,259 while its settled chain caught up to
+                // 6,443). Admit it as anchored history — like `dag_seed_braid` does for merge
+                // edges — so the children can join. It never enters the frozen order.
+                if self.cfg.cert_fork_choice && self.waiters.contains_key(&view.hash) {
+                    self.anchor_trusted(view.hash, view.height);
+                    let n = self.cascade_unpark(view.hash);
+                    if n > 0 {
+                        return InsertOutcome::Inserted { newly_ready: n };
+                    }
+                }
                 // Guard held. Routine: see `below_final_refused`.
                 self.below_final_refused += 1;
                 return InsertOutcome::BelowFinal { finalized: f };
@@ -769,6 +782,11 @@ impl Braid {
             self.fork_anchor = Some((height, hash));
             self.gen = self.gen.wrapping_add(1); // the selected-tip memo depends on the anchor
         }
+    }
+
+    /// Does this braid follow finality certificates (`cert_fork_choice`)?
+    pub fn follows_certificates(&self) -> bool {
+        self.cfg.cert_fork_choice
     }
 
     /// The fork-choice anchor, if `cert_fork_choice` adopted one.
@@ -2675,6 +2693,26 @@ mod certified_tests {
         assert_eq!(b.set_certified(6, side(3, 6)), CertifyOutcome::NotOnSpine);
         assert_eq!(b.selected_tip(), Some(hh(10)));
         assert_eq!(b.fork_anchor(), None);
+    }
+
+    /// 2026-10-08: with fast finality a parent arriving after the line passed it must not
+    /// strand the children parked on it (a producer's braid froze at H=5,259 this way).
+    #[test]
+    fn with_cert_fork_choice_a_late_parent_releases_a_child_above_the_line() {
+        let mut b = chain_following(10);
+        let (p, c) = (side(8, 7), side(8, 9));
+        // C at 9 is a merge child of hh(8) naming P (height 7) as a merge parent.
+        let mut v = view(c, hh(8), 9);
+        v.merge_parents = vec![p];
+        assert!(matches!(b.insert(v), InsertOutcome::MissingParents(_)));
+        assert_eq!(b.set_certified(8, hh(8)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 8, "line at the certificate (C parks above it)");
+        // P (height 7) arrives late, below the line: C is released instead of stranded.
+        assert!(matches!(b.insert(view(p, hh(6), 7)), InsertOutcome::Inserted { .. }));
+        assert!(!b.is_parked(&c), "the child joined");
+        assert_eq!(b.pending_floor_height(), None);
+        // Without a waiting child the old refusal stands.
+        assert!(matches!(b.insert(view(side(7, 5), hh(4), 5)), InsertOutcome::BelowFinal { .. }));
     }
 
     /// The bound: a parent that NEVER arrives cannot veto the committee for more

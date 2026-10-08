@@ -140,3 +140,12 @@ codegen-units = 256
 # sigil-tx 69, sigil-top-sync 83, sigil-top 250 tests pass. Costs ~1.5 GB of
 # target/release-fast/incremental. Shipping (`release`) stays non-incremental.
 incremental = true
+
+# release-fast inherits release's per-package overrides, including sigil-top's
+# codegen-units = 16 (set for shipping builds). With incremental on, 16 forces rustc to
+# merge its per-module units into 16 big ones, so every edit re-optimizes ~1/16 of the
+# crate. Back to 256 for the iteration profile only.
+[profile.release-fast.package.sigil-top]
+codegen-units = 256
+[profile.release-fast.package.sigil-top-sync]
+codegen-units = 256

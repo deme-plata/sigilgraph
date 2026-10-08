@@ -216,6 +216,7 @@ fn run_cell(producers: usize, k: usize, delay: usize, rounds: usize, seed: u64) 
         saturated_self_heal_window: 1 << 20,
         pending_max_tip_lag: 512,
         cert_pending_grace: 0,
+        cert_fork_choice: false,
     };
 
     let mut node_a = Braid::new_with_base(cfg.clone(), GENESIS, 0);

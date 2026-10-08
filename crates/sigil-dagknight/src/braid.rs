@@ -77,6 +77,13 @@ pub enum CertifyOutcome {
     /// Names a block that is NOT on this braid's selected spine at that height —
     /// either a sibling fork or a block outside the retention window. Refused.
     NotOnSpine,
+    /// `cert_fork_choice`: the certified block was NOT on our spine, but we hold it
+    /// and it does not contradict our finalized prefix, so fork choice now follows
+    /// it (the selected tip descends from it) and the line sits at its height.
+    Followed,
+    /// `cert_fork_choice`: the certified block contradicts what this braid already
+    /// finalized. Refused — this is the alarm that a finalized prefix would change.
+    ConflictsWithFinal,
 }
 
 pub struct Braid {
@@ -113,6 +120,9 @@ pub struct Braid {
     /// block on THIS braid's selected spine — `(height, hash)`. Raises the finality
     /// line above the depth rule; see [`Braid::set_certified`].
     certified: Option<(u64, BlockHash)>,
+    /// `cfg.cert_fork_choice` (2026-10-08): the certified block fork choice must
+    /// descend from. `selected_tip` only considers its parent-walk descendants.
+    fork_anchor: Option<(u64, BlockHash)>,
     /// The frozen (finalized) linear order, append-only.
     frozen: Vec<BlockHash>,
     /// Running chained-BLAKE3 accumulator over `frozen`.
@@ -186,6 +196,7 @@ impl Braid {
             sel_tip_memo: std::cell::Cell::new(None),
             last_heavy_cleanup_f: 0,
             certified: None,
+            fork_anchor: None,
             frozen: Vec::new(),
             frozen_acc: [0u8; 32],
             drained: 0,
@@ -705,21 +716,63 @@ impl Braid {
             return CertifyOutcome::AheadOfTip;
         }
         let mut cur = tip;
-        loop {
-            let Some(rec) = self.recs.get(&cur) else { return CertifyOutcome::NotOnSpine };
+        let on_spine = loop {
+            let Some(rec) = self.recs.get(&cur) else { break false };
             if rec.view.height == height {
-                if rec.view.hash != hash {
-                    return CertifyOutcome::NotOnSpine;
-                }
-                break;
+                break rec.view.hash == hash;
             }
             if rec.view.height < height {
-                return CertifyOutcome::NotOnSpine;
+                break false;
             }
             cur = rec.view.parent;
+        };
+        if on_spine {
+            self.certified = Some((height, hash));
+            if self.cfg.cert_fork_choice {
+                self.set_fork_anchor(height, hash);
+            }
+            return CertifyOutcome::Raised;
         }
+        if !self.cfg.cert_fork_choice || self.recs.get(&hash).map(|r| r.view.height) != Some(height) {
+            return CertifyOutcome::NotOnSpine;
+        }
+        // We hold the certified block on another branch. Following it may move our
+        // spine only ABOVE what we have finalized: its ancestor at our finalized
+        // height must be the block our spine already finalized there.
+        let f = self.finalized_height();
+        if f > 0 {
+            let ours = self.spine_block_at(f);
+            let mut cur = hash;
+            let theirs = loop {
+                let Some(rec) = self.recs.get(&cur) else { break None };
+                if rec.view.height == f {
+                    break Some(cur);
+                }
+                if rec.view.height < f {
+                    break None;
+                }
+                cur = rec.view.parent;
+            };
+            // Both walks end inside the window, or the comparison proves nothing.
+            if ours.is_none() || theirs.is_none() || ours != theirs {
+                return CertifyOutcome::ConflictsWithFinal;
+            }
+        }
+        self.set_fork_anchor(height, hash);
         self.certified = Some((height, hash));
-        CertifyOutcome::Raised
+        CertifyOutcome::Followed
+    }
+
+    fn set_fork_anchor(&mut self, height: u64, hash: BlockHash) {
+        if self.fork_anchor.map(|(h, _)| height > h).unwrap_or(true) {
+            self.fork_anchor = Some((height, hash));
+            self.gen = self.gen.wrapping_add(1); // the selected-tip memo depends on the anchor
+        }
+    }
+
+    /// The fork-choice anchor, if `cert_fork_choice` adopted one.
+    pub fn fork_anchor(&self) -> Option<(u64, BlockHash)> {
+        self.fork_anchor
     }
 
     /// The certificate currently raising the finality line, if any.
@@ -795,13 +848,54 @@ impl Braid {
                 return tip;
             }
         }
-        let tip = if let Some(store) = &self.ghostdag {
-            store.select_tip(self.recs.keys())
-        } else {
-            self.selected_tip_key().map(|k| k.2)
+        let tip = match self.anchored_candidates() {
+            Some(cands) => self.select_among(&cands),
+            None => {
+                if let Some(store) = &self.ghostdag {
+                    store.select_tip(self.recs.keys())
+                } else {
+                    self.selected_tip_key().map(|k| k.2)
+                }
+            }
         };
         self.sel_tip_memo.set(Some((self.gen, tip)));
         tip
+    }
+
+    /// With a fork-choice anchor resident in the window: the anchor and every block
+    /// that descends from it by the `parent` walk (the walk settlement follows).
+    /// `None` = no anchor, or it has left the window (it is then deep below the
+    /// finality line and constrains nothing any more).
+    fn anchored_candidates(&self) -> Option<Vec<BlockHash>> {
+        let (_, anchor) = self.fork_anchor?;
+        if !self.recs.contains_key(&anchor) {
+            return None;
+        }
+        let mut out = vec![anchor];
+        let mut i = 0;
+        while i < out.len() {
+            let cur = out[i];
+            i += 1;
+            if let Some(kids) = self.children.get(&cur) {
+                for k in kids {
+                    if self.recs.get(k).is_some_and(|r| r.view.parent == cur) && !out.contains(k) {
+                        out.push(*k);
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The same choice `selected_tip` makes over the whole window, over `cands`.
+    fn select_among(&self, cands: &[BlockHash]) -> Option<BlockHash> {
+        if let Some(store) = &self.ghostdag {
+            store.select_tip(cands.iter())
+        } else {
+            cands.iter().filter_map(|h| self.recs.get(h).map(|r| r.key())).reduce(|b, k| {
+                if k.0 > b.0 || (k.0 == b.0 && k.2 < b.2) { k } else { b }
+            }).map(|k| k.2)
+        }
     }
 
     /// The un-memoised `selected_tip` — the reference the memo is tested against.
@@ -924,12 +1018,25 @@ impl Braid {
     /// Current DAG tips (window blocks with no known children), minus
     /// `exclude` — the producer's merge-parent source. Deterministic order:
     /// height desc, hash asc; capped at `cap`.
+    ///
+    /// With `cert_fork_choice` and a resident anchor, only tips that descend from the
+    /// anchor qualify (2026-10-08). A tip that does not is on a branch the committee
+    /// finalized past: the other nodes refuse its ancestry as below-final, so naming
+    /// it as a merge parent parks every block we mint from then on. Measured on r1:
+    /// producer 1 kept naming its abandoned strand and the other three dropped all of
+    /// its blocks (0 of 219 accepted).
     pub fn merge_tips(&self, exclude: &BlockHash, cap: usize) -> Vec<BlockHash> {
+        let allowed: Option<std::collections::HashSet<BlockHash>> = if self.cfg.cert_fork_choice {
+            self.anchored_candidates().map(|v| v.into_iter().collect())
+        } else {
+            None
+        };
         let mut tips: Vec<(u64, BlockHash)> = self
             .recs
             .values()
             .filter(|r| {
-                r.view.hash != *exclude
+                allowed.as_ref().is_none_or(|a| a.contains(&r.view.hash))
+                    && r.view.hash != *exclude
                     && self
                         .children
                         .get(&r.view.hash)
@@ -2497,6 +2604,76 @@ mod certified_tests {
         assert_eq!(b.pending_floor_height(), None);
         assert_eq!(b.finalized_height(), 23, "then the certificate applies in full");
         assert_eq!(b.stats().below_final_dropped, 0);
+    }
+
+    fn chain_following(n: u8) -> Braid {
+        let mut b = Braid::new(BraidConfig { final_depth: 512, cert_fork_choice: true, ..BraidConfig::default() });
+        b.insert(view(hh(0), [0u8; 32], 0));
+        for i in 1..=n { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        b
+    }
+    fn side(tag: u8, i: u8) -> BlockHash { [0x80 | tag, i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+
+    /// 2026-10-08, measured on r1: producer 1 missed one block, stayed on its own
+    /// strand, and ignored every later certificate as "not on this node's spine".
+    /// With `cert_fork_choice` it follows the committee's branch instead.
+    #[test]
+    fn with_cert_fork_choice_a_node_follows_a_certified_branch_it_holds() {
+        let mut b = chain_following(10);
+        // A shorter branch off hh(5): heights 6..8. The selected spine stays on hh(10).
+        b.insert(view(side(1, 6), hh(5), 6));
+        b.insert(view(side(1, 7), side(1, 6), 7));
+        b.insert(view(side(1, 8), side(1, 7), 8));
+        assert_eq!(b.selected_tip(), Some(hh(10)));
+        assert_eq!(b.set_certified(8, side(1, 8)), CertifyOutcome::Followed);
+        assert_eq!(b.selected_tip(), Some(side(1, 8)), "fork choice descends from the certified block");
+        assert_eq!(b.finalized_height(), 8);
+        assert_eq!(b.spine_block_at(6), Some(side(1, 6)));
+        // New blocks on the certified branch extend the spine; the old branch is not chosen.
+        b.insert(view(side(1, 9), side(1, 8), 9));
+        assert_eq!(b.selected_tip(), Some(side(1, 9)));
+    }
+
+    /// After following a certificate, an abandoned branch's tip is never offered as a
+    /// merge parent; a concurrent tip that descends from the anchor still is.
+    #[test]
+    fn with_cert_fork_choice_merge_tips_exclude_branches_the_committee_passed() {
+        let mut b = chain_following(10);
+        b.insert(view(side(4, 6), hh(5), 6));
+        b.insert(view(side(4, 7), side(4, 6), 7));
+        b.insert(view(side(4, 8), side(4, 7), 8));
+        assert!(b.merge_tips(&[0u8; 32], 8).contains(&hh(10)), "before: both branch tips are offered");
+        assert_eq!(b.set_certified(8, side(4, 8)), CertifyOutcome::Followed);
+        b.insert(view(side(4, 9), side(4, 8), 9));
+        b.insert(view(side(5, 9), side(4, 8), 9)); // a concurrent sibling above the anchor
+        let tips = b.merge_tips(&side(4, 9), 8);
+        assert_eq!(tips, vec![side(5, 9)], "only the anchored sibling; hh(10)'s branch is dead");
+    }
+
+    /// A certificate whose branch contradicts what we already finalized is refused.
+    #[test]
+    fn with_cert_fork_choice_a_certificate_conflicting_with_our_final_prefix_is_refused() {
+        let mut b = chain_following(10);
+        for i in 4..=9u8 {
+            let parent = if i == 4 { hh(3) } else { side(2, i - 1) };
+            b.insert(view(side(2, i), parent, i as u64));
+        }
+        assert_eq!(b.selected_tip(), Some(hh(10)));
+        assert_eq!(b.set_certified(7, hh(7)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 7);
+        assert_eq!(b.set_certified(9, side(2, 9)), CertifyOutcome::ConflictsWithFinal);
+        assert_eq!(b.selected_tip(), Some(hh(10)), "fork choice did not move");
+        assert_eq!(b.finalized_height(), 7);
+    }
+
+    /// Off by default: the old refusal, unchanged.
+    #[test]
+    fn without_cert_fork_choice_an_off_spine_certificate_is_still_refused() {
+        let mut b = chain(10, 512);
+        b.insert(view(side(3, 6), hh(5), 6));
+        assert_eq!(b.set_certified(6, side(3, 6)), CertifyOutcome::NotOnSpine);
+        assert_eq!(b.selected_tip(), Some(hh(10)));
+        assert_eq!(b.fork_anchor(), None);
     }
 
     /// The bound: a parent that NEVER arrives cannot veto the committee for more

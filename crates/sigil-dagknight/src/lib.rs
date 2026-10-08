@@ -185,6 +185,15 @@ pub struct BraidConfig {
     /// Env `SIGIL_DAG_CERT_PENDING_GRACE`; 0 (default) is the old behavior exactly,
     /// so a braid without the setting is byte-identical.
     pub cert_pending_grace: u64,
+    /// 2026-10-08 (roadmap step 1): fork choice FOLLOWS the committee. When a valid
+    /// certificate names a block this braid holds but that is not on its selected
+    /// spine, adopt it as the fork-choice anchor: the selected tip becomes the best
+    /// block descending from it. Without this a node that missed one block stays on
+    /// its own strand forever and ignores every later certificate (measured on r1:
+    /// producer 1 settled nothing past H=1,106 while the other three certified on).
+    /// Refused if the certificate conflicts with this node's own finalized prefix.
+    /// Env `SIGIL_DAG_CERT_FORK_CHOICE=1`; off (default) = unchanged.
+    pub cert_fork_choice: bool,
 }
 
 impl Default for BraidConfig {
@@ -200,6 +209,7 @@ impl Default for BraidConfig {
             saturated_self_heal_window: 2_048,
             pending_max_tip_lag: 512,
             cert_pending_grace: 0,
+            cert_fork_choice: false,
         }
     }
 }
@@ -235,6 +245,7 @@ impl BraidConfig {
             ),
             pending_max_tip_lag: get("SIGIL_DAG_PENDING_MAX_TIP_LAG", d.pending_max_tip_lag),
             cert_pending_grace: get("SIGIL_DAG_CERT_PENDING_GRACE", d.cert_pending_grace),
+            cert_fork_choice: std::env::var("SIGIL_DAG_CERT_FORK_CHOICE").ok().as_deref() == Some("1"),
         }
     }
 }

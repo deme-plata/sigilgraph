@@ -5827,7 +5827,15 @@ fn apply_finality_gate(
     let Some(br) = braid else { return };
     let Some((h, hash)) = finality.latest_certificate() else { return };
     match br.set_certified(h, hash) {
-        sigil_dagknight::CertifyOutcome::Raised => {
+        outcome @ (sigil_dagknight::CertifyOutcome::Raised | sigil_dagknight::CertifyOutcome::Followed) => {
+            if outcome == sigil_dagknight::CertifyOutcome::Followed {
+                // 2026-10-08 (SIGIL_DAG_CERT_FORK_CHOICE=1): we were on another branch
+                // above our finalized prefix; fork choice now descends from the
+                // committee's block. Rare, and worth one line each time.
+                static FOLLOWED: AtomicU64 = AtomicU64::new(0);
+                let n = FOLLOWED.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("🧭 finality gate: certificate at H={h} was off our spine — fork choice now FOLLOWS it ({n} so far)");
+            }
             // Once a second is plenty for a log; the view is refreshed on every raise.
             static LAST_LOGGED: AtomicU64 = AtomicU64::new(0);
             let now = finality_wire::now_ms();
@@ -5863,6 +5871,12 @@ fn apply_finality_gate(
                     };
                     signer.offer(tip_proof_signer::TipJob { height: h, hash, roots, basis: "certificate" });
                 }
+            }
+        }
+        sigil_dagknight::CertifyOutcome::ConflictsWithFinal => {
+            if LAST_WARNED.swap(h, Ordering::Relaxed) != h {
+                eprintln!("🚨 finality gate: certificate at H={h} CONFLICTS with this node's finalized prefix — refused. \
+                           Either this node finalized a block the committee did not, or the committee is faulty.");
             }
         }
         sigil_dagknight::CertifyOutcome::NotOnSpine => {

@@ -403,6 +403,7 @@ mod tests {
             // that exists to replay DEEP reordering, which is exactly where
             // it could mask the behaviour under test.
             pending_max_tip_lag: 0,
+            cert_pending_grace: 0,
         };
 
         // Node A: creation order (k_probe.rs: `Braid::new_with_base(cfg, GENESIS, 0)`).

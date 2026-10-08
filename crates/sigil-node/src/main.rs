@@ -33,6 +33,7 @@ mod tip_proof_signer; // 2026-09-12: SQIsign tip-proof signing OFF the produce l
 mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
 mod peer_pick; // 2026-09-11: ask only peers whose advertised height covers the range — see its module doc
 mod peer_view; // 2026-09-07: tip hash + wallet state root + finalized on the peer-heights heartbeat; per-peer agreement verdicts for the K-gauge v2
+mod parent_fetch; // 2026-10-07: fetch missing DAG parents BY HASH (two producers) — see its module doc
 mod follower_reorg; // 2026-09-08: roll a forked follower back to a checkpoint below the fork so it can rejoin canonical (SIGIL_FOLLOWER_REORG=1); see its module doc
 
 use std::process::ExitCode;
@@ -90,6 +91,121 @@ struct BackfillReq {
     // flux-wire: allow — BackfillReq is serde_json; a skipped field here is what lets old servers ignore it
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     zstd: bool,
+    /// 2026-10-07 (roadmap step 1, two producers): fetch these blocks BY HASH
+    /// (lower-case hex, at most `parent_fetch::BY_HASH_MAX`) from the DAG body
+    /// store, which holds side blocks a height range can never return. Old
+    /// servers ignore the field; the requester sends an empty range alongside
+    /// so an old server answers with nothing. See `parent_fetch`.
+    // flux-wire: allow — BackfillReq is serde_json; a skipped field here is what lets old servers ignore it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    by_hash: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod by_hash_wire_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_request_without_by_hash_still_parses() {
+        let old = br#"{"from":5,"to":9,"headers_only":false,"codec":0,"zstd":true}"#;
+        let r: BackfillReq = serde_json::from_slice(old).expect("old request must parse");
+        assert!(r.by_hash.is_none());
+        assert_eq!((r.from, r.to), (5, 9));
+    }
+
+    #[test]
+    fn a_range_request_serializes_exactly_as_before() {
+        let r = BackfillReq { from: 5, to: 9, headers_only: false, codec: 0, handshake: None, zstd: true, by_hash: None };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(!s.contains("by_hash"), "None must be omitted so old servers see identical JSON: {s}");
+    }
+
+    #[test]
+    fn a_by_hash_request_round_trips_with_an_empty_range() {
+        let hashes = vec![[7u8; 32], [9u8; 32]];
+        let r = BackfillReq {
+            from: 1, to: 0, headers_only: false, codec: 0, handshake: None, zstd: true,
+            by_hash: Some(hashes.iter().map(crate::parent_fetch::to_hex).collect()),
+        };
+        let back: BackfillReq = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+        assert!(back.from > back.to, "an old server must see an empty range");
+        assert_eq!(crate::parent_fetch::parse_hashes(back.by_hash.as_deref().unwrap()), hashes);
+    }
+}
+
+/// 2026-10-07 (roadmap step 1): hold this node's finality vote for height `h` while
+/// its own view of `h` is incomplete — something at or below `h`, within the braid's
+/// `cert_pending_grace`, is still parked waiting for parents (being fetched by hash).
+/// Measured on the 4-node rehearsal net with two producers: validators voted on a view
+/// that held only one producer's strand, the certificate froze that strand, and the
+/// other producer's blocks were dropped when they arrived. Off when the grace is 0, so
+/// a node without `SIGIL_DAG_CERT_PENDING_GRACE` votes exactly as before. Bounded: a
+/// parent that never arrives holds the vote for at most `grace` heights.
+fn vote_held(br: Option<&Braid>, h: u64) -> bool {
+    let Some(br) = br else { return false };
+    let g = br.cert_pending_grace();
+    if g == 0 {
+        return false;
+    }
+    // Same reach as the braid's certificate hold: a vote at `h` is held if `h` is at or
+    // above where a parked block's missing parent can sit, and within the grace.
+    let reach = sigil_dagknight::braid::CERT_HOLD_PARENT_REACH;
+    let held = matches!(br.pending_floor_height(),
+        Some(floor) if floor.saturating_sub(1 + reach) <= h && floor.saturating_add(g) > h);
+    if held {
+        static HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = HELD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % 256 == 0 {
+            eprintln!("⏸ finality vote held at H={h}: own view incomplete (pending floor {:?}, grace {g}; {} holds so far)",
+                br.pending_floor_height(), n + 1);
+        }
+    }
+    held
+}
+
+/// 2026-10-07 (roadmap step 1): ask `peer` for DAG parents BY HASH (see
+/// `parent_fetch`). Off the select loop; the answer lands on `tx` and is inserted
+/// into the braid there. Failures are reported, sampled, never silent.
+fn spawn_parent_fetch(
+    mgr: &std::sync::Arc<flux_p2p::NetworkManager>,
+    peer: flux_p2p::PeerId,
+    hashes: &[sigil_header::BlockHash],
+    hs: &std::sync::Arc<sigil_handshake::EphemeralSessionHandshakeV0>,
+    tx: &tokio::sync::mpsc::Sender<Vec<crate::block::Block>>,
+) {
+    let req = BackfillReq {
+        from: 1,
+        to: 0, // empty range: an old server ignores `by_hash` and answers with nothing
+        headers_only: false,
+        codec: 0,
+        handshake: Some((**hs).clone()),
+        zstd: true,
+        by_hash: Some(hashes.iter().map(crate::parent_fetch::to_hex).collect()),
+    };
+    let mgr2 = std::sync::Arc::clone(mgr);
+    let tx2 = tx.clone();
+    let n_want = hashes.len();
+    tokio::spawn(async move {
+        static BH_FAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fail = |why: String| {
+            let n = BH_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n % 32 == 0 {
+                eprintln!("⚠ by-hash: {n_want} DAG parents from {peer} failed: {why} ({} failures so far)", n + 1);
+            }
+        };
+        let Ok(payload) = serde_json::to_vec(&req) else { return };
+        match tokio::time::timeout(std::time::Duration::from_secs(12), mgr2.send_request(peer, payload)).await {
+            Err(_) => fail("no answer in 12s".into()),
+            Ok(Err(e)) => fail(format!("send_request: {e}")),
+            Ok(Ok(bytes)) => match crate::serve_read::decode_backfill_resp(&bytes) {
+                Ok(resp) if resp.blocks.is_empty() => fail("peer holds none of them".into()),
+                Ok(resp) => {
+                    let _ = tx2.send(resp.blocks).await;
+                }
+                Err(e) => fail(format!("decode ({} B): {e}", bytes.len())),
+            },
+        }
+    });
 }
 
 /// Point-to-point backfill response: the requested block range serialized as
@@ -1273,6 +1389,11 @@ fn run_start() -> Result<()> {
         // in a spawned task so it never blocks production/drain).
         let mut pending: std::collections::BTreeMap<u64, crate::block::Block> = std::collections::BTreeMap::new();
         let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<Vec<crate::block::Block>>(64);
+        // 2026-10-07 (roadmap step 1): answers to by-hash DAG-parent asks (`parent_fetch`)
+        // land HERE, never in the linear `pending` buffer: a side block from the other
+        // producer has no slot on our settled chain, it belongs only in the braid.
+        let (bh_tx, mut bh_rx) = tokio::sync::mpsc::channel::<Vec<crate::block::Block>>(64);
+        let mut parents_in_flight = crate::parent_fetch::InFlight::new();
         // Throttle gap requests so a sustained gap doesn't spawn a request task on
         // every received future block (fire at most every ~300ms).
         let mut last_req = std::time::Instant::now()
@@ -1688,7 +1809,7 @@ fn run_start() -> Result<()> {
                         infl.insert(key);
                     }
                     if let Some(peer) = chosen {
-                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true };
+                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
                         let chunk_ad = std::sync::Arc::clone(&fetch_chunk);
@@ -2388,9 +2509,12 @@ fn run_start() -> Result<()> {
                                     // Phase 2 finality vote. Discarding this value
                                     // has no effect on the chain — see the safety
                                     // posture in finality_wire.rs.
-                                    if let Some(vb) = finality.on_block(
+                                    // 2026-10-07 (step 1): no vote while our own view of `h` is
+                                    // incomplete — see `vote_held`.
+                                    let held = vote_held(braid.as_ref(), h);
+                                    if let Some(vb) = (!held).then(|| finality.on_block(
                                         h, bhash, topology_commitment, finality_wire::now_ms()
-                                    ) {
+                                    )).flatten() {
                                         if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
                                             eprintln!("⚠ publish finality vote H={} failed: {}", h, e);
                                         }
@@ -2650,6 +2774,22 @@ fn run_start() -> Result<()> {
                                 eprintln!("⛔ sync-auth: refused rr-backfill [{}..={}] from {} ({:?}) · authed={} anon={} refused={}",
                                     req.from, req.to, peer, refusal,
                                     sync_auth_gate.served_authed, sync_auth_gate.served_anon, sync_auth_gate.refused);
+                                continue;
+                            }
+                            // 2026-10-07 (roadmap step 1): a by-hash ask for DAG parents. Answered
+                            // from the DAG body store, which holds the OTHER producer's side blocks;
+                            // no height range on our settled chain can return those. See `parent_fetch`.
+                            if let Some(hexes) = req.by_hash.as_ref() {
+                                let want = crate::parent_fetch::parse_hashes(hexes);
+                                let blocks = crate::parent_fetch::collect_by_hash(&want, |h| dag_bodies.get(h).cloned());
+                                static BY_HASH_SERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                                let n = BY_HASH_SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if n % 64 == 0 {
+                                    eprintln!("↩ by-hash: served {}/{} DAG parents to {} ({} by-hash requests so far)",
+                                        blocks.len(), want.len(), peer, n + 1);
+                                }
+                                let resp = BackfillResp { blocks };
+                                mgr.respond(request_id, crate::serve_read::encode_backfill_resp_opts(&resp, req.zstd));
                                 continue;
                             }
                             let top = chain.height().saturating_sub(1);
@@ -3369,14 +3509,17 @@ fn run_start() -> Result<()> {
                                             // form certificates. Until now only the mint path voted, so
                                             // a follower could never be a committee member. A pure
                                             // observer (no seed) gets None here and nothing changes.
-                                            if let Some(vb) = finality.on_block(bheight, bhash, topo, finality_wire::now_ms()) {
+                                            // 2026-10-07 (step 1): no vote while our own view of
+                                            // `bheight` is incomplete — see `vote_held`.
+                                            let held = vote_held(Some(&*br), bheight);
+                                            if let Some(vb) = (!held).then(|| finality.on_block(bheight, bhash, topo, finality_wire::now_ms())).flatten() {
                                                 if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
                                                     eprintln!("⚠ publish finality vote H={} failed: {}", bheight, e);
                                                 }
                                             }
                                             apply_finality_gate(&finality, Some(&mut *br), &finality_view, &dag_bodies, tip_signer.as_ref(), &events_bus);
                                         }
-                                        InsertOutcome::MissingParents(_missing) => {
+                                        InsertOutcome::MissingParents(missing) => {
                                             // Park the body for the braid AND buffer it for the
                                             // LINEAR contiguous applier (catch-up is linear; the
                                             // braid re-anchors at the frontier via self-heal).
@@ -3384,6 +3527,18 @@ fn run_start() -> Result<()> {
                                             // rr-backfill shape — responses land in bf_rx.
                                             pending_insert(&mut pending, chain.height(), bheight, block.clone());
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                            // 2026-10-07 (roadmap step 1): ALSO ask for the exact
+                                            // missing parents BY HASH. The height-range ask below can
+                                            // only return the server's own settled spine; the other
+                                            // producer's side blocks are reachable only by hash. One gap
+                                            // reported by many children is one ask (`InFlight`).
+                                            let want = parents_in_flight.take_new(&missing, std::time::Instant::now());
+                                            if !want.is_empty() {
+                                                let connected = mgr.connected_peers();
+                                                if let Some(peer) = peer_affinity.best_for(&connected, Some(block_producer)) {
+                                                    spawn_parent_fetch(&mgr, peer, &want, &sync_hs, &bh_tx);
+                                                }
+                                            }
                                             if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                                 last_req = std::time::Instant::now();
                                                 // QTFT Path C: prefer a peer we've actually seen relay
@@ -3434,6 +3589,7 @@ fn run_start() -> Result<()> {
                                                         codec: 0,
                                                         handshake: Some((*sync_hs).clone()),
                                                         zstd: true,
+                                                        by_hash: None,
                                                     };
                                                     // 2026-08-19 (deep-catchup freeze investigation): this used to fire
                                                     // unconditionally every time the 15ms request-throttle allowed a
@@ -3568,7 +3724,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -3793,6 +3949,7 @@ fn run_start() -> Result<()> {
                                             codec: 0, // node-to-node needs full blocks; raw JSON path
                                             handshake: Some((*sync_hs).clone()),
                                             zstd: true,
+                                            by_hash: None,
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);
@@ -3951,6 +4108,50 @@ fn run_start() -> Result<()> {
                             eprintln!("🔌 peer disconnected  {peer_id}");
                         }
                         _ => {}
+                        }
+                    }
+                }
+                Some(vals) = bh_rx.recv() => {
+                    // 2026-10-07 (roadmap step 1): DAG parents fetched BY HASH. They go into the
+                    // BRAID and the body store, never into the linear `pending` buffer — a side
+                    // block from the other producer has no slot on our settled chain. The braid
+                    // unparks waiting children itself (`cascade_unpark`). A fetched block that is
+                    // itself missing parents triggers the next ask, so a side strand is walked
+                    // back one ≤64-block hop at a time.
+                    if let Some(br) = braid.as_mut() {
+                        let mut still_missing: Vec<BlockHash> = Vec::new();
+                        let mut producer_hint = None;
+                        let (mut ins, mut parked) = (0u64, 0u64);
+                        for block in vals {
+                            if block.header.verify_at_height(block.header.height).is_err() { continue; }
+                            let bhash = block.hash();
+                            parents_in_flight.arrived(&bhash);
+                            producer_hint = Some(block.header.producer);
+                            match br.insert(BlockView::from(&block.header)) {
+                                InsertOutcome::Inserted { .. } => {
+                                    ins += 1;
+                                    dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                }
+                                InsertOutcome::MissingParents(m) => {
+                                    parked += 1;
+                                    dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                    still_missing.extend(m);
+                                }
+                                _ => {}
+                            }
+                        }
+                        static BH_RECV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let n = BH_RECV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n % 64 == 0 {
+                            eprintln!("⇩ by-hash: {ins} DAG parents inserted, {parked} parked, {} still missing ({} answers so far)",
+                                still_missing.len(), n + 1);
+                        }
+                        let want = parents_in_flight.take_new(&still_missing, std::time::Instant::now());
+                        if !want.is_empty() {
+                            let connected = mgr.connected_peers();
+                            if let Some(peer) = peer_affinity.best_for(&connected, producer_hint) {
+                                spawn_parent_fetch(&mgr, peer, &want, &sync_hs, &bh_tx);
+                            }
                         }
                     }
                 }

@@ -170,6 +170,21 @@ pub struct BraidConfig {
     /// orders. Env `SIGIL_DAG_PENDING_MAX_TIP_LAG`; 0 disables eviction entirely
     /// (the pre-2026-08-26 behavior).
     pub pending_max_tip_lag: u64,
+    /// 2026-10-07 (mainnet roadmap step 1, two producers): how many heights a
+    /// committee certificate may be held back below a block this braid is still
+    /// fetching parents for. Measured on the 4-node rehearsal net with a second
+    /// producer: certificates formed on one producer's strand before the other
+    /// strand's parents had arrived, the line jumped past the parked blocks, and
+    /// the other producer's whole strand was dropped ~20 blocks at a time
+    /// (`below_final_dropped`), leaving two different settled histories.
+    ///
+    /// With `g > 0` the certified contribution to the line is
+    /// `max(h - g, min(h, pending_floor - 1 - 8))` (8 = `CERT_HOLD_PARENT_REACH`, room for the missing parent itself): data that is merely late gets up to
+    /// `g` heights to arrive (by-hash parent fetch), and a parent that never
+    /// arrives still cannot veto the committee for more than `g` heights.
+    /// Env `SIGIL_DAG_CERT_PENDING_GRACE`; 0 (default) is the old behavior exactly,
+    /// so a braid without the setting is byte-identical.
+    pub cert_pending_grace: u64,
 }
 
 impl Default for BraidConfig {
@@ -184,6 +199,7 @@ impl Default for BraidConfig {
             final_quorum: None,
             saturated_self_heal_window: 2_048,
             pending_max_tip_lag: 512,
+            cert_pending_grace: 0,
         }
     }
 }
@@ -218,6 +234,7 @@ impl BraidConfig {
                 d.saturated_self_heal_window,
             ),
             pending_max_tip_lag: get("SIGIL_DAG_PENDING_MAX_TIP_LAG", d.pending_max_tip_lag),
+            cert_pending_grace: get("SIGIL_DAG_CERT_PENDING_GRACE", d.cert_pending_grace),
         }
     }
 }

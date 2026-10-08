@@ -1854,6 +1854,7 @@ mod tests {
             // 2026-08-26: field added by the pending-eviction work; 0 = disabled,
             // which is the pre-existing behavior this determinism test asserts.
             pending_max_tip_lag: 0,
+            cert_pending_grace: 0,
         };
 
         // Two nodes, two DIFFERENT gossip arrival orders.

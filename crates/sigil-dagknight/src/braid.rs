@@ -157,6 +157,13 @@ fn chain_hash(acc: &[u8; 32], h: &BlockHash) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// How far below a parked block its missing parent may sit and still be admitted
+/// while a certificate is held back (`cert_pending_grace`). Measured 2026-10-07 on the
+/// two-producer rehearsal net: a block's spine parent is one height below it and its
+/// merge tips are 1–3 below, so 8 leaves room. A parent deeper than this is still
+/// dropped, as before; the grace bound keeps the hold finite either way.
+pub const CERT_HOLD_PARENT_REACH: u64 = 8;
+
 impl Braid {
     /// New empty braid. Seed with the genesis view (height 0) first — blocks
     /// arriving before their ancestors are parked until backfill supplies
@@ -395,6 +402,39 @@ impl Braid {
         self.pending_heights.keys().next().copied()
     }
 
+    /// Lowest height currently parked waiting for parents, if any — the same
+    /// value the finality clamp reads. A node uses it to hold its finality VOTE
+    /// while its own view of a height is still incomplete (2026-10-07, step 1).
+    pub fn pending_floor_height(&self) -> Option<u64> {
+        self.pending_floor()
+    }
+
+    /// [`BraidConfig::cert_pending_grace`] as configured (0 = off).
+    pub fn cert_pending_grace(&self) -> u64 {
+        self.cfg.cert_pending_grace
+    }
+
+    /// The certified height after the bounded pending hold of
+    /// [`BraidConfig::cert_pending_grace`]: a certificate may not finalize past a
+    /// block this braid is still fetching parents for, for at most `g` heights.
+    /// With `g = 0` this returns `h` exactly (the pre-2026-10-07 behavior).
+    fn cert_line_held(&self, h: u64) -> u64 {
+        let g = self.cfg.cert_pending_grace;
+        if g == 0 {
+            return h;
+        }
+        match self.pending_floor() {
+            // Hold under where the MISSING PARENT can sit, not just under the parked
+            // child: `insert()` refuses anything at or below the line, so a line at
+            // `floor - 1` would refuse a parent at `floor - 1` (the first version of
+            // this did exactly that; the late-parent test caught it).
+            Some(floor) if floor <= h => h
+                .min(floor.saturating_sub(1 + CERT_HOLD_PARENT_REACH))
+                .max(h.saturating_sub(g)),
+            _ => h,
+        }
+    }
+
     /// Recompute the height index from `pending` (used after a bulk `retain`).
     fn rebuild_pending_heights(&mut self) {
         self.pending_heights.clear();
@@ -470,10 +510,17 @@ impl Braid {
             work.extend(kids);
         }
         while let Some(child) = work.pop_front() {
+            // With a certificate hold (`cert_pending_grace > 0`) the line is read while
+            // the child is STILL parked: taking it out of `pending` first lifts the very
+            // hold that kept the line under it, the line jumps to the certificate, and
+            // the child we waited for is dropped on arrival (found by the late-parent
+            // test, 2026-10-07). With grace 0 the order is exactly as before.
+            let held_line = (self.cfg.cert_pending_grace > 0).then(|| self.computed_final()).flatten();
             let Some(view) = self.unpark_take(&child) else {
                 continue; // stale waiter entry
             };
-            if let Some(f) = self.computed_final() {
+            let line = if self.cfg.cert_pending_grace > 0 { held_line } else { self.computed_final() };
+            if let Some(f) = line {
                 if view.height <= f {
                     // We were holding this one and can no longer place it: a real loss.
                     self.below_final_dropped += 1;
@@ -581,7 +628,7 @@ impl Braid {
                 if h > tip_height {
                     depth
                 } else {
-                    Some(depth.unwrap_or(0).max(h))
+                    Some(depth.unwrap_or(0).max(self.cert_line_held(h)))
                 }
             }
         };
@@ -2339,6 +2386,43 @@ mod certified_tests {
         assert!(b.finalized_height() < 28, "depth rule clamped under the parked height: {}", b.finalized_height());
         assert_eq!(b.set_certified(35, hh(35)), CertifyOutcome::Raised);
         assert_eq!(b.finalized_height(), 35);
+    }
+
+    fn chain_with_grace(n: u8, final_depth: u64, grace: u64) -> Braid {
+        let mut b = Braid::new(BraidConfig { final_depth, cert_pending_grace: grace, ..BraidConfig::default() });
+        b.insert(view(hh(0), [0u8; 32], 0));
+        for i in 1..=n { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        b
+    }
+
+    /// 2026-10-07 (step 1, two producers): with a grace, a certificate waits for a
+    /// block whose parent is merely LATE — the measured failure was the line jumping
+    /// past the other producer's blocks while their parents were still in flight.
+    /// When the parent arrives the block joins, nothing was dropped, and the line
+    /// then goes all the way to the certificate.
+    #[test]
+    fn with_a_grace_a_certificate_waits_for_a_late_parent() {
+        let mut b = chain_with_grace(30, 512, 20); // depth rule finalizes nothing; only the certificate moves the line
+        let _ = b.insert(view([0xCC; 32], [0x77; 32], 28)); // parent 0x77 not here yet
+        for i in 31..=40u8 { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        assert_eq!(b.set_certified(35, hh(35)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 28 - 1 - CERT_HOLD_PARENT_REACH, "held under where the missing parent can sit (35 - 20 = 15 is the bound)");
+        // The late parent arrives (a side block at 27); the parked child unparks.
+        assert!(matches!(b.insert(view([0x77; 32], hh(26), 27)), InsertOutcome::Inserted { .. }));
+        assert_eq!(b.pending_floor_height(), None, "nothing parked any more");
+        assert_eq!(b.finalized_height(), 35, "the certificate now applies in full");
+        assert_eq!(b.stats().below_final_dropped, 0, "the late block was kept, not dropped");
+    }
+
+    /// The bound: a parent that NEVER arrives cannot veto the committee for more
+    /// than `grace` heights.
+    #[test]
+    fn with_a_grace_a_parent_that_never_arrives_holds_the_line_at_most_grace_heights() {
+        let mut b = chain_with_grace(30, 512, 3);
+        let _ = b.insert(view([0xCC; 32], [0x77; 32], 28));
+        for i in 31..=40u8 { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        assert_eq!(b.set_certified(35, hh(35)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 32, "35 - 3: the grace is a bound, not a veto");
     }
 
     /// No certificate ⇒ byte-for-byte the old behaviour.

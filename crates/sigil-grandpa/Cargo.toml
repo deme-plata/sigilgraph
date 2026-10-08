@@ -1,0 +1,20 @@
+[package]
+name = "sigil-grandpa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Roadmap step 1 / M2.0 (2026-10-08): round-based BFT finality for SIGIL's spine tree, built on Parity's reference GRANDPA implementation (finality-grandpa, Apache-2.0) instead of a hand-written round machine. This crate supplies only the SIGIL side: the spine-tree ancestry oracle, domain-separated Ed25519 vote signing, a persisted per-(round, phase) signer guard enforced in the send path, and an Environment over a pluggable transport. Not wired into sigil-node yet."
+
+[dependencies]
+# Pinned exactly: the round rules (estimates, completability under hidden equivocation,
+# past-round processing) live in this crate and must not change under us silently.
+finality-grandpa = { version = "=0.16.3", features = ["std"] }
+futures = "0.3"
+futures-timer = "3"
+parking_lot = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+hex = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+rand = { workspace = true }

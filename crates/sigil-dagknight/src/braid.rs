@@ -428,7 +428,14 @@ impl Braid {
             // child: `insert()` refuses anything at or below the line, so a line at
             // `floor - 1` would refuse a parent at `floor - 1` (the first version of
             // this did exactly that; the late-parent test caught it).
-            Some(floor) if floor <= h => h
+            //
+            // 2026-10-08: the guard is "a missing parent could sit at or below `h`",
+            // i.e. `floor - 1 - REACH <= h` — the same reach `vote_held` uses. The first
+            // guard was `floor <= h`, which misses a child parked just ABOVE the
+            // certificate: measured on r1, a certificate at 23 with a block parked at 24
+            // finalized 23, the other producer's block at 23 was then refused as
+            // below-final, and the two producers ran on separate strands.
+            Some(floor) if floor.saturating_sub(1 + CERT_HOLD_PARENT_REACH) <= h => h
                 .min(floor.saturating_sub(1 + CERT_HOLD_PARENT_REACH))
                 .max(h.saturating_sub(g)),
             _ => h,
@@ -1154,6 +1161,35 @@ impl Braid {
     /// forgotten).
     pub fn contains(&self, h: &BlockHash) -> bool {
         self.recs.contains_key(h) || self.emitted_at.contains_key(h)
+    }
+
+    /// Height of a block the braid knows (resident or emitted), else `None`.
+    pub fn height_of(&self, h: &BlockHash) -> Option<u64> {
+        self.known_height(h)
+    }
+
+    /// The block at `height` on the selected spine — the `parent` walk back from
+    /// [`Braid::selected_tip`], the same walk `dag_drain_apply` settles along.
+    /// `None` if `height` is above the tip or below the resident window.
+    pub fn spine_block_at(&self, height: u64) -> Option<BlockHash> {
+        let mut cur = self.selected_tip()?;
+        loop {
+            let rec = self.recs.get(&cur)?;
+            match rec.view.height.cmp(&height) {
+                std::cmp::Ordering::Equal => return Some(cur),
+                std::cmp::Ordering::Less => return None,
+                std::cmp::Ordering::Greater => cur = rec.view.parent,
+            }
+        }
+    }
+
+    /// True iff the block is parked in `pending` (held, waiting on its own
+    /// parents). A caller fetching parents must not ask for these: re-inserting
+    /// one returns [`InsertOutcome::Duplicate`] and moves nothing. The hashes
+    /// in an [`InsertOutcome::MissingParents`] list include parked blocks, so
+    /// filter them with this (or use [`Braid::missing_parents`]).
+    pub fn is_parked(&self, h: &BlockHash) -> bool {
+        self.pending.contains_key(h)
     }
 
     /// Deduplicated, sorted worklist of parent hashes the parked views are
@@ -2341,6 +2377,38 @@ mod certified_tests {
         b
     }
 
+    /// 2026-10-08 (step 1, signer guard): the vote target is the spine block at a height,
+    /// found by the same parent walk settlement uses; a sibling off the spine is never it.
+    #[test]
+    fn spine_block_at_walks_the_selected_spine_and_skips_siblings() {
+        let mut b = chain(10, 512);
+        b.insert(view([0xDD; 32], hh(5), 6)); // a sibling of hh(6), off the spine
+        assert_eq!(b.spine_block_at(6), Some(hh(6)));
+        assert_eq!(b.spine_block_at(10), Some(hh(10)));
+        assert_eq!(b.spine_block_at(0), Some(hh(0)));
+        assert_eq!(b.spine_block_at(11), None, "above the tip");
+        assert_eq!(b.height_of(&[0xDD; 32]), Some(6));
+    }
+
+    /// 2026-10-08 (step 1): a `MissingParents` list names parents the braid ALREADY holds
+    /// parked. Fetching those by hash only returns `Duplicate`; the one worth asking for is
+    /// the root of the parked run. `is_parked` is the filter.
+    #[test]
+    fn missing_parents_name_parked_blocks_and_is_parked_filters_them_out() {
+        let mut b = chain(5, 512);
+        let (p6, c7, c8) = ([0x61; 32], [0x71; 32], [0x81; 32]);
+        assert!(matches!(b.insert(view(c7, p6, 7)), InsertOutcome::MissingParents(ref m) if m == &vec![p6]));
+        // c8 waits on c7, which is parked, not absent.
+        let InsertOutcome::MissingParents(m) = b.insert(view(c8, c7, 8)) else { panic!("c8 must park") };
+        assert_eq!(m, vec![c7]);
+        assert!(b.is_parked(&c7) && !b.is_parked(&p6));
+        assert!(m.iter().all(|h| b.is_parked(h)), "nothing in this list is worth fetching");
+        assert_eq!(b.missing_parents(), vec![p6], "the actionable root");
+        // The root arrives: the whole parked run unparks.
+        assert!(matches!(b.insert(view(p6, hh(5), 6)), InsertOutcome::Inserted { newly_ready: 3 }));
+        assert!(!b.is_parked(&c7) && !b.is_parked(&c8));
+    }
+
     /// The whole point of Phase 3: with the production depth rule (512) a 20-block braid
     /// finalizes NOTHING; one certificate for a spine block finalizes through it.
     #[test]
@@ -2412,6 +2480,23 @@ mod certified_tests {
         assert_eq!(b.pending_floor_height(), None, "nothing parked any more");
         assert_eq!(b.finalized_height(), 35, "the certificate now applies in full");
         assert_eq!(b.stats().below_final_dropped, 0, "the late block was kept, not dropped");
+    }
+
+    /// 2026-10-08, measured on r1: the parked child sits just ABOVE the certificate
+    /// (cert 23, child 24, its missing parent a side block AT 23). The first guard
+    /// (`floor <= h`) let the line reach 23, and the parent was then refused as
+    /// below-final forever.
+    #[test]
+    fn with_a_grace_a_child_parked_just_above_the_certificate_still_holds_the_line() {
+        let mut b = chain_with_grace(30, 512, 20);
+        let _ = b.insert(view([0xCC; 32], [0x77; 32], 24)); // parent 0x77 (height 23) not here yet
+        assert_eq!(b.set_certified(23, hh(23)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 24 - 1 - CERT_HOLD_PARENT_REACH, "held under where the parent can sit");
+        assert!(matches!(b.insert(view([0x77; 32], hh(22), 23)), InsertOutcome::Inserted { .. }),
+            "the late side block at the certified height must still be insertable");
+        assert_eq!(b.pending_floor_height(), None);
+        assert_eq!(b.finalized_height(), 23, "then the certificate applies in full");
+        assert_eq!(b.stats().below_final_dropped, 0);
     }
 
     /// The bound: a parent that NEVER arrives cannot veto the committee for more

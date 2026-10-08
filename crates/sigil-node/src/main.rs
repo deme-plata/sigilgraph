@@ -163,6 +163,63 @@ fn vote_held(br: Option<&Braid>, h: u64) -> bool {
     held
 }
 
+/// 2026-10-08 (roadmap step 1): SPINE voting, the caller side of the signer guard
+/// (`SIGIL_FINALITY_VOTE_DEPTH > 0`; see `finality_wire::VoteGuard` for the measured
+/// split that makes it necessary). Instead of a vote for every accepted block, a
+/// validator votes ONCE per height, for the block its own selected spine holds
+/// `vote_depth` heights below the selected tip, and only for a block that extends the
+/// block it voted for last. Called after every braid change; most calls return `None`
+/// because the target height has not moved.
+///
+/// The "extends my last vote" rule is the lock that keeps one validator's votes on one
+/// chain. It is released when our last vote is no longer on our spine only if a
+/// certificate at or above it names a block that IS on our spine: the committee has
+/// finalized past the lock. This is the prefix rule of the roadmap in its simplest
+/// form, not GRANDPA; the multi-round version is the next step.
+fn spine_vote(
+    finality: &mut finality_wire::FinalityWire,
+    br: &Braid,
+    chain: &crate::chain::ChainTip,
+    dag_bodies: &std::collections::HashMap<BlockHash, crate::block::Block>,
+) -> Option<Vec<u8>> {
+    let depth = finality.vote_depth();
+    let tip = br.selected_tip()?;
+    let tip_h = br.height_of(&tip)?;
+    let last = finality.last_signed();
+    let floor = last.map(|(h, _)| h).unwrap_or(0);
+    let mut t = tip_h.checked_sub(depth)?;
+    while t > floor && !finality.is_checkpoint(t) {
+        t -= 1;
+    }
+    if t == 0 || t <= floor && last.is_some() {
+        return None;
+    }
+    if vote_held(Some(br), t) {
+        return None;
+    }
+    let target = br.spine_block_at(t)?;
+    // A certificate only counts for a block on the GHOSTDAG chain (`set_certified`);
+    // a vote for anything else would build a certificate every node ignores.
+    if !br.is_on_spine(&target) {
+        return None;
+    }
+    if let Some((lh, lhash)) = last {
+        let extends = br.is_on_spine(&lhash)
+            || chain.get(lh).map(|b| b.hash()) == Some(lhash)
+            || finality.latest_certificate().is_some_and(|(ch, chash)| ch >= lh && br.is_on_spine(&chash));
+        if !extends {
+            static LOCKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = LOCKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n % 256 == 0 {
+                eprintln!("🔐 finality: vote at H={t} withheld — our last vote (H={lh}) is not on our spine and no certificate covers it ({} so far)", n + 1);
+            }
+            return None;
+        }
+    }
+    let order = dag_bodies.get(&target).and_then(|b| b.header.topology_commitment);
+    finality.on_spine_vote(t, target, order, finality_wire::now_ms())
+}
+
 /// 2026-10-07 (roadmap step 1): ask `peer` for DAG parents BY HASH (see
 /// `parent_fetch`). Off the select loop; the answer lands on `tx` and is inserted
 /// into the braid there. Failures are reported, sampled, never silent.
@@ -1427,7 +1484,7 @@ fn run_start() -> Result<()> {
         // Phase 2 of SIGIL True Instant Finality — OBSERVATIONAL ONLY.
         // Inert unless SIGIL_FINALITY_COMMITTEE is set; nothing it returns is
         // read by production, validation, or fork choice. See finality_wire.rs.
-        let mut finality = finality_wire::FinalityWire::from_env();
+        let mut finality = finality_wire::FinalityWire::from_env().with_guard_dir(&snap_dir);
         eprintln!("{}", finality.gate_mode().banner());
         // Fail-loud finality monitoring (2026-08-15, the P=6 k=1 investigation):
         // `below_final` was already tracked in BraidStats but nothing ever
@@ -2512,9 +2569,16 @@ fn run_start() -> Result<()> {
                                     // 2026-10-07 (step 1): no vote while our own view of `h` is
                                     // incomplete — see `vote_held`.
                                     let held = vote_held(braid.as_ref(), h);
-                                    if let Some(vb) = (!held).then(|| finality.on_block(
-                                        h, bhash, topology_commitment, finality_wire::now_ms()
-                                    )).flatten() {
+                                    // 2026-10-08: with SIGIL_FINALITY_VOTE_DEPTH > 0 the vote is
+                                    // one per height on our own spine — see `spine_vote`.
+                                    let vb = if finality.vote_depth() > 0 {
+                                        braid.as_ref().and_then(|br| spine_vote(&mut finality, br, &chain, &dag_bodies))
+                                    } else {
+                                        (!held).then(|| finality.on_block(
+                                            h, bhash, topology_commitment, finality_wire::now_ms()
+                                        )).flatten()
+                                    };
+                                    if let Some(vb) = vb {
                                         if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
                                             eprintln!("⚠ publish finality vote H={} failed: {}", h, e);
                                         }
@@ -3512,7 +3576,12 @@ fn run_start() -> Result<()> {
                                             // 2026-10-07 (step 1): no vote while our own view of
                                             // `bheight` is incomplete — see `vote_held`.
                                             let held = vote_held(Some(&*br), bheight);
-                                            if let Some(vb) = (!held).then(|| finality.on_block(bheight, bhash, topo, finality_wire::now_ms())).flatten() {
+                                            let vb = if finality.vote_depth() > 0 {
+                                                spine_vote(&mut finality, br, &chain, &dag_bodies)
+                                            } else {
+                                                (!held).then(|| finality.on_block(bheight, bhash, topo, finality_wire::now_ms())).flatten()
+                                            };
+                                            if let Some(vb) = vb {
                                                 if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
                                                     eprintln!("⚠ publish finality vote H={} failed: {}", bheight, e);
                                                 }
@@ -3520,18 +3589,29 @@ fn run_start() -> Result<()> {
                                             apply_finality_gate(&finality, Some(&mut *br), &finality_view, &dag_bodies, tip_signer.as_ref(), &events_bus);
                                         }
                                         InsertOutcome::MissingParents(missing) => {
-                                            // Park the body for the braid AND buffer it for the
-                                            // LINEAR contiguous applier (catch-up is linear; the
-                                            // braid re-anchors at the frontier via self-heal).
-                                            // Pull the ancestry gap with the EXISTING throttled
-                                            // rr-backfill shape — responses land in bf_rx.
-                                            pending_insert(&mut pending, chain.height(), bheight, block.clone());
+                                            // Park the body for the braid. Pull the ancestry gap with
+                                            // the EXISTING throttled rr-backfill shape — responses land
+                                            // in bf_rx.
+                                            //
+                                            // 2026-10-08 (roadmap step 1): this block is NOT buffered for
+                                            // the linear applier any more. A gossiped block is not final:
+                                            // with two producers it can be the side block that loses its
+                                            // height, and the linear applier would settle it anyway the
+                                            // next time any backfill reply drains `pending`. Measured on
+                                            // r1: both followers settled producer 2's a9c73c0e at H=16,
+                                            // the final spine took producer 1's 67c864f3, and every
+                                            // range reply after that failed `parent_hash mismatch` for
+                                            // 15 hours. The settled chain advances only from final
+                                            // blocks: the braid's own finalized drain, or a peer's
+                                            // range reply (served from ITS settled chain only).
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
                                             // 2026-10-07 (roadmap step 1): ALSO ask for the exact
                                             // missing parents BY HASH. The height-range ask below can
                                             // only return the server's own settled spine; the other
                                             // producer's side blocks are reachable only by hash. One gap
                                             // reported by many children is one ask (`InFlight`).
+                                            // Parents we already hold parked are not worth asking for.
+                                            let missing: Vec<BlockHash> = missing.into_iter().filter(|h| !br.is_parked(h)).collect();
                                             let want = parents_in_flight.take_new(&missing, std::time::Instant::now());
                                             if !want.is_empty() {
                                                 let connected = mgr.connected_peers();
@@ -4121,9 +4201,10 @@ fn run_start() -> Result<()> {
                     if let Some(br) = braid.as_mut() {
                         let mut still_missing: Vec<BlockHash> = Vec::new();
                         let mut producer_hint = None;
-                        let (mut ins, mut parked) = (0u64, 0u64);
+                        // `other` = Duplicate / BelowFinal / Rejected: the answer moved nothing.
+                        let (got, mut ins, mut parked, mut other) = (vals.len(), 0u64, 0u64, 0u64);
                         for block in vals {
-                            if block.header.verify_at_height(block.header.height).is_err() { continue; }
+                            if block.header.verify_at_height(block.header.height).is_err() { other += 1; continue; }
                             let bhash = block.hash();
                             parents_in_flight.arrived(&bhash);
                             producer_hint = Some(block.header.producer);
@@ -4137,13 +4218,16 @@ fn run_start() -> Result<()> {
                                     dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
                                     still_missing.extend(m);
                                 }
-                                _ => {}
+                                _ => other += 1,
                             }
                         }
+                        // 2026-10-08: a MissingParents list names parked parents too; asking for
+                        // those again only returns Duplicate (measured: 1,345 answers, 0 inserted).
+                        still_missing.retain(|h| !br.is_parked(h));
                         static BH_RECV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                         let n = BH_RECV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if n % 64 == 0 {
-                            eprintln!("⇩ by-hash: {ins} DAG parents inserted, {parked} parked, {} still missing ({} answers so far)",
+                            eprintln!("⇩ by-hash: got {got} → {ins} inserted, {parked} parked, {other} no-op, {} still missing ({} answers so far)",
                                 still_missing.len(), n + 1);
                         }
                         let want = parents_in_flight.take_new(&still_missing, std::time::Instant::now());
@@ -4189,6 +4273,18 @@ fn run_start() -> Result<()> {
                                     applied += 1;
                                     backfilled += 1;
                                     if let Some(r) = reorg_ring.as_mut() { r.clear_fork_hits(); }
+                                    // 2026-10-08 (step 1): this block came from a peer's SETTLED
+                                    // chain and just passed the state chokepoint, so its merge
+                                    // parents are committed history — the other producer's side
+                                    // blocks, which that peer has long since evicted and no
+                                    // by-hash ask can return. Anchor them as trusted, exactly as
+                                    // `dag_seed_braid` does for the window, so the braid follows
+                                    // catch-up instead of parking every caught-up block.
+                                    for mp in &view.merge_parents {
+                                        if !br.is_parked(mp) {
+                                            br.anchor_trusted(*mp, view.height.saturating_sub(1));
+                                        }
+                                    }
                                     if matches!(br.insert(view), InsertOutcome::Inserted { .. }) {
                                         dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, b);
                                     }

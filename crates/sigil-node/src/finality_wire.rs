@@ -75,6 +75,82 @@ pub struct FinalityWire {
     /// as if it were a speedup. Roughly a 2x overstatement of the whole
     /// feature's benefit, in the one number the feature exists to produce.
     last_vote_height: u64,
+    /// The signer guard (2026-10-08): the last `(height, block)` this node SIGNED,
+    /// persisted, so no height is ever signed twice — not even across a restart.
+    guard: VoteGuard,
+    /// `SIGIL_FINALITY_VOTE_DEPTH`. `0` (default) = the legacy rule, a vote for every
+    /// accepted block (unchanged g2 behaviour). `> 0` = spine voting: one vote per
+    /// height, for the selected-spine block this many heights below the selected tip,
+    /// through [`FinalityWire::on_spine_vote`].
+    vote_depth: u64,
+}
+
+/// 2026-10-08 (mainnet roadmap step 1): the SIGNER GUARD.
+///
+/// Measured on the 4-node rehearsal net with two producers: every validator voted for
+/// every block it accepted, so at each height the two followers voted for BOTH
+/// producers' blocks. r1+r3+r4 then certified producer 1's block and r2+r3+r4
+/// certified producer 2's block at the same height — two valid 3-of-4 certificates,
+/// and the net split into two settled chains from H=41 (14 FINALITY VIOLATIONs). The
+/// equivocation filter in `assemble` cannot see this: each node's vote set may contain
+/// only one of a follower's two votes.
+///
+/// BFT safety assumes an honest validator signs at most ONE block per height. This is
+/// that rule, enforced where the key is used, and persisted before the vote is sent:
+/// a crash between "signed" and "recorded" must not let the restarted node sign the
+/// same height again.
+#[derive(Debug, Default)]
+pub struct VoteGuard {
+    path: Option<std::path::PathBuf>,
+    last: Option<(u64, BlockHash)>,
+}
+
+impl VoteGuard {
+    pub const FILE: &'static str = "finality-vote-guard.json";
+
+    /// Load from `dir`. A missing file is a fresh validator. An unreadable or
+    /// malformed one is NOT treated as fresh: we refuse to sign until it is fixed,
+    /// because "forgot what I signed" is exactly the state that double-signs.
+    pub fn load(dir: &std::path::Path) -> Self {
+        let path = dir.join(Self::FILE);
+        let last = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| {
+                let h = v.get("height")?.as_u64()?;
+                let hash: BlockHash = hex::decode(v.get("hash")?.as_str()?).ok()?.try_into().ok()?;
+                Some((h, hash))
+            }) {
+                Some(l) => Some(l),
+                None => Some((u64::MAX, [0u8; 32])), // unreadable ⇒ sign nothing
+            },
+            Err(_) => None,
+        };
+        Self { path: Some(path), last }
+    }
+
+    pub fn last(&self) -> Option<(u64, BlockHash)> {
+        self.last
+    }
+
+    /// Strictly above everything signed before.
+    pub fn may_sign(&self, height: u64) -> bool {
+        self.last.map_or(true, |(h, _)| height > h)
+    }
+
+    /// Record a signature at `(height, hash)`: write + fsync + rename, then remember.
+    /// Without a path (tests, or a node with no data dir) it is remembered in RAM only.
+    fn record(&mut self, height: u64, hash: BlockHash) -> std::io::Result<()> {
+        if let Some(path) = &self.path {
+            use std::io::Write;
+            let tmp = path.with_extension("json.tmp");
+            let body = serde_json::json!({ "height": height, "hash": hex::encode(hash) }).to_string();
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+        }
+        self.last = Some((height, hash));
+        Ok(())
+    }
 }
 
 impl FinalityWire {
@@ -101,7 +177,13 @@ impl FinalityWire {
                     cfg.checkpoint_interval,
                     if key.is_some() { "VALIDATOR" } else { "observer" }
                 );
-                Self { observer, signing_key: key, announced: true, last_cert_log_ms: 0, last_vote_height: 0 }
+                let vote_depth = std::env::var("SIGIL_FINALITY_VOTE_DEPTH").ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+                if vote_depth > 0 {
+                    eprintln!("🗳 finality: SPINE voting — one vote per height, {vote_depth} below the selected tip (signer guard on)");
+                }
+                Self { observer, signing_key: key, announced: true, last_cert_log_ms: 0, last_vote_height: 0,
+                       guard: VoteGuard::default(), vote_depth }
             }
             Err(env_config::ConfigError::Disabled) => Self::disabled(),
             Err(e) => {
@@ -127,7 +209,64 @@ impl FinalityWire {
             announced: false,
             last_cert_log_ms: 0,
             last_vote_height: 0,
+            guard: VoteGuard::default(),
+            vote_depth: 0,
         }
+    }
+
+    /// Attach the persisted signer guard (`<dir>/finality-vote-guard.json`).
+    pub fn with_guard_dir(mut self, dir: &std::path::Path) -> Self {
+        self.guard = VoteGuard::load(dir);
+        if let Some((h, _)) = self.guard.last() {
+            if h == u64::MAX {
+                eprintln!("🛑 finality: {} is unreadable — this validator signs NOTHING until it is repaired", VoteGuard::FILE);
+            } else {
+                eprintln!("🗳 finality: signer guard restored — last signed H={h}; nothing at or below it will be signed again");
+            }
+        }
+        self
+    }
+
+    /// See the `vote_depth` field.
+    pub fn vote_depth(&self) -> u64 {
+        self.vote_depth
+    }
+
+    /// The last `(height, block)` this node signed, if any.
+    pub fn last_signed(&self) -> Option<(u64, BlockHash)> {
+        self.guard.last()
+    }
+
+    pub fn is_checkpoint(&self, height: u64) -> bool {
+        self.enabled() && self.observer.is_checkpoint(height)
+    }
+
+    /// Spine voting (`vote_depth > 0`): sign ONE vote for `(height, spine_block_hash)`,
+    /// only above everything signed before, and record it durably BEFORE the vote is
+    /// returned for publishing. The caller chooses the block (the selected-spine block
+    /// at `tip - vote_depth`) and checks it extends our previous vote; this method
+    /// enforces the one rule that must never depend on the caller.
+    pub fn on_spine_vote(
+        &mut self,
+        height: u64,
+        spine_block_hash: BlockHash,
+        order_hash: Option<[u8; 32]>,
+        now_ms: u64,
+    ) -> Option<Vec<u8>> {
+        if !self.enabled() || !self.observer.is_checkpoint(height) || !self.guard.may_sign(height) {
+            return None;
+        }
+        self.observer.note_checkpoint_seen(height, now_ms);
+        self.last_vote_height = self.last_vote_height.max(height);
+        let order = order_hash.unwrap_or(spine_block_hash);
+        let key = self.signing_key.as_ref()?;
+        let vote = self.observer.own_vote(key, height, spine_block_hash, order)?;
+        if let Err(e) = self.guard.record(height, spine_block_hash) {
+            eprintln!("🛑 finality: could not persist the signer guard ({e}) — vote at H={height} NOT sent");
+            return None;
+        }
+        self.observer.observe(vote.clone(), now_ms);
+        encode_vote(&vote)
     }
 
     /// Is finality doing anything on this node?
@@ -423,6 +562,8 @@ mod tests {
             announced: true,
             last_vote_height: 0,
             last_cert_log_ms: 0,
+            guard: VoteGuard::default(),
+            vote_depth: 0,
         };
         assert!(w.enabled());
         assert_eq!(w.on_block(321, [1u8; 32], None, 0), None, "not a checkpoint height");
@@ -444,6 +585,8 @@ mod tests {
             announced: true,
             last_vote_height: 0,
             last_cert_log_ms: 0,
+            guard: VoteGuard::default(),
+            vote_depth: 0,
         };
         let bytes = w.on_block(320, [7u8; 32], Some([9u8; 32]), 1_000).expect("validator must publish");
         assert!(decode_vote(&bytes).is_some());
@@ -492,6 +635,8 @@ mod tests {
             announced: true,
             last_vote_height: 0,
             last_cert_log_ms: 0,
+            guard: VoteGuard::default(),
+            vote_depth: 0,
         };
 
         // The live shape: a certificate at the mint height, while the caller
@@ -544,10 +689,77 @@ mod tests {
             announced: true,
             last_vote_height: 0,
             last_cert_log_ms: 0,
+            guard: VoteGuard::default(),
+            vote_depth: 0,
         };
         let bytes = w.on_block(320, [7u8; 32], None, 0).unwrap();
         let v = decode_vote(&bytes).unwrap();
         assert_eq!(v.order_hash, [7u8; 32], "with no braid commitment the spine hash is the fallback");
+    }
+    fn committee_of(ks: &[SigningKey]) -> sigil_braidpool::committee::Committee {
+        let members: Vec<([u8; 32], [u8; 32])> =
+            ks.iter().map(|k| (k.verifying_key().to_bytes(), k.verifying_key().to_bytes())).collect();
+        sigil_braidpool::committee::Committee::new(members)
+    }
+
+    fn spine_wire(ks: &[SigningKey], guard: VoteGuard) -> FinalityWire {
+        FinalityWire {
+            observer: FinalityObserver::new(committee_of(ks), ObserverConfig { checkpoint_interval: 1, ..Default::default() }),
+            signing_key: Some(ks[0].clone()),
+            announced: true,
+            last_vote_height: 0,
+            last_cert_log_ms: 0,
+            guard,
+            vote_depth: 8,
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sigil-vote-guard-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 2026-10-08: the measured split came from one validator signing two different
+    /// blocks at one height. The guard signs a height once, and never below.
+    #[test]
+    fn the_signer_guard_signs_each_height_at_most_once_and_never_lower() {
+        let ks: Vec<SigningKey> = (1..5u8).map(key).collect();
+        let mut w = spine_wire(&ks, VoteGuard::default());
+        assert!(w.on_spine_vote(40, [0xA1; 32], None, 0).is_some());
+        assert!(w.on_spine_vote(40, [0xB2; 32], None, 0).is_none(), "a second block at the same height: never");
+        assert!(w.on_spine_vote(40, [0xA1; 32], None, 0).is_none(), "not even the same block twice");
+        assert!(w.on_spine_vote(39, [0xC3; 32], None, 0).is_none(), "never below the last signature");
+        assert!(w.on_spine_vote(41, [0xD4; 32], None, 0).is_some());
+        assert_eq!(w.last_signed(), Some((41, [0xD4; 32])));
+    }
+
+    /// The guard survives a restart: the record is on disk before the vote leaves.
+    #[test]
+    fn the_signer_guard_survives_a_restart() {
+        let ks: Vec<SigningKey> = (1..5u8).map(key).collect();
+        let dir = scratch_dir("restart");
+        let mut w = spine_wire(&ks, VoteGuard::load(&dir));
+        assert!(w.on_spine_vote(100, [0xA1; 32], None, 0).is_some());
+        drop(w);
+        let mut again = spine_wire(&ks, VoteGuard::load(&dir));
+        assert_eq!(again.last_signed(), Some((100, [0xA1; 32])));
+        assert!(again.on_spine_vote(100, [0xB2; 32], None, 0).is_none(), "restart must not reopen H=100");
+        assert!(again.on_spine_vote(101, [0xB2; 32], None, 0).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable guard file is "I do not know what I signed": sign nothing.
+    #[test]
+    fn an_unreadable_signer_guard_signs_nothing() {
+        let ks: Vec<SigningKey> = (1..5u8).map(key).collect();
+        let dir = scratch_dir("corrupt");
+        std::fs::write(dir.join(VoteGuard::FILE), b"{not json").unwrap();
+        let mut w = spine_wire(&ks, VoteGuard::load(&dir));
+        assert!(w.on_spine_vote(1, [0xA1; 32], None, 0).is_none());
+        assert!(w.on_spine_vote(1_000_000, [0xA1; 32], None, 0).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

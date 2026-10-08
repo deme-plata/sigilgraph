@@ -637,7 +637,8 @@ impl Braid {
     /// the finalized spine, and holding the line under it would let one missing parent
     /// veto the committee.
     fn computed_final(&self) -> Option<u64> {
-        let depth = self.depth_rule_final();
+        // `depth_finality = false`: only certificates finalize (see the config doc).
+        let depth = if self.cfg.depth_finality { self.depth_rule_final() } else { None };
         let base = match self.certified {
             None => depth,
             Some((h, _)) => {
@@ -2685,6 +2686,21 @@ mod certified_tests {
         for i in 31..=40u8 { b.insert(view(hh(i), hh(i - 1), i as u64)); }
         assert_eq!(b.set_certified(35, hh(35)), CertifyOutcome::Raised);
         assert_eq!(b.finalized_height(), 32, "35 - 3: the grace is a bound, not a veto");
+    }
+
+    /// 2026-10-08: `depth_finality = false` — the depth rule never finalizes on its own
+    /// (a network split would let each side finalize its own strand); only a
+    /// certificate moves the line.
+    #[test]
+    fn without_depth_finality_only_a_certificate_finalizes() {
+        let mut b = Braid::new(BraidConfig { final_depth: 4, depth_finality: false, ..BraidConfig::default() });
+        b.insert(view(hh(0), [0u8; 32], 0));
+        for i in 1..=20u8 { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        assert_eq!(b.finalized_height(), 0, "depth 4 on a 20-block chain would say 16; it must say nothing");
+        assert_eq!(b.set_certified(12, hh(12)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 12);
+        // A late sibling above the certified line is still accepted (not final yet).
+        assert!(matches!(b.insert(view([0xE1; 32], hh(15), 16)), InsertOutcome::Inserted { .. }));
     }
 
     /// No certificate ⇒ byte-for-byte the old behaviour.

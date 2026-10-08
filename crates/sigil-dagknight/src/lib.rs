@@ -194,6 +194,14 @@ pub struct BraidConfig {
     /// Refused if the certificate conflicts with this node's own finalized prefix.
     /// Env `SIGIL_DAG_CERT_FORK_CHOICE=1`; off (default) = unchanged.
     pub cert_fork_choice: bool,
+    /// 2026-10-08 (roadmap step 1): may the depth rule (`final_depth` / blue depth)
+    /// finalize on its own? `true` (default) = unchanged. `false` = ONLY committee
+    /// certificates finalize. A depth rule is a local clock: during a network split each
+    /// side's tip keeps moving, so after `final_depth` blocks each side finalizes its own
+    /// strand and the two finalized prefixes conflict. With certificates gating
+    /// settlement, a split must instead STOP finality (no side has a quorum) until it
+    /// heals. Production keeps going; settlement waits. Env `SIGIL_DAG_DEPTH_FINALITY=0`.
+    pub depth_finality: bool,
 }
 
 impl Default for BraidConfig {
@@ -210,6 +218,7 @@ impl Default for BraidConfig {
             pending_max_tip_lag: 512,
             cert_pending_grace: 0,
             cert_fork_choice: false,
+            depth_finality: true,
         }
     }
 }
@@ -246,6 +255,7 @@ impl BraidConfig {
             pending_max_tip_lag: get("SIGIL_DAG_PENDING_MAX_TIP_LAG", d.pending_max_tip_lag),
             cert_pending_grace: get("SIGIL_DAG_CERT_PENDING_GRACE", d.cert_pending_grace),
             cert_fork_choice: std::env::var("SIGIL_DAG_CERT_FORK_CHOICE").ok().as_deref() == Some("1"),
+            depth_finality: std::env::var("SIGIL_DAG_DEPTH_FINALITY").ok().as_deref() != Some("0"),
         }
     }
 }

@@ -405,6 +405,7 @@ mod tests {
             pending_max_tip_lag: 0,
             cert_pending_grace: 0,
             cert_fork_choice: false,
+            depth_finality: true,
         };
 
         // Node A: creation order (k_probe.rs: `Braid::new_with_base(cfg, GENESIS, 0)`).

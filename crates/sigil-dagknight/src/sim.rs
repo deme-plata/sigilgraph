@@ -250,6 +250,7 @@ fn open_cfg(n: usize, final_depth: u64) -> BraidConfig {
         pending_max_tip_lag: 0,
         cert_pending_grace: 0,
         cert_fork_choice: false,
+        depth_finality: true,
         saturated_self_heal_window: n + 64,
     }
 }
@@ -466,6 +467,7 @@ pub fn run_permutation_invariance(seed: u64, perms: u32) -> BraidSimReport {
         pending_max_tip_lag: 0,
         cert_pending_grace: 0,
         cert_fork_choice: false,
+        depth_finality: true,
         saturated_self_heal_window: n + ext_len as usize + 64,
     };
     let mut checks = Checks::default();

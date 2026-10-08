@@ -1856,6 +1856,7 @@ mod tests {
             pending_max_tip_lag: 0,
             cert_pending_grace: 0,
             cert_fork_choice: false,
+            depth_finality: true,
         };
 
         // Two nodes, two DIFFERENT gossip arrival orders.

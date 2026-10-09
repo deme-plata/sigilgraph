@@ -10,8 +10,16 @@
 #   4. publish binaries + .proof + source tarball to dist-fluxapp/downloads
 #   5. write sigil-top-latest.json manifest, then scripts/sign-manifest.sh it
 #   6. verify the LIVE manifest+sig against the pinned RELEASE_SIGN_PUBKEY
-#   7. git commit + annotated tag + push (branch + tag)
+#   7. git commit + annotated tag + push (branch + tag; tag only from a detached worktree)
 # The auto-updater rolls the new version to every node from the signed manifest.
+#
+# NO GPG ANYWHERE (Viktor, 2026-10-09: "don't use our gpg keys for release if it doesn't work").
+# The signatures that protect users are NOT gpg: SQIsign-L5 + Ed25519 on every artifact (step 3)
+# and Ed25519 on the manifest (step 5). Those are mandatory — the updater fails closed without them.
+# The git commit/tag are forced unsigned below, so a gpg config can never block or hang a release.
+#
+# SIGIL_RELEASE_BUILD_ONLY=1 stops after step 2: caches warm, nothing signed, published or
+# committed (used by release-sigil-top-fixed.sh --warm).
 set -euo pipefail
 
 VER="${1:?usage: release-sigil-top.sh <version> [note]}"
@@ -64,9 +72,10 @@ fi
 # hashes was already published and had been pulled by clients. Nothing detected it;
 # both runs reported success. A version number is a promise about content, so the
 # channel is asked BEFORE anything is built.
+BUILD_ONLY="${SIGIL_RELEASE_BUILD_ONLY:-0}"
 LIVE_VER=$(curl -s --max-time 20 "https://sigilgraph.org/downloads/sigil-top-latest.json" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || echo "")
-if [ -n "$LIVE_VER" ] && [ "$LIVE_VER" = "$VER" ]; then
+if [ "$BUILD_ONLY" != "1" ] && [ -n "$LIVE_VER" ] && [ "$LIVE_VER" = "$VER" ]; then
   echo "  x REFUSING: v$VER is ALREADY the live channel version." >&2
   echo "    Releasing it again overwrites artifacts whose hashes are already signed and" >&2
   echo "    published, and every install that pulled v$VER then holds a binary the channel" >&2
@@ -96,7 +105,7 @@ grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version
 # address AFTER the version bump so the stamp names the exact source that ships, and commit
 # .flux-rev/HEAD alongside Cargo.toml so the stamp is reproducible from git.
 FLUX_REV_BIN="${FLUX_REV_BIN:-/home/storage/deepseek-codewhale/flux/target/debug/flux-rev}"
-if [ -x "$FLUX_REV_BIN" ] && "$FLUX_REV_BIN" snapshot crates/sigil-top -m "release v$VER" >/dev/null 2>&1 \
+if [ "$BUILD_ONLY" != "1" ] && [ -x "$FLUX_REV_BIN" ] && "$FLUX_REV_BIN" snapshot crates/sigil-top -m "release v$VER" >/dev/null 2>&1 \
    && [ -s crates/sigil-top/.flux-rev/HEAD ]; then
   export SIGIL_TOP_FLUX_REV="full:$(cat crates/sigil-top/.flux-rev/HEAD)"
 else
@@ -147,6 +156,10 @@ wait "$LPID" || { echo "✗ linux build failed:"; tail -25 "$LLOG"; exit 1; }
 wait "$WPID" || { echo "✗ windows build failed:"; tail -25 "$WLOG"; exit 1; }
 if [ "$WANT_ARM" = 1 ]; then wait "$APID" || { echo "✗ arm64 build failed:"; tail -25 "$ALOG"; exit 1; }; fi
 echo "  build wall clock: $((SECONDS-T_BUILD))s (serial baseline v7.1.9/v7.1.10: ~200s)"
+if [ "$BUILD_ONLY" = "1" ]; then
+  echo "✓ BUILD ONLY — caches warm for $(pwd); nothing signed, published or committed"
+  exit 0
+fi
 LBIN="target/release/sigil-top"; WBIN="$WIN_TARGET_DIR/x86_64-pc-windows-gnu/release/sigil-top.exe"
 [ -x "$LBIN" ] || { echo "✗ missing $LBIN"; exit 1; }
 [ -s "$WBIN" ] || { echo "✗ missing $WBIN"; exit 1; }
@@ -317,7 +330,7 @@ done
 echo "▸ 7/7 commit + tag + push"
 git add crates/sigil-top/Cargo.toml Cargo.lock
 git add -f crates/sigil-top/.flux-rev/HEAD   # tracked but under an ignored dir: plain add exits 1 (2026-09-14)
-git commit --no-gpg-sign -m "release(sigil-top): v${VER}
+git -c commit.gpgSign=false commit --no-gpg-sign -m "release(sigil-top): v${VER}
 
 $NOTE
 
@@ -326,9 +339,15 @@ $NOTE
   linux-arm64 blake3 ${AB3:-not built}
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>" || echo "  (nothing new to commit besides version — continuing)"
-git tag -a "v${VER}" -m "sigil-top v${VER}" 2>/dev/null || echo "  (tag v${VER} exists)"
+git -c tag.gpgSign=false tag -a "v${VER}" -m "sigil-top v${VER}" 2>/dev/null || echo "  (tag v${VER} exists)"
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-git push origin "$BRANCH" "v${VER}"
+# From a detached worktree (the normal case since 2026-09-25) there is no branch: "HEAD" is not a
+# refname, and git rejected the WHOLE push for v10.4.20. The tag carries the release commit.
+PUSH_REFS=("v${VER}"); [ "$BRANCH" != "HEAD" ] && PUSH_REFS=("$BRANCH" "v${VER}")
+PUSHED=1
+# By now the channel is live, signed and verified. A failed push must not report the release
+# as failed — it says loudly what to retry instead.
+git push origin "${PUSH_REFS[@]}" || PUSHED=0
 
 # refresh the code-provenance page the explorer's flux-rev tab iframes (post-tag so
 # the new release row appears; non-fatal — the page just lags one release on failure)
@@ -336,6 +355,7 @@ bash scripts/gen-flux-versions.sh || echo "  (flux-versions refresh failed — n
 
 echo ""
 echo "✅ RELEASED sigil-top v${VER} — channel live, signed, tagged. Nodes pull it on next update check."
+[ "$PUSHED" = 1 ] || echo "⚠️  NOT PUSHED to GitHub — retry: git -C $(pwd) push origin ${PUSH_REFS[*]}"
 echo "   linux   $LB3"
 echo "   windows $WB3"
 echo "   arm64   ${AB3:-not built}"

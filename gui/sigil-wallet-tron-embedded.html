@@ -9752,6 +9752,13 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   window.sigilRevealShow=function(){
     var a=activeAddr(); var s=loadSecret(); var b=document.getElementById('sigilRevealBody');
     if(!s){
+      // 10.4.22: on the wallet sigil-top serves ([W], localhost:9800) the phrase is kept by sigil-top, not the browser.
+      if(/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)){
+        b.innerHTML='<div class="warn">The recovery phrase for this wallet is kept by sigil-top on this computer, not by the browser.</div>'
+          +'<div class="note">To see it, run <b>sigil-top wallet phrase</b> in a terminal. The same words open this wallet on sigilgraph.org and in the phone app. To use a wallet you already have, run <b>sigil-top wallet import</b>.</div>'
+          +'<button class="btn g" onclick="sigilRevealClose()">CLOSE</button>';
+        return;
+      }
       var mm=null; try{ mm=localStorage.getItem('sigil-mm-account'); }catch(e){}
       b.innerHTML='<div class="warn">This browser holds NO recovery phrase for this wallet.</div>'
         +'<div class="note">'+(mm?('It was opened through MetaMask (account '+esc(short(mm))+'): the wallet is derived from a MetaMask signature, so your <b>MetaMask</b> seed phrase is the backup — there is no separate SIGIL phrase to write down.'):'The session was opened by address only, or the phrase was cleared (log out does that). Log in again with your phrase — it is then kept in this browser and can be shown here.')+'</div>'

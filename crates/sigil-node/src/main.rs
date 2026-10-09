@@ -2945,6 +2945,16 @@ fn run_start() -> Result<()> {
                                         req.from, req.to, peer, top, n + 1
                                     );
                                 }
+                                // 2026-10-09 (r1 17-h soak): refusing by SILENCE left the
+                                // asker waiting out libp2p's 8 s timeout and then reading an
+                                // empty stream — r4 logged 1,409 "decode (0 B)" + Timeout
+                                // failures in 17 h, all for a few blocks just above the
+                                // answering node's tip (a braid race, not missing data). The
+                                // unanswered ResponseChannel also stayed in flux-p2p's
+                                // `inbound_channels` forever. BUSY is the right word: "not
+                                // yet, ask again, same size" — every client path (and g2
+                                // peers since 09-13) already handles it with no penalty.
+                                mgr.respond(request_id, crate::serve_read::busy_reply());
                                 continue;
                             }
                             let wbase = chain.window_base();

@@ -212,7 +212,15 @@ impl ChainTip {
             }
         }
 
-        let computed = commit_state_transition_with_master_schedule(&mut self.state, &block.transition, expected_height, schedule)
+        // Commit into a COPY and swap it in only once every root matches the header.
+        // 2026-10-09 (measured, `tampered_body_is_refused_without_touching_state`): committing straight
+        // into `self.state` left a refused block's mutations behind. The block hash covers only the
+        // header, so a body altered in transit keeps it; that body was refused with STATE DIVERGENCE but
+        // its fake balance stayed, and the honest copy of the same block could never apply after it.
+        // The heavy parts of the state (notes, ciphertexts, archive) are copy-on-write, so the copy is
+        // cheap; the maps are the size of the chain's wallets and nullifiers.
+        let mut next = self.state.clone();
+        let computed = commit_state_transition_with_master_schedule(&mut next, &block.transition, expected_height, schedule)
             .map_err(|e| anyhow!("state commit failed: {}", e))?;
 
         if !block.check_roots_match(&computed) {
@@ -221,7 +229,7 @@ impl ChainTip {
             ));
         }
         // The fifth root — the shielded pool — height-gated (see `Block::check_shielded_pool_root`).
-        let local_pool_root = self.state.shielded_pool_root();
+        let local_pool_root = next.shielded_pool_root();
         if !block.check_shielded_pool_root(local_pool_root) {
             return Err(anyhow!(
                 "STATE DIVERGENCE at height {} — shielded pool root: header {} != local {}",
@@ -230,6 +238,8 @@ impl ChainTip {
                 hex::encode(local_pool_root)
             ));
         }
+        // Every check passed: only now does the block's transition become this node's state.
+        self.state = next;
         if expected_height == sigil_header::shielded_pool_root_activation_height() {
             eprintln!(
                 "🔏 shielded pool root ACTIVE from height {} — header commits {} (notes {}, nullifiers {})",

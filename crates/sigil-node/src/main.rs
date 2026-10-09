@@ -3963,7 +3963,13 @@ fn run_start() -> Result<()> {
                                             }
                                             continue;
                                         }
-                                        InsertOutcome::Duplicate => { continue; }
+                                        InsertOutcome::Duplicate => {
+                                            // 2026-10-09 (M0): a copy of a header whose earlier body was
+                                            // refused at settlement — the hash covers only the header, so
+                                            // this copy may carry the honest body. Stored only if wanted.
+                                            crate::dag::restore_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                            continue;
+                                        }
                                         InsertOutcome::BelowFinal { .. } => {
                                             dag_below_final += 1; // reorg-window guard held
                                             continue;
@@ -5581,6 +5587,74 @@ mod tests {
         assert_eq!(scheduled_follower.height(), 1);
     }
 
+    /// 2026-10-09 (Viktor: "undersøg hullet på g2"). The block hash covers only the header, so a
+    /// body altered in transit keeps the producer's hash. The follower must refuse it WITHOUT
+    /// touching its state, and the honest copy of the same block must still apply afterwards.
+    /// Before the fix this measured: refused, but the fake 1e15-glyph balance stayed in the
+    /// follower's state and the honest copy then failed with STATE DIVERGENCE (follower stuck).
+    #[test]
+    fn tampered_body_is_refused_without_touching_state() {
+        let winner: WalletId = [0x11; 32];
+        let attacker: WalletId = [0xEE; 32];
+        let none: &[(u64, WalletId)] = &[];
+        let mut producer = ChainTip::new();
+        producer.apply(build_genesis().unwrap()).unwrap();
+        let solve = pool_solve(&producer, winner);
+        let (honest, _) = mint_next_block_with_schedule(&producer, Vec::new(), &[], None, Some(&solve), None, None, none).unwrap();
+
+        let mut tampered = honest.clone();
+        tampered.transition.mutations.push(StateMutation::SetBalance {
+            wallet: attacker, token: sigil_state::NATIVE, amount: 1_000_000_000_000_000,
+        });
+        assert_eq!(tampered.hash(), honest.hash(), "the block hash covers the header only");
+
+        let mut follower = ChainTip::new();
+        follower.apply(build_genesis().unwrap()).unwrap();
+        let before = follower.state().roots();
+        let err = follower.apply(tampered.clone()).unwrap_err();
+        assert!(format!("{err}").contains("STATE DIVERGENCE"), "{err}");
+        assert_eq!(follower.height(), 1, "the refused block does not move the tip");
+        assert_eq!(follower.state().roots(), before, "a refused block leaves no trace in the state");
+        assert_eq!(follower.state().balance_of(&attacker, &sigil_state::NATIVE), 0);
+
+        // The same tampered body again (a retry on the next settle pass) changes nothing either.
+        assert!(follower.apply(tampered).is_err());
+        assert_eq!(follower.state().roots(), before);
+
+        // And the honest copy of the very same block applies cleanly afterwards.
+        follower.apply(honest.clone()).expect("honest copy applies after a refused tampered copy");
+        let mut clean = ChainTip::new();
+        clean.apply(build_genesis().unwrap()).unwrap();
+        clean.apply(honest).unwrap();
+        assert_eq!(follower.state().roots(), clean.state().roots(), "same state as a node that only saw the honest copy");
+        assert_eq!(follower.height(), 2);
+    }
+
+    /// A transition that fails HALFWAY (an earlier mutation applied, a later one refused by the
+    /// chokepoint) must not leak the earlier one into the follower's state either.
+    #[test]
+    fn half_applied_body_leaves_no_trace() {
+        let winner: WalletId = [0x11; 32];
+        let none: &[(u64, WalletId)] = &[];
+        let mut producer = ChainTip::new();
+        producer.apply(build_genesis().unwrap()).unwrap();
+        let solve = pool_solve(&producer, winner);
+        let (honest, _) = mint_next_block_with_schedule(&producer, Vec::new(), &[], None, Some(&solve), None, None, none).unwrap();
+        let mut broken = honest.clone();
+        // a valid first mutation, then one the chokepoint refuses (the master wallet is already set)
+        broken.transition.mutations.insert(0, StateMutation::SetBalance { wallet: [0xAB; 32], token: sigil_state::NATIVE, amount: 7 });
+        broken.transition.mutations.push(StateMutation::SetMasterWallet { wallet: [0xCD; 32] });
+
+        let mut follower = ChainTip::new();
+        follower.apply(build_genesis().unwrap()).unwrap();
+        let before = follower.state().roots();
+        let err = follower.apply(broken).unwrap_err();
+        assert!(format!("{err}").contains("state commit failed"), "{err}");
+        assert_eq!(follower.state().roots(), before);
+        assert_eq!(follower.state().balance_of(&[0xAB; 32], &sigil_state::NATIVE), 0);
+        follower.apply(honest).expect("honest copy still applies");
+    }
+
     #[test]
     fn tampered_block_fails_to_apply() {
         let mut chain = ChainTip::new();
@@ -5798,6 +5872,126 @@ mod dag_wiring_tests {
         });
         assert!(bodies.contains_key(&b0) && bodies.contains_key(&b1) && bodies.contains_key(&eh));
         assert!(!bodies.contains_key(&b2), "the parked block went, not the lowest held one");
+    }
+
+    /// 2026-10-09: the gossip path caches a block's received bytes (`chain_log::remember_raw`)
+    /// BEFORE the braid's duplicate check, and settlement used to persist the cached bytes for the
+    /// body it applied. Measured before the fix: a tampered copy arriving AFTER the honest one was
+    /// what chain.log got, while the honest body was applied — and a replay (restart) stopped at
+    /// that height with STATE DIVERGENCE. chain.log must hold exactly what was applied.
+    #[test]
+    fn tampered_copy_never_reaches_chain_log() {
+        let mut builder = ChainTip::new();
+        let g = build_genesis().expect("genesis");
+        builder.apply(g.clone()).expect("apply genesis");
+        let (b1, _) = mint_next_block(&builder, vec![], &[], None, None, None, None).expect("mint");
+        let mut tampered = b1.clone();
+        tampered.transition.mutations.push(StateMutation::SetBalance {
+            wallet: [0xEE; 32], token: sigil_state::NATIVE, amount: 1_000_000_000_000_000,
+        });
+        assert_eq!(tampered.hash(), b1.hash());
+
+        let mut chain = ChainTip::new();
+        let mut braid = Braid::new(BraidConfig { final_depth: 0, ..BraidConfig::default() });
+        let mut dag_bodies = std::collections::HashMap::new();
+        let mut mint_hash_to_tx_hashes = std::collections::HashMap::new();
+        let send_bridge = sigil_api::send::SendBridge::new();
+        let bridge_bridge = sigil_api::bridge::BridgeBridge::new(None, None);
+        let dex_bridge = sigil_api::dex::DexBridge::new();
+        let usds_bridge = sigil_api::usds::UsdsBridge::new();
+        let usds_polygon_bridge = sigil_api::usds_bridge::UsdsBridgeBridge::new(None, None);
+        let shielded_bridge = sigil_api::shielded::ShieldedBridge::new();
+        let mut persisted: Vec<Vec<u8>> = Vec::new();
+
+        // genesis
+        braid.insert(BlockView::from(&g.header));
+        dag_store_body(&mut dag_bodies, 32, g.hash(), g.clone());
+        // b1, exactly as the gossip arm does it: remember the bytes, then insert + store.
+        chain_log::remember_raw(b1.hash(), chain_log::encode_record(&b1).unwrap());
+        assert!(matches!(braid.insert(BlockView::from(&b1.header)), InsertOutcome::Inserted { .. }));
+        dag_store_body(&mut dag_bodies, 32, b1.hash(), b1.clone());
+        // the tampered copy arrives LATER: bytes remembered first, then the insert is a duplicate.
+        chain_log::remember_raw(tampered.hash(), chain_log::encode_record(&tampered).unwrap());
+        assert!(matches!(braid.insert(BlockView::from(&tampered.header)), InsertOutcome::Duplicate));
+
+        let (a, _s, f) = dag_drain_apply(&mut braid, &mut dag_bodies, &mut chain, &mut |braw| {
+            persisted.push(braw.to_vec());
+        }, &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+           &shielded_bridge, &mut mint_hash_to_tx_hashes);
+        assert_eq!((a, f), (2, 0), "genesis + the honest b1 applied");
+        assert_eq!(persisted.len(), 2);
+        let rec1 = chain_log::decode_record(&persisted[1]).unwrap();
+        assert_eq!(rec1, b1, "chain.log holds the body that was applied, not the later copy");
+        // a restart replays the log to the same tip
+        let mut replay = ChainTip::new();
+        for r in &persisted {
+            replay.apply(chain_log::decode_record(r).unwrap()).expect("replay applies every persisted record");
+        }
+        assert_eq!(replay.height(), chain.height());
+        assert_eq!(replay.state().roots(), chain.state().roots());
+    }
+
+    /// 2026-10-09 (M0b): a tampered body that arrives FIRST used to leave the follower stuck — it
+    /// failed to apply on every pass and every later copy of the same header was a braid
+    /// "duplicate" and dropped. Now it is evicted, its header is wanted again, the honest copy of
+    /// the same header is accepted, and the block settles. The tampered bytes are never stored again.
+    #[test]
+    fn refused_body_is_evicted_and_the_honest_copy_settles() {
+        let mut builder = ChainTip::new();
+        let g = build_genesis().expect("genesis");
+        builder.apply(g.clone()).expect("apply genesis");
+        let (b1, _) = mint_next_block(&builder, vec![], &[], None, None, None, None).expect("mint");
+        let mut tampered = b1.clone();
+        tampered.transition.mutations.push(StateMutation::SetBalance {
+            wallet: [0xEF; 32], token: sigil_state::NATIVE, amount: 1_000_000_000_000_000,
+        });
+        let h1 = b1.hash();
+        assert_eq!(tampered.hash(), h1);
+
+        let mut chain = ChainTip::new();
+        let mut braid = Braid::new(BraidConfig { final_depth: 0, ..BraidConfig::default() });
+        let mut dag_bodies = std::collections::HashMap::new();
+        let mut mint_hash_to_tx_hashes = std::collections::HashMap::new();
+        let send_bridge = sigil_api::send::SendBridge::new();
+        let bridge_bridge = sigil_api::bridge::BridgeBridge::new(None, None);
+        let dex_bridge = sigil_api::dex::DexBridge::new();
+        let usds_bridge = sigil_api::usds::UsdsBridge::new();
+        let usds_polygon_bridge = sigil_api::usds_bridge::UsdsBridgeBridge::new(None, None);
+        let shielded_bridge = sigil_api::shielded::ShieldedBridge::new();
+        let mut persisted: Vec<Vec<u8>> = Vec::new();
+        let mut drain = |braid: &mut Braid, bodies: &mut std::collections::HashMap<_, _>, chain: &mut ChainTip, persisted: &mut Vec<Vec<u8>>| {
+            dag_drain_apply(braid, bodies, chain, &mut |braw| persisted.push(braw.to_vec()),
+                &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                &shielded_bridge, &mut mint_hash_to_tx_hashes)
+        };
+
+        braid.insert(BlockView::from(&g.header));
+        dag_store_body(&mut dag_bodies, 32, g.hash(), g.clone());
+        // the TAMPERED copy arrives first and is the one stored
+        assert!(matches!(braid.insert(BlockView::from(&tampered.header)), InsertOutcome::Inserted { .. }));
+        dag_store_body(&mut dag_bodies, 32, h1, tampered.clone());
+        let (a, _, f) = drain(&mut braid, &mut dag_bodies, &mut chain, &mut persisted);
+        assert_eq!((a, f), (1, 1), "genesis applied, the tampered b1 refused");
+        assert_eq!(chain.height(), 1);
+        assert!(!dag_bodies.contains_key(&h1), "the refused body is evicted");
+        assert!(crate::dag::wanted_bodies().contains(&h1), "its header is wanted again");
+
+        // the same tampered bytes again: not stored
+        assert!(matches!(braid.insert(BlockView::from(&tampered.header)), InsertOutcome::Duplicate));
+        assert!(!crate::dag::restore_body(&mut dag_bodies, 32, h1, tampered.clone()));
+        // the honest copy of the same header: stored, and no longer wanted
+        assert!(crate::dag::restore_body(&mut dag_bodies, 32, h1, b1.clone()));
+        assert!(!crate::dag::wanted_bodies().contains(&h1));
+
+        let (a, _, f) = drain(&mut braid, &mut dag_bodies, &mut chain, &mut persisted);
+        assert_eq!((a, f), (1, 0), "the honest b1 settles");
+        assert_eq!(chain.height(), 2);
+        assert_eq!(chain_log::decode_record(persisted.last().unwrap()).unwrap(), b1);
+        let mut clean = ChainTip::new();
+        clean.apply(g).unwrap();
+        clean.apply(b1).unwrap();
+        assert_eq!(chain.state().roots(), clean.state().roots());
+        assert_eq!(chain.state().balance_of(&[0xEF; 32], &sigil_state::NATIVE), 0);
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! ## The money route, end to end
 //!
 //! 1. Every block reward is already split by [`crate::split_mining_reward`]:
-//!    500 bps dev fee → master, 120 bps → commons, 10 bps → operator pool.
+//!    500 bps dev fee → master, 120 bps → commons (no operator pool since
+//!    2026-10-09 — it was never paid out).
 //! 2. From [`WELFARE_FROM_HEIGHT`], [`split_mining_reward_at`] raises the
 //!    gross dev fee to [`MASTER_MINING_FEE_BPS_V2`] (750 bps, operator
 //!    directive 2026-08-31) and routes [`WELFARE_MINING_FEE_BPS`] (200 bps)
@@ -100,10 +101,10 @@ pub fn welfare_active(height: u64) -> bool {
 /// (200 bps) of it flows to the welfare treasury — master nets 550 bps.
 ///
 /// Invariants (tested):
-/// - `operator_share` and `commons_share` are unchanged by activation.
+/// - `commons_share` is unchanged by activation.
 /// - The validator take drops by exactly the fee raise (250 bps) at
 ///   activation — deliberate, see [`MASTER_MINING_FEE_BPS_V2`].
-/// - Exact conservation: the four shares plus `welfare_share` always sum to
+/// - Exact conservation: the three shares plus `welfare_share` always sum to
 ///   `reward`.
 pub fn split_mining_reward_at(
     reward: u128,
@@ -123,16 +124,15 @@ pub fn split_mining_reward_at(
         .checked_mul(WELFARE_MINING_FEE_BPS)
         .ok_or(BankError::MathOverflow)?
         / BPS_DENOMINATOR;
-    // Fail LOUD, never silently. These are money splits: if the dev/operator/
+    // Fail LOUD, never silently. These are money splits: if the dev/
     // commons fee bps were ever misconfigured to exceed 100% of the reward, a raw
     // subtraction would underflow u128 into a colossal validator_share — minting
     // supply from nowhere. checked_sub turns that into a clean MathOverflow the
     // coinbase path rejects, in release too (unlike the old debug-only assert).
-    // Today the taken shares sum to 880 bps (750 + 10 + 120) and 750 ≥ 200, so
+    // Today the taken shares sum to 870 bps (750 + 120) and 750 ≥ 200, so
     // neither of these ever fires — this is a guard against a future bps change.
     split.validator_share = reward
         .checked_sub(master_gross)
-        .and_then(|v| v.checked_sub(split.operator_share))
         .and_then(|v| v.checked_sub(split.commons_share))
         .ok_or(BankError::MathOverflow)?;
     split.master_share = master_gross
@@ -193,8 +193,7 @@ mod tests {
         let reward = 1_000_000u128;
         let legacy = split_mining_reward(reward, MASTER).unwrap();
         let at = split_mining_reward_at(reward, MASTER, WELFARE_FROM_HEIGHT).unwrap();
-        // Operator pool and commons untouched by activation.
-        assert_eq!(at.operator_share, legacy.operator_share);
+        // Commons untouched by activation.
         assert_eq!(at.commons_share, legacy.commons_share);
         // Gross dev fee 750 bps: master nets 550, welfare gets 200.
         assert_eq!(at.welfare_share, reward * WELFARE_MINING_FEE_BPS / BPS_DENOMINATOR);
@@ -207,9 +206,9 @@ mod tests {
             legacy.validator_share - at.validator_share,
             reward * (MASTER_MINING_FEE_BPS_V2 - crate::MASTER_MINING_FEE_BPS) / BPS_DENOMINATOR
         );
-        // Exact conservation over all five shares.
+        // Exact conservation over all four shares.
         assert_eq!(
-            at.validator_share + at.master_share + at.operator_share + at.commons_share + at.welfare_share,
+            at.validator_share + at.master_share + at.commons_share + at.welfare_share,
             reward
         );
     }
@@ -227,7 +226,7 @@ mod tests {
         for reward in [1u128, 7, 99, 199, 10_001, 123_456_789, u64::MAX as u128] {
             let at = split_mining_reward_at(reward, MASTER, WELFARE_FROM_HEIGHT).unwrap();
             assert_eq!(
-                at.validator_share + at.master_share + at.operator_share + at.commons_share + at.welfare_share,
+                at.validator_share + at.master_share + at.commons_share + at.welfare_share,
                 reward,
                 "conservation failed at reward={reward}"
             );

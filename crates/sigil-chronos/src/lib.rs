@@ -129,14 +129,6 @@ pub mod snap {
 /// never alias user-tx mutations within a block.
 pub const PRODUCER_WALLET: WalletId = [0xAAu8; 32];
 
-/// The node-operator reward pool wallet — accrues the 0.1%
-/// [`sigil_bank::OPERATOR_NODE_FEE_BPS`] skim each block. Disjoint from the
-/// master (`0x99`) and producer (`0xAA`). Periodically distributed (off this
-/// path) to registered stable operators — full *and* lightweight/verify-only —
-/// weighted by uptime/liveness. Paying operators (esp. verifiers) is the
-/// economic half of "more verifiers = more secure".
-pub const OPERATOR_POOL_WALLET: WalletId = [0x98u8; 32];
-
 /// The aeresborger commons treasury wallet — accrues the 1.2%
 /// [`sigil_bank::COMMONS_MINING_FEE_BPS`] tithe each block. Same address as
 /// sigil-rpc's `COMMONS_WALLET` (`0xC0`) so the sim and the live rpcd agree
@@ -147,11 +139,10 @@ pub const COMMONS_WALLET: WalletId = [0xC0u8; 32];
 
 /// Per-block coinbase reward (native SIGIL base units). Prototype of the
 /// mining reward the real flux-mining/flux-vdf path will award. Split three
-/// ways via [`sigil_bank::split_mining_reward`]: producer (≈94.9%), master/
-/// dev-fee (5%, [`sigil_bank::MASTER_MINING_FEE_BPS`]), and the node-operator
-/// pool (0.1%, [`sigil_bank::OPERATOR_NODE_FEE_BPS`]). Denominated so the
-/// 0.1% tier is representable in integer base units (50_000 = 50.000 SIGIL at
-/// milli-precision → operator skim = 50/block).
+/// ways via [`sigil_bank::split_mining_reward`]: producer (93.8%), master/
+/// dev-fee (5%, [`sigil_bank::MASTER_MINING_FEE_BPS`]) and the commons (1.2%,
+/// [`sigil_bank::COMMONS_MINING_FEE_BPS`]). There is no operator pool since
+/// 2026-10-09 (the node never paid it; the sim used to).
 pub const BLOCK_REWARD: u128 = 50_000;
 
 /// One full block — header (what gossips) + transition (the mutations that
@@ -527,7 +518,7 @@ impl SigilSimNode {
     fn build_coinbase(&self, height: u64) -> sigil_tx::ApplyResult {
         let master = self.state.master_wallet();
         let split = sigil_bank::split_mining_reward(BLOCK_REWARD, master)
-            .unwrap_or(sigil_bank::MiningSplit { validator_share: BLOCK_REWARD, master_share: 0, operator_share: 0, commons_share: 0, welfare_share: 0 });
+            .unwrap_or(sigil_bank::MiningSplit { validator_share: BLOCK_REWARD, master_share: 0, commons_share: 0, welfare_share: 0 });
 
         let mut mutations = Vec::new();
         let mut events = Vec::new();
@@ -555,19 +546,6 @@ impl SigilSimNode {
                 });
                 events.push(SigilEvent::MintReward { miner: m, height, amount: split.master_share });
             }
-        }
-
-        // Node-operator pool skim (0.1%) — funds stable operators incl.
-        // lightweight verify-only nodes. Committed in the wallet root like any
-        // balance (NOT a side-ledger — the QUG emission-uncommitted lesson).
-        if split.operator_share > 0 {
-            let op_bal = self.state.balance_of(&OPERATOR_POOL_WALLET, &NATIVE);
-            mutations.push(StateMutation::SetBalance {
-                wallet: OPERATOR_POOL_WALLET,
-                token: NATIVE,
-                amount: op_bal.saturating_add(split.operator_share),
-            });
-            events.push(SigilEvent::MintReward { miner: OPERATOR_POOL_WALLET, height, amount: split.operator_share });
         }
 
         // Aeresborger commons tithe (1.2%) — LANE-W fix: this share was
@@ -823,8 +801,8 @@ mod tests {
         // Single producer drains N sends → N blocks → N coinbases. Each
         // coinbase mints BLOCK_REWARD=50_000 split THREE ways:
         //   master   = floor(50000 * 500/10000) = 2500  (5%   dev-fee)
-        //   operator = floor(50000 *  10/10000) =   50  (0.1% node-operator pool)
-        //   producer = 50000 - 2500 - 50        = 47450 (the remainder)
+        //   commons  = floor(50000 * 120/10000) =  600  (1.2% commons)
+        //   producer = 50000 - 2500 - 600       = 46900 (the remainder)
         // After N blocks each wallet holds exactly N× its per-block share
         // (genesis funded none of the three mining wallets).
         let g = soak_genesis();
@@ -846,18 +824,12 @@ mod tests {
 
         let master = wallet(0x99);
         let expected_master = (n as u128) * 2500;   // floor(50000 * 5%)   per block
-        let expected_operator = (n as u128) * 50;   // floor(50000 * 0.1%) per block
         let expected_commons = (n as u128) * 600;  // floor(50000 * 1.2%) per block
-        let expected_producer = (n as u128) * 46850; // remainder (93.7%)
+        let expected_producer = (n as u128) * 46900; // remainder (93.8%)
         assert_eq!(
             node.balance_of(&master, &NATIVE),
             expected_master,
             "master must accrue 5% of every block reward"
-        );
-        assert_eq!(
-            node.balance_of(&OPERATOR_POOL_WALLET, &NATIVE),
-            expected_operator,
-            "node-operator pool must accrue 0.1% of every block reward"
         );
         assert_eq!(
             node.balance_of(&COMMONS_WALLET, &NATIVE),
@@ -867,7 +839,7 @@ mod tests {
         assert_eq!(
             node.balance_of(&PRODUCER_WALLET, &NATIVE),
             expected_producer,
-            "producer keeps the remainder (93.7%)"
+            "producer keeps the remainder (93.8%)"
         );
     }
 

@@ -114,7 +114,6 @@ const _: () = assert!(param_u128("welfare_from_height") == welfare::WELFARE_FROM
 const _: () = assert!(param_u128("dev_fee_bps") == welfare::MASTER_MINING_FEE_BPS_V2, "charter: dev_fee_bps");
 const _: () = assert!(param_u128("welfare_bps") == welfare::WELFARE_MINING_FEE_BPS, "charter: welfare_bps");
 const _: () = assert!(param_u128("commons_bps") == sigil_bank::COMMONS_MINING_FEE_BPS, "charter: commons_bps");
-const _: () = assert!(param_u128("operator_pool_bps") == sigil_bank::OPERATOR_NODE_FEE_BPS, "charter: operator_pool_bps");
 const _: () = assert!(param_u128("dex_protocol_fee_bps") == sigil_bank::MASTER_SWAP_FEE_BPS, "charter: dex_protocol_fee_bps");
 // The genesis block's zero allocation is checked by a test in sigil-node (it needs the
 // real genesis builder); here we only require the charter to say zero.
@@ -134,7 +133,7 @@ mod tests {
         for key in [
             "decimals", "max_supply_glyphs", "premine_glyphs", "seconds_per_halving",
             "max_reward_per_block_glyphs", "dev_fee_bps_initial", "welfare_from_height",
-            "dev_fee_bps", "welfare_bps", "commons_bps", "operator_pool_bps", "dex_protocol_fee_bps",
+            "dev_fee_bps", "welfare_bps", "commons_bps", "dex_protocol_fee_bps",
         ] {
             let _ = param_u128(key);
         }

@@ -1,7 +1,7 @@
 //! sigil-emission-chronos — the emission controller, stress-tested through chronos.
 //!
 //! Randomized · multi-node · superhero-recovery · storage-scaled. Proves the
-//! QUG-fix: emission (coinbase: producer 94.9% / master 5% / operator-pool 0.1%)
+//! QUG-fix: emission (coinbase: producer 93.8% / master 5% / commons 1.2%)
 //! is COMMITTED IN THE WALLET ROOT, so a killed node, rebuilt from the chain,
 //! recovers BYTE-IDENTICAL — emission state cannot drift.
 //!
@@ -22,7 +22,7 @@ use std::time::Instant;
 use flux_chronos::NodeId;
 use sigil_chronos::{
     demo_genesis, sign_dummy, ApplyOutcome, Block, SigilSimNode, BLOCK_REWARD,
-    OPERATOR_POOL_WALLET, PRODUCER_WALLET,
+    COMMONS_WALLET, PRODUCER_WALLET,
 };
 use sigil_state::{StateRoots, WalletId};
 use sigil_tip_proof::{TipProof, NETWORK_ID_BYTES};
@@ -114,8 +114,8 @@ fn main() {
 
     let split = sigil_bank::split_mining_reward(BLOCK_REWARD, Some(MASTER)).unwrap();
     println!(
-        "   emission/block: {} → producer {} (94.9%) · master {} (5%) · operator {} (0.1%)\n",
-        BLOCK_REWARD, split.validator_share, split.master_share, split.operator_share
+        "   emission/block: {} → producer {} (93.8%) · master {} (5%) · commons {} (1.2%)\n",
+        BLOCK_REWARD, split.validator_share, split.master_share, split.commons_share
     );
 
     let mut rng = Rng::new(seed);
@@ -230,12 +230,12 @@ fn main() {
     println!("\n═══ PER-NODE REPORT (every node must agree) ═══");
     let report = |name: &str, n: &SigilSimNode| {
         println!(
-            "  {name:<13} H={:<8} roots {} · producer {} · master {} · operator {}",
+            "  {name:<13} H={:<8} roots {} · producer {} · master {} · commons {}",
             n.height(),
             roots_fp(&n.roots()),
             n.balance_of(&PRODUCER_WALLET, &NATIVE),
             n.balance_of(&MASTER, &NATIVE),
-            n.balance_of(&OPERATOR_POOL_WALLET, &NATIVE),
+            n.balance_of(&COMMONS_WALLET, &NATIVE),
         );
     };
     report("producer", &producer);
@@ -249,8 +249,9 @@ fn main() {
 
     let prod_bal = producer.balance_of(&PRODUCER_WALLET, &NATIVE);
     let mast_bal = producer.balance_of(&MASTER, &NATIVE);
-    let oper_bal = producer.balance_of(&OPERATOR_POOL_WALLET, &NATIVE);
-    let minted = prod_bal + mast_bal + oper_bal;
+    // The commons share was minted too but left out of this sum before 2026-10-09.
+    let comm_bal = producer.balance_of(&COMMONS_WALLET, &NATIVE);
+    let minted = prod_bal + mast_bal + comm_bal;
     let expect = produced as u128 * BLOCK_REWARD;
     let conserved = minted == expect;
     let demo_total: u128 = (1..=5u8).map(|i| producer.balance_of(&wallet(i), &NATIVE)).sum();
@@ -265,7 +266,7 @@ fn main() {
     let tip_total = tip_verified + tip_failed;
     println!("  light-sync (NEW)    {tip_verified}/{tip_total} tip-proofs verified · {}µs avg · ~{} bytes/tip   {}",
         tip_us / tip_total.max(1) as u128, tip_bytes / produced.max(1), if tip_failed == 0 { "✓" } else { "✗ FAIL" });
-    println!("  emission committed  {prod_bal} + {mast_bal} + {oper_bal} = {minted}");
+    println!("  emission committed  {prod_bal} + {mast_bal} + {comm_bal} = {minted}");
     println!("  conservation        {minted} == {expect}  {}", if conserved { "✓" } else { "✗ FAIL" });
     println!("  demo-wallet supply  {demo_total}  {}", if demo_total == 5_000_000 { "✓" } else { "✗" });
     println!("  storage archived    {:.3} GB in {} files (peak RAM ~ {} blocks)", bytes as f64 / 1e9, archive_n, CHUNK);

@@ -25,9 +25,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Reference profit a **lightweight node** nets in one academic year, in
-/// micro-SIGIL. A lightweight node earns the operator node-fee share
-/// (`sigil-bank` `OPERATOR_NODE_FEE_BPS`) on the traffic it relays; this is the
-/// modest, passive baseline the student cost is benchmarked against. Tunable
+/// micro-SIGIL. (It was once modelled as the 0.1 % operator node-fee share; that
+/// pool never paid out and was removed 2026-10-09, so this is now just a reference
+/// figure.) This is the modest, passive baseline the student cost is benchmarked against. Tunable
 /// per-network — the default is a deliberately conservative reference chosen so
 /// a minimum-effort student (100 pts/yr × 1000 µSIGIL = 100_000/yr of points)
 /// roughly breaks even against tuition, leaving the graduation bonus as profit.

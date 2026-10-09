@@ -993,9 +993,8 @@ mod tests {
         let mut after = st.clone();
         sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: 1, mutations: muts }, 1).unwrap();
 
-        // 5% dev fee (500 bps) + 1.2% commons (120 bps) + 0.1% operator pool (10 bps,
-        // folded into validator per credit_share's own accounting — no separate
-        // operator wallet here, matching sigil-rpc's model) taken from the winner.
+        // 5% dev fee (500 bps) + 1.2% commons (120 bps) taken from the winner (there is
+        // no operator pool since 2026-10-09; its 0.1 % had always stayed with the winner).
         let winner_bal = after.balance_of(&winner, &NATIVE);
         let master_bal = after.balance_of(&master, &NATIVE);
         let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);

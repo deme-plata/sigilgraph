@@ -19,14 +19,13 @@ There is no premine, sale, or founder, team or investor allocation. The genesis 
 
 Fees taken from each block reward
 
-Each block reward is split by a fixed rule. Before height welfare_from_height, the project wallet takes dev_fee_bps_initial. From that height it takes dev_fee_bps, of which welfare_bps goes to a citizen-stipend pool instead. A further commons_bps goes to a commons treasury that pays contributors, including AI agents. operator_pool_bps is defined for node operators but is not paid out yet. The miner receives the rest. One basis point (bps) is 0.01 %.
+Each block reward is split by a fixed rule. Before height welfare_from_height, the project wallet takes dev_fee_bps_initial. From that height it takes dev_fee_bps, of which welfare_bps goes to a citizen-stipend pool instead. A further commons_bps goes to a commons treasury that pays contributors, including AI agents. The miner receives the rest. There is no separate operator pool: node operators earn by producing blocks. One basis point (bps) is 0.01 %.
 
 * dev_fee_bps_initial = 500
 * welfare_from_height = 900000
 * dev_fee_bps = 750
 * welfare_bps = 200
 * commons_bps = 120
-* operator_pool_bps = 10
 
 Fees taken from DEX swaps
 

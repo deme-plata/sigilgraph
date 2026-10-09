@@ -214,10 +214,18 @@ pub fn dag_drain_apply(
         // Persisted form goes through the ONE chain-log encoder (msgpack+zstd, 4.4x
         // smaller than the JSON this used to write). The P2P wire is unaffected — that
         // still speaks JSON, and is encoded separately at its own call sites.
-        // The bytes already exist for every block that reached here (minted or received);
-        // encode again only on a cache miss — see chain_log::remember_raw.
-        let braw = crate::chain_log::take_raw(&oh)
-            .unwrap_or_else(|| crate::chain_log::encode_record(body).unwrap_or_default());
+        // The bytes usually exist already for every block that reached here (minted or received),
+        // but they are only reused when they ARE this body. 2026-10-09 (measured,
+        // `tampered_copy_never_reaches_chain_log`): the cache is keyed by block hash and filled per
+        // RECEIVED copy, before the braid's duplicate check, and the hash covers only the header. A
+        // tampered copy arriving after the honest one overwrote the cached bytes; the honest body was
+        // applied and the tampered bytes were written to chain.log, so a restart stopped at that
+        // height. Persist exactly what is applied: the cached bytes if they decode to this body,
+        // otherwise this body freshly encoded.
+        let braw = match crate::chain_log::take_raw(&oh) {
+            Some(raw) if crate::chain_log::decode_record(&raw).as_ref() == Some(body) => raw,
+            _ => crate::chain_log::encode_record(body).unwrap_or_default(),
+        };
         match chain.apply(body.clone()) {
             Ok(()) => {
                 persist(&braw);
@@ -239,6 +247,7 @@ pub fn dag_drain_apply(
             Err(e) => {
                 failed += 1;
                 eprintln!("🔴 braid spine apply FAILED at H={} — {}", body.header.height, e);
+                refuse_body(dag_bodies, oh);
             }
         }
     }
@@ -327,6 +336,88 @@ pub fn dag_store_body(
         }
     }
     dag_bodies.insert(hash, block);
+}
+
+// ── refused bodies (2026-10-09, M0b) ───────────────────────────────────────────────────
+//
+// The block hash covers only the header. A body that fails `ChainTip::apply` therefore says
+// nothing about the header: a peer may have altered the body in transit (measured: same hash,
+// refused with STATE DIVERGENCE). Before this, the refused body stayed in `dag_bodies`, every
+// later copy of the same header was a braid "duplicate" and dropped, and the node retried the
+// same bad body forever. Now the body is evicted, its fingerprint remembered so those exact
+// bytes are never stored again, and the header is WANTED: the main loop asks peers for it by
+// hash, and `restore_body` accepts a different body for it. The header itself is never
+// blacklisted (a malicious peer must not be able to block the honest body).
+
+/// Most headers wanted again at once, and most refused fingerprints kept.
+const REFUSED_CAP: usize = 4096;
+
+#[derive(Default)]
+struct Refused {
+    /// header hash -> fingerprints of bodies refused for it
+    bodies: HashMap<BlockHash, Vec<[u8; 32]>>,
+    /// headers whose body was evicted and not yet replaced
+    wanted: std::collections::BTreeSet<BlockHash>,
+}
+
+static REFUSED: std::sync::Mutex<Option<Refused>> = std::sync::Mutex::new(None);
+
+fn body_fingerprint(b: &Block) -> [u8; 32] {
+    let bytes = crate::chain_log::encode_record(b).unwrap_or_default();
+    *blake3::hash(&bytes).as_bytes()
+}
+
+/// Evict a body that failed to apply, remember it, and mark its header as wanted again.
+pub fn refuse_body(dag_bodies: &mut HashMap<BlockHash, Block>, hash: BlockHash) {
+    let Some(body) = dag_bodies.remove(&hash) else { return };
+    let _ = crate::chain_log::take_raw(&hash);
+    let fp = body_fingerprint(&body);
+    let Ok(mut g) = REFUSED.lock() else { return };
+    let r = g.get_or_insert_with(Refused::default);
+    if r.bodies.len() >= REFUSED_CAP {
+        r.bodies.clear();
+    }
+    let fps = r.bodies.entry(hash).or_default();
+    let first = !fps.contains(&fp);
+    if first {
+        fps.push(fp);
+    }
+    if r.wanted.len() < REFUSED_CAP {
+        r.wanted.insert(hash);
+    }
+    if first {
+        eprintln!(
+            "🧹 refused body for H={} ({}) evicted — fetching the block again by hash (header kept)",
+            body.header.height,
+            hex::encode(&hash[..6])
+        );
+    }
+}
+
+/// Headers whose body was refused and not yet replaced (for the by-hash fetch).
+pub fn wanted_bodies() -> Vec<BlockHash> {
+    REFUSED.lock().ok().and_then(|g| g.as_ref().map(|r| r.wanted.iter().copied().collect())).unwrap_or_default()
+}
+
+/// Offer a body for a header the braid already holds (a "duplicate" gossip copy or by-hash
+/// answer). Stored only if that header is wanted (its earlier body was refused) and this exact
+/// body was not refused before. Returns whether it was stored.
+pub fn restore_body(dag_bodies: &mut HashMap<BlockHash, Block>, cap: usize, hash: BlockHash, block: Block) -> bool {
+    if dag_bodies.contains_key(&hash) {
+        return false;
+    }
+    let fp = body_fingerprint(&block);
+    {
+        let Ok(mut g) = REFUSED.lock() else { return false };
+        let Some(r) = g.as_mut() else { return false };
+        if !r.wanted.contains(&hash) || r.bodies.get(&hash).is_some_and(|f| f.contains(&fp)) {
+            return false;
+        }
+        r.wanted.remove(&hash);
+    }
+    eprintln!("🩹 a different body for wanted H={} stored — it settles if its roots match", block.header.height);
+    dag_store_body(dag_bodies, cap, hash, block);
+    true
 }
 
 /// Bound on `mint_hash_to_tx_hashes` — same order of magnitude as `dag_bodies`'

@@ -317,6 +317,14 @@ mod shield_ops {
     /// fix, and an unbounded loop in a request handler is its own bug.
     const INDEX_SCAN_LIMIT: u64 = 4096;
 
+/// A deposit's opening: the blinding and owner key its commitment is built from, as wire hex.
+/// The node recomputes `cm = compress2(compress2(amount, blinding), pk_shield)` from these and
+/// refuses the deposit unless it matches (2026-10-09).
+fn deposit_opening(account: &ShieldedAccount, index: u64, value: u64) -> Result<(String, String), String> {
+    let note = account.note(index, value).map_err(|e| format!("note build failed at index {index}: {e}"))?;
+    Ok((hex::encode(to_wire(account.blinding(index))), hex::encode(to_wire(note.owner_pk()))))
+}
+
     /// Pick one index per part, starting at `base`, skipping any index whose commitment
     /// the chain has already seen (or that an earlier part in this same call just took).
     ///
@@ -525,10 +533,21 @@ mod shield_ops {
                     .ok()
                     .map(|c| c.0)
             });
+            // 2026-10-09: the node checks every deposit's OPENING at the door (sigil-api
+            // `check_deposit_opening`, live on g2 since 2026-10-09 19:48): the blinding and owner
+            // key `cm` was built from. A deposit without them is refused ("this wallet version
+            // cannot deposit into the private pool…"); one whose opening does not reproduce `cm`
+            // is refused too. Same account + index that produced `cm_hex` in `choose_indices`.
+            let (blinding_hex, pk_shield_hex) = match deposit_opening(&account, this_index, value) {
+                Ok(o) => o,
+                Err(e) => { failure = Some(e); break; }
+            };
             let payload = serde_json::json!({
                 "from": from,
                 "amount": value.to_string(),
                 "cm": cm_hex,
+                "blinding": blinding_hex,
+                "pk_shield": pk_shield_hex,
                 "fee": fee.to_string(),
                 "sig": sig,
                 "req_nonce": req_nonce,
@@ -1098,6 +1117,26 @@ mod shield_ops {
         fn cm_for(index: u64, value: u64) -> String {
             let acct = ShieldedAccount::from_seed(seed());
             hex::encode(to_wire(acct.note(index, value).unwrap().commitment()))
+        }
+
+        /// 2026-10-09: the opening sigil-top now sends with every deposit passes the NODE's own
+        /// door check (`sigil_api::shielded::check_deposit_opening`), and the same opening with a
+        /// different amount does not — so a deposit from this build is neither refused as "old
+        /// wallet" nor as "note does not match".
+        #[cfg(feature = "producer")]
+        #[test]
+        fn deposit_opening_passes_the_node_door_check() {
+            let acct = ShieldedAccount::from_seed(seed());
+            for (idx, value) in [(0u64, 1u64), (7, 1_000), (123, 100_000_000_000), (4095, 10_000_000_000)] {
+                let cm = to_wire(acct.note(idx, value).unwrap().commitment());
+                let (b, pk) = super::deposit_opening(&acct, idx, value).unwrap();
+                sigil_api::shielded::check_deposit_opening(value as u128, &cm, Some(&b), Some(&pk))
+                    .expect("the node accepts the opening this build sends");
+                assert!(sigil_api::shielded::check_deposit_opening(value as u128 + 1, &cm, Some(&b), Some(&pk)).is_err(),
+                    "a different amount with the same opening is refused");
+                assert!(sigil_api::shielded::check_deposit_opening(value as u128, &cm, None, None).is_err(),
+                    "no opening is refused (what 10.4.20 sent)");
+            }
         }
 
         struct Scratch(std::path::PathBuf);

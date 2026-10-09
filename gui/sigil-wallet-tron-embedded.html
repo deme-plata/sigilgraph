@@ -9318,6 +9318,12 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       return new Promise(function(res){ setTimeout(function(){ sample().then(function(b){ res([a,b,(Date.now()-t0)/1000]); }); }, 6000); });
     }).then(function(z){
       var A=z[0],B=z[1],tauW=z[2];
+      // 2026-10-09: a failed reading is not a zero. During a producer restart reading A got no answer,
+      // its height fell back to 0 and the gauge printed "512 ÷ 6,140,211/s", "τ 0 s" and "0 active
+      // producers". If either reading lacks a height, or the second has no blocks, measure nothing.
+      var _hA=A&&A[1]&&A[1].data&&A[1].data.height, _hB=B&&B[1]&&B[1].data&&B[1].data.height;
+      var _rb=B&&B[0]&&((B[0].data||B[0]).blocks||[]);
+      if(!(_hA>0)||!(_hB>0)||!(_rb&&_rb.length)) throw new Error('the node did not answer every reading');
       var recentB=(B[0]&&(B[0].data||B[0]))||{}; var all=(recentB.blocks)||[];
       var minersA=(A[1]&&A[1].data)||{}, minersB=(B[1]&&B[1].data)||{};
       var topoA=(A[2]&&A[2].data)||{}, topoB=(B[2]&&B[2].data)||{};
@@ -9430,7 +9436,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   var busy=false;
   function refresh(){ if(busy) return; busy=true;
     document.getElementById('kgChipReg').textContent='measuring…';
-    compute().then(function(m){ render(m); busy=false; }).catch(function(e){ try{ console.error('kgauge v2 refresh failed:', e&&(e.stack||e.message||e)); }catch(_){} busy=false; render(null); }); }
+    compute().then(function(m){ render(m); busy=false; }).catch(function(e){ try{ console.error('kgauge v2 refresh failed:', e&&(e.stack||e.message||e)); }catch(_){} busy=false; render(null); setTimeout(refresh, 15000); }); }
   // First reading shortly after load, then every 90 s while the tab is open.
   setTimeout(refresh, 2500);
   setInterval(function(){ if(!document.hidden) refresh(); }, 90000);

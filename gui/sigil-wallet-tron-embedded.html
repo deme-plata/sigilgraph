@@ -992,7 +992,33 @@ body.view-desktop .desktop{display:flex}
     }
     var spent=_shieldCache.spent;
 
-    for(var e=0;e<=live;e++){ await _scanEpochTail(e, live, seed, M, S, spent); }
+    // 2026-09-24: LIVE EPOCH FIRST, SEALED EPOCHS ONCE. Measured on the live page: the first
+    // landing fetched /v1/shielded/leaves?epoch=0 WITH ciphertexts — 40,262,203 bytes for the
+    // sealed generation — before it would show any balance (the tester saw "—" for 20 s on a
+    // wired box; on a phone it is a minute or a timeout), and the cache lived only in memory,
+    // so every reload paid it again. A sealed epoch is FINAL (append-only, and closed), so
+    // its scan result is persisted per wallet and never refetched. The live epoch (3 MB, then
+    // only its tail) is scanned first and rendered at once; older epochs are opened in the
+    // background, one at a time, and the balance re-renders when they land.
+    var tag=_scanCacheTag(seed, M);
+    for(var pe=0; pe<live; pe++){ if(!_shieldCache.epochs[pe]){ var saved=_loadSealedEpoch(tag, pe); if(saved) _shieldCache.epochs[pe]=saved; } }
+    await _scanEpochTail(live, live, seed, M, S, spent);
+    var sealedTotals={}; try{ (anchor.sealed_epochs||[]).forEach(function(se){ sealedTotals[se.epoch]=se.notes; }); }catch(_){}
+    var pendingSealed=[];
+    for(var se2=0; se2<live; se2++){ var cs=_shieldCache.epochs[se2]; if(!cs || !cs.complete) pendingSealed.push(se2); }
+    if(pendingSealed.length && !_shieldCache.sealedJob){
+      _shieldCache.sealedJob=(async function(){
+        for(var q=0;q<pendingSealed.length;q++){
+          var ep=pendingSealed[q];
+          try{
+            var cc=await _scanEpochTail(ep, live, seed, M, S, spent);
+            var want=sealedTotals[ep];
+            if(cc && (typeof want!=='number' || cc.scanned>=want)){ cc.complete=true; _saveSealedEpoch(tag, ep, cc); }
+          }catch(_){}
+          try{ if(window.refreshShielded) window.refreshShielded(); }catch(_){}
+        }
+      })().finally(function(){ _shieldCache.sealedJob=null; });
+    }
 
     var balance=0n, gross=0n, notes=0, sealed=0;
     for(var ee=0;ee<=live;ee++){
@@ -1013,7 +1039,25 @@ body.view-desktop .desktop{display:flex}
         if(!isSpent){ balance+=n.value; notes++; }
       }
     }
-    return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed };
+    return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed, sealedPending:pendingSealed.length };
+  }
+  // Persisted sealed-epoch scans. Keyed by a hash of the seed (never the seed itself);
+  // a sealed epoch never changes, so the record is final once `complete`.
+  function _scanCacheTag(seed, M){
+    try{ var h=_bytesToHex(M.blake3(new TextEncoder().encode('sigil-scan-cache-v1|'+_seedHexOf(seed)))); return h.slice(0,32); }catch(_){ return null; }
+  }
+  function _loadSealedEpoch(tag, e){
+    if(!tag) return null;
+    try{
+      var j=JSON.parse(localStorage.getItem('sigil-sealed-scan-'+tag+'-'+e)||'null'); if(!j || !j.complete) return null;
+      return { scanned:j.scanned|0, gross:BigInt(j.gross||'0'), complete:true,
+               mine:(j.mine||[]).map(function(n){ return { pos:n.pos|0, value:BigInt(n.value||'0') }; }) };
+    }catch(_){ return null; }
+  }
+  function _saveSealedEpoch(tag, e, c){
+    if(!tag || !c) return;
+    try{ localStorage.setItem('sigil-sealed-scan-'+tag+'-'+e, JSON.stringify({ scanned:c.scanned, gross:String(c.gross), complete:true,
+           mine:c.mine.map(function(n){ return { pos:n.pos, value:String(n.value) }; }) })); }catch(_){}
   }
   // 2026-08-27: exposed so the Activity ledger's shielded observer can reuse the
   // SAME scanner the Shield card uses, rather than a second implementation of
@@ -1050,7 +1094,7 @@ body.view-desktop .desktop{display:flex}
         // Never present a gross figure as a balance: if spends could not be netted,
         // say so. A number that can only go up is wrong in the direction that matters.
         nt.textContent = r.netted
-          ? (r.notes+' note'+(r.notes===1?'':'s')+(r.sealed?(' · '+r.epochs+' epochs'):''))
+          ? (r.notes+' note'+(r.notes===1?'':'s')+(r.sealed?(' · '+r.epochs+' epochs'):'')+(r.sealedPending?(' · checking '+r.sealedPending+' older epoch'+(r.sealedPending===1?'':'s')+' in the background…'):''))
           : '⚠ gross — spends not netted';
         nt.style.color = r.netted ? '' : '#fbbf24';
       }
@@ -1843,8 +1887,16 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.openSend=function(){
     var m=document.getElementById('send-modal'); if(!m) return;
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/GLYPH, f=(raw%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
-      document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
+    // 2026-09-24: "available" is what this wallet can SEND — private notes plus the transparent
+    // balance the unified flow will shield on the way. It used to show the transparent figure
+    // alone, so a wallet whose money was all private (every wallet paid by another wallet, and
+    // every tester's) read "available 0.0000000000 SIGIL" right above a Send button that worked.
+    try{
+      var rawT=0n, rawP=0n; try{ rawT=BigInt(window.SIGIL_RAW||'0'); }catch(_){} try{ rawP=BigInt(window.__sigilShieldRaw||0); }catch(_){}
+      var tot=rawT+rawP, w=tot/GLYPH, f=(tot%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
+      document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f;
+      window.__sendAvailBreakdown = 'private '+glyphStr(rawP.toString())+' · transparent '+glyphStr(rawT.toString())+' SIGIL';
+    }catch(e){}
     sendStatus(''); checkStatus(''); abRender(); m.style.display='flex';
     // ── unified flow reset (2026-08-26) — start clean, mirror the balance, and put
     // the cursor on the RECIPIENT box, because that is now question ① not question ②.
@@ -1856,7 +1908,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var ac=document.getElementById('uniAddrChip'); if(ac) ac.textContent='';
       uniGlow('uniAddr',null); uniGlow('uniAmt',null); uniMsg('');
       var st=document.getElementById('uniSteps'); if(st) st.style.display='none';
-      var av=document.getElementById('uniAvail'); if(av) av.textContent='';
+      var av=document.getElementById('uniAvail'); if(av) av.textContent=window.__sendAvailBreakdown||'';
       // advance to the NEXT secret on every open, so it's a new one each time
       uniNextSecret();
       // idempotent listener wiring (openSend can run many times)
@@ -2952,7 +3004,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{ var r=await fetch('/v1/finality/certificate',{cache:'no-store'}); var j=await r.json(); var c=j&&j.certificate; if(c&&c.height) return Number(c.height); }catch(_){}
     return 0;
   }
-  async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
+  async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr, cmOuts){
     if(!txid) return;
     var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0, dsUntil=0;
     // 2026-09-12: PUSH, not poll. /v1/transactions/:hash/wait holds the request open and
@@ -2977,9 +3029,29 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         try{ var tj=await fetch('/v1/transactions/'+txid,{cache:'no-store'}).then(function(r){return r.json();});
              var d=(tj&&tj.data)||{}; st=d.status||null; reason=d.reason||''; }catch(_){}
       }
-      // The nullifier set stays the ground truth; one read per wake is cheap.
-      try{ var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
-           if(nl&&nl.nullifiers) seen=nl.nullifiers.map(function(h){return String(h).toLowerCase();}).indexOf(nf)>=0; }catch(_){}
+      // 2026-09-24: the chain is the ground truth, and the cheapest unforgeable witness is OUR
+      // OWN OUTPUT COMMITMENT — the change note (or the payee's note) this very spend created.
+      // It exists on chain if and only if this spend applied; no other transaction can mint it.
+      // The old check compared the RAW nullifier against the chain's EPOCH-SCOPED set, so it
+      // never matched after the 2026-09-19 rotation. Measured live today: a payment applied
+      // (change note at leaf 2281), the braid re-offered it, three refusals, and /wait said
+      // "rejected: double-spend" — this footer then told the tester "not sent" for money that
+      // had moved. One GET per output per wake.
+      try{
+        var outs=Array.isArray(cmOuts)?cmOuts:[];
+        for(var oi=0; oi<outs.length && !seen; oi++){
+          var hj=await fetch('/v1/shielded/has?cm='+encodeURIComponent(String(outs[oi]).toLowerCase()),{cache:'no-store'}).then(function(r){return r.json();});
+          if(hj&&hj.ok&&hj.present===true) seen=true;
+        }
+      }catch(_){}
+      if(!seen && nf){
+        // Secondary witness: our nullifier, scoped the way consensus stores it.
+        try{ var an=await fetch('/v1/shielded/anchor',{cache:'no-store'}).then(function(r){return r.json();});
+             var ep=(an&&typeof an.epoch==='number')?an.epoch:0;
+             var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
+             if(nl&&nl.nullifiers){ var nset=new Set(nl.nullifiers.map(function(h){return String(h).toLowerCase();}));
+               seen = nset.has(nf) || (window.__sigilShield && nset.has(_scopedNullifier(window.__sigilShield, ep, nf))); } }catch(_){}
+      }
       unknowns=(st==='unknown')?unknowns+1:0;
       // 2026-09-25 rocky-help-0925: a "double-spend" verdict on OUR tx is, today, most often the braid
       // re-offering a payment that ALREADY APPLIED (node journal: "evicted after 3 permanent refusals"),
@@ -2990,10 +3062,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         if(!dsUntil){ dsUntil=Date.now()+5*60*1000; privMsg('⏳ the node reports this input as already spent — checking whether the payment itself landed (up to a few minutes)…', '#fbbf24'); }
         if(Date.now()<dsUntil){ await new Promise(function(r){ setTimeout(r,5000); }); continue; }
       }
-      // A refusal is authoritative (since the 2026-09-08 node fix a 'rejected' is real).
-      // It must beat a seen nullifier: if the note was ALREADY spent by an older
-      // transaction its nullifier is on chain and would read as 'our' success.
-      if(st==='rejected'){
+      // A refusal is authoritative ONLY while our output is not on chain. If our own change
+      // note exists, the spend applied whatever the status endpoint says (the braid can refuse
+      // a re-offered, already-applied tx — see above). The old "must beat a seen nullifier"
+      // worry (a note spent EARLIER by someone with the same seed) cannot fool the commitment
+      // check: an earlier spend would not have minted THIS blinding's output.
+      if(st==='rejected' && !seen){
         // 2026-09-25 rocky-help-0925: retire-not-restore — a double-spend verdict means the input IS spent.
         if(/already spent|double.?spend/i.test(reason||'')) privRetire(from, pick, pick&&pick._retireTag, pick&&pick._noteEp, [nf], changeIndex);
         else privRollback(from, pick, changeIndex);
@@ -3002,8 +3076,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         return;
       }
       if(seen || st==='applied'){
-        privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).', '#00e0c6');
-        privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.');
+        var dup = (st==='rejected') ? ' (the node\'s status feed reported a duplicate attempt as refused; the payment itself is on chain)' : '';
+        privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).'+dup, '#00e0c6');
+        privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.'+(dup?'<br>'+dup.trim():''));
         // Phase 3 (2026-09-08): say WHICH certificate it settled under, and check the
         // validator's signature here — the client's own verification, not the node's word.
         sigilCertificateLine().then(function(line){ if(line) privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> '+line); }).catch(function(){});
@@ -3012,7 +3087,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         setTimeout(function(){ if(window.refresh)refresh(); }, 600);
         return;
       }
-      if(st==='rejected' || unknowns>=12){
+      if((st==='rejected' || unknowns>=12) && !seen){
         // 2026-09-25 rocky-help-0925: retire-not-restore — a double-spend verdict means the input IS spent.
         if(/already spent|double.?spend/i.test(reason||'')) privRetire(from, pick, pick&&pick._retireTag, pick&&pick._noteEp, [nf], changeIndex);
         else privRollback(from, pick, changeIndex);
@@ -3461,7 +3536,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.
       try{ showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
-      try{ pick._retireTag=_retireTag; pick._noteEp=noteEp; sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, req.change_index, amtStr); }catch(e){}
+      try{ pick._retireTag=_retireTag; pick._noteEp=noteEp; sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, req.change_index, amtStr, req.cm_outs); }catch(e){}
       return true;
     }catch(e){
       privMsg('✗ network error — node unreachable.', '#ff8a8a');

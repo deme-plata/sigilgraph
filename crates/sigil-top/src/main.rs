@@ -671,6 +671,9 @@ static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLoc
 // Sync-mode persistence + boot_trace extracted to startup_util.rs (god-file split,
 // 2026-09-01). Re-exported so main.rs's unqualified calls are unchanged.
 mod startup_util;
+// 10.4.22: one wallet everywhere — the same recovery phrase as sigilgraph.org and the phone app.
+#[cfg(feature = "shield-register")]
+mod wallet_phrase;
 pub(crate) use startup_util::{boot_trace, persist_sync_mode, read_sync_mode};
 
 /// The [F] → full toast, with the unified-binary consequence spelled out: a full archive
@@ -747,6 +750,10 @@ fn main() {
             if old.exists() { let _ = std::fs::remove_file(&old); }
         }
     }
+    // 10.4.22: Windows has no HOME — make the user's profile folder the home before anything reads it
+    // (keys used to land in C:\root\.flux, readable by every user of the PC). See wallet_phrase.rs.
+    #[cfg(feature = "shield-register")]
+    if argv.first().map(|s| s.as_str()) != Some("--selfcheck") { wallet_phrase::adopt_windows_home(); }
     match argv.first().map(|s| s.as_str()) {
         // v0.25: updater PRE-FLIGHT probe. Print the version and exit 0 — touch NOTHING else
         // (no network, no TUI, no DB, no splash) — so `relaunch_new_binary` can confirm a
@@ -766,6 +773,9 @@ fn main() {
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return; }
+        // 10.4.22: `sigil-top wallet [show | phrase | import | new [--replace]]` — one wallet everywhere.
+        #[cfg(feature = "shield-register")]
+        Some("wallet") => { wallet_phrase::run_cli(&argv[1..]); return; }
         // Windows launch-at-login control: `sigil-top autostart on|off|status`. The TUI also
         // exposes this via the tray's "Start at login" checkbox.
         Some("autostart") => {
@@ -1388,6 +1398,9 @@ fn main() {
     // DEFAULT — the custom ratatui dashboard (Quillon-graph-node styled, multi-panel).
     // ratatui owns all box-drawing + layout, so alignment can never regress.
     let _ = cfg.tui; // --tui kept as an explicit alias; it's the default now
+    // 10.4.22: no wallet yet? ask (use my sigilgraph.org / phone wallet, or make one) before the TUI.
+    #[cfg(feature = "shield-register")]
+    wallet_phrase::first_run_choice();
     boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
         boot_trace(&format!("run_tui returned Err: {e}"));

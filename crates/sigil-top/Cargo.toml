@@ -141,6 +141,8 @@ sigil-shield = { path = "../sigil-shield", optional = true }
 # Part of `shield-register`, since that is the feature that publishes the key.
 flux-sqisign = { path = "../../../flux/crates/flux-sqisign", optional = true }
 sha3 = { workspace = true, optional = true }
+# 10.4.22: the browser/phone v2 phrase derivation (Argon2id) — wallet_phrase.rs; same 0.5 as the phone core.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"], optional = true }
 # 2026-08-26 (mine_local_api.rs's native Shield/PrivateSend fast path): sigil-shield's
 # public API (ShieldedAccount::blinding/note/public_key, Note::commitment, build_spend's
 # out_preimages, note_cipher's NotePlaintext) is typed in terms of
@@ -208,7 +210,7 @@ sqisign = []
 # the much heavier sigil-node/DagKnight graph) so a build that only needs this stays
 # comparatively light; still toggleable if build time ever matters more than this
 # being on by default: `--no-default-features --features gpu`.
-shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign"]
+shield-register = ["dep:sigil-shield", "dep:sha3", "dep:argon2", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign"]
 # v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
 # Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
 # dependency block above for why each crate is here.

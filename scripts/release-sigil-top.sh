@@ -124,8 +124,11 @@ echo "▸ 2/7 build linux + windows (release, PARALLEL — windows in $WIN_TARGE
 # was already on by default in the plain build. Do NOT re-add a third build
 # step for this — it was tried and is wasted compute, not a fix.
 T_BUILD=$SECONDS
-LLOG="/home/orobit/tmp/release-${VER}-build-linux.log"
-WLOG="/home/orobit/tmp/release-${VER}-build-windows.log"
+# build-only runs get their own log names, so a warm-up never overwrites a real release's build log
+# (the first warm-up on 2026-10-09 overwrote v10.4.20's)
+LOGP="/home/orobit/tmp/release-${VER}"; [ "$BUILD_ONLY" = "1" ] && LOGP="/home/orobit/tmp/warm-${VER}"
+LLOG="$LOGP-build-linux.log"
+WLOG="$LOGP-build-windows.log"
 "$FLUXC" build --release -p sigil-top > "$LLOG" 2>&1 &
 LPID=$!
 CARGO_TARGET_DIR="$WIN_TARGET_DIR" "$FLUXC" build --release -p sigil-top --target x86_64-pc-windows-gnu > "$WLOG" 2>&1 &
@@ -139,7 +142,7 @@ WPID=$!
 # skips it explicitly, and the manifest then honestly omits the key.
 ZCC="/home/storage/tools/zig/zcc-aarch64-musl"
 ARM_TARGET_DIR="${ARM_TARGET_DIR:-/home/storage/sigil-scratch/target-aarch64-musl}"
-ALOG="/home/orobit/tmp/release-${VER}-build-arm64.log"
+ALOG="$LOGP-build-arm64.log"
 WANT_ARM=0
 if [ "${SIGIL_RELEASE_ARM64:-1}" != "0" ] && [ -x "$ZCC" ]; then
   WANT_ARM=1

@@ -6545,7 +6545,12 @@ function copyReceive(){ var a=window.__rcvCode||_activeAddr(); if(a&&navigator.c
 function openMine(){ var a=_activeAddr(); if(!a)return; document.getElementById('mineCmd').textContent='sigil-top mine-rig '+a; document.getElementById('mine-modal').style.display='flex'; }
 function copyMineCmd(){ var t=document.getElementById('mineCmd').textContent; if(t&&navigator.clipboard){ navigator.clipboard.writeText(t); var b=document.getElementById('mineCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
 function openSettings(){ var el=document.getElementById('setAddr'); var a=_activeAddr(); if(el)el.textContent=a?(a.slice(0,10)+'…'+a.slice(-8)):''; document.getElementById('settings-modal').style.display='flex'; }
-function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace('enter-sigil.html'); }
+function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace(_sigilIsLocalW() ? 'https://sigilgraph.org/' : 'enter-sigil.html'); }
+// 10.4.23 (Viktor 2026-10-10: "when logging out it should go back to sigilgraph.org"): in sigil-top's [W]
+// (localhost:9800) the wallet is sigil-top's own (10.4.22, one wallet everywhere), so the local login page
+// has nothing to offer there — Log out and "New wallet" lead to sigilgraph.org instead.
+function _sigilIsLocalW(){ return /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname); }
+(function(){ if(!_sigilIsLocalW()) return; var fix=function(){ document.querySelectorAll('a[href="enter-sigil.html"]').forEach(function(a){ a.href='https://sigilgraph.org/enter-sigil.html'; }); }; if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', fix); else fix(); })();
 function showAssets(){ if(window.showDash)showDash(); var t=document.body.classList.contains('view-desktop')?'dassets':'passets'; var el=document.getElementById(t); if(el)el.scrollIntoView({behavior:'smooth',block:'center'}); }
 ['receive-modal','mine-modal','settings-modal'].forEach(function(id){ var m=document.getElementById(id); if(m)m.addEventListener('click',function(e){ if(e.target===m) closeModal(id); }); });
 window.addEventListener('keydown',function(e){ if(e.key==='Escape'){ closeModal('receive-modal'); closeModal('mine-modal'); closeModal('settings-modal'); } });

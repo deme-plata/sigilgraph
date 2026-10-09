@@ -55,7 +55,8 @@ done
 
 export SIGIL_RELEASE_REPO="$WT"
 # Capped so the live nodes are never starved (CLAUDE.md compile rule); three LTO links run in parallel.
-RUN=(systemd-run --scope -q -p MemoryMax=20G -p CPUQuota=1000% nice -n10 ionice -c2 -n7)
+# 24 of 48 cores (Viktor, 2026-10-09; was 10). nice 10 keeps the nodes and miners ahead of it.
+RUN=(systemd-run --scope -q -p MemoryMax=20G -p CPUQuota=2400% nice -n10 ionice -c2 -n7)
 
 if [ "$MODE" = warm ]; then
   # An older commit's release script has no build-only mode and would PUBLISH. Refuse instead.

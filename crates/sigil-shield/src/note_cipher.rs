@@ -237,6 +237,74 @@ impl NotePlaintext {
     }
 }
 
+/// v7 (2026-10-12): the 256-bit note's envelope — `SIGILNT7 ‖ value(8) ‖ blinding(32, four
+/// LE limbs) ‖ memo_len:u16 ‖ memo[512]`, 562 bytes, always full width like v2. Same X25519
+/// sealing as v1/v2, so one delivery key serves both generations; the magic tells a
+/// wallet trial-decrypting a mixed pool which opener to run.
+const NOTE_MAGIC_V7: &[u8; 8] = b"SIGILNT7";
+pub const NOTE_PLAINTEXT_V7_LEN: usize = 8 + 8 + 32 + 2 + MEMO_LEN;
+
+#[derive(Clone)]
+pub struct NotePlaintextV7 {
+    pub value: u64,
+    pub blinding: crate::note_v7::Digest4,
+    pub memo: Memo,
+}
+
+impl NotePlaintextV7 {
+    pub const fn new(value: u64, blinding: crate::note_v7::Digest4) -> Self {
+        Self { value, blinding, memo: Memo::empty() }
+    }
+    pub fn with_memo(mut self, text: &str) -> Result<Self, CipherError> {
+        self.memo = Memo::from_text(text)?;
+        Ok(self)
+    }
+    fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(NOTE_PLAINTEXT_V7_LEN);
+        v.extend_from_slice(NOTE_MAGIC_V7);
+        v.extend_from_slice(&self.value.to_le_bytes());
+        v.extend_from_slice(&self.blinding.to_wire());
+        v.extend_from_slice(&self.memo.len.to_le_bytes());
+        v.extend_from_slice(&self.memo.bytes);
+        debug_assert_eq!(v.len(), NOTE_PLAINTEXT_V7_LEN);
+        v
+    }
+    fn decode(b: &[u8]) -> Result<Self, CipherError> {
+        if b.len() != NOTE_PLAINTEXT_V7_LEN || &b[..8] != NOTE_MAGIC_V7 {
+            return Err(CipherError::MalformedPlaintext);
+        }
+        let mut v = [0u8; 8];
+        v.copy_from_slice(&b[8..16]);
+        let mut w = [0u8; 32];
+        w.copy_from_slice(&b[16..48]);
+        // strict: a non-canonical limb would be a second spelling of one commitment
+        let blinding = crate::note_v7::Digest4::from_wire(&w).map_err(|_| CipherError::MalformedPlaintext)?;
+        let len = u16::from_le_bytes([b[48], b[49]]) as usize;
+        if len > MEMO_LEN {
+            return Err(CipherError::MalformedPlaintext);
+        }
+        let mut bytes = [0u8; MEMO_LEN];
+        bytes.copy_from_slice(&b[50..50 + MEMO_LEN]);
+        Ok(Self { value: u64::from_le_bytes(v), blinding, memo: Memo { len: len as u16, bytes } })
+    }
+}
+
+/// Seal a v7 note to a delivery key (`pk_enc`, hex X25519 — the same key a v1 address carries).
+pub fn seal_note_v7(plaintext: &NotePlaintextV7, pk_enc_hex: &str) -> Result<NoteCiphertext, CipherError> {
+    let pk = flux_swarm_secret::parse_pubkey_hex(pk_enc_hex).map_err(|e| CipherError::BadEncKey(e.to_string()))?;
+    let env = flux_swarm_secret::seal(&plaintext.encode(), &pk);
+    let json = serde_json::to_string(&env).map_err(|_| CipherError::MalformedPlaintext)?;
+    Ok(NoteCiphertext(json))
+}
+
+/// Try to open a v7 ciphertext with our identity. `NotForUs` for anything not ours, and
+/// `MalformedPlaintext` for a v1/v2 envelope that IS ours (so a scanner can fall back).
+pub fn try_open_note_v7(ct: &NoteCiphertext, id: &flux_swarm_secret::SecretIdentity) -> Result<NotePlaintextV7, CipherError> {
+    let env: flux_swarm_secret::SealedEnvelope = serde_json::from_str(&ct.0).map_err(|_| CipherError::NotForUs)?;
+    let pt = flux_swarm_secret::open(&env, id).map_err(|_| CipherError::NotForUs)?;
+    NotePlaintextV7::decode(&pt)
+}
+
 /// A published, opaque note ciphertext. Serialized as the sealed envelope's JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteCiphertext(pub String);

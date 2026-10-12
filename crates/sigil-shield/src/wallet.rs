@@ -54,7 +54,7 @@ fn field_from_bytes(b: &[u8; 32]) -> BaseElement {
     BaseElement::new(u64::from_le_bytes(lo) % 0xFFFF_FFFF_0000_0001)
 }
 
-fn derive(seed: &[u8; 32], domain: &str, index: u64) -> BaseElement {
+pub(crate) fn derive(seed: &[u8; 32], domain: &str, index: u64) -> BaseElement {
     let mut h = blake3::Hasher::new();
     h.update(b"sigil-shielded-wallet-v1");
     h.update(domain.as_bytes());

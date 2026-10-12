@@ -65,6 +65,8 @@ pub mod spend_full_v7;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;
+/// v7 (256-bit) wallet: keys, note store, deposits, scanning, spend building.
+pub mod wallet_v7;
 /// Choosing WHICH note to spend, and what to do when no single note is big enough.
 /// `build_spend` takes a position and never helped pick it; this is that missing half.
 pub mod payment;

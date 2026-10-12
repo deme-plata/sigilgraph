@@ -228,6 +228,10 @@ pub enum ShieldedSubmitError {
     /// The opening does not reproduce `cm`: the note is not worth `amount` (or is not owned
     /// by `pk_shield`).
     DepositOpeningMismatch,
+    /// A 64-bit-format deposit after the pool opened its 256-bit (v7) generation. Consensus
+    /// refuses it too (`sigil_state::shielded::ShieldedError::V1DepositsClosed`); the door
+    /// says so immediately so the wallet is not left waiting on a rejection.
+    V1DepositsClosed,
 }
 
 /// Whether transparent → shielded deposits are paused by the operator. Opt-in brake:
@@ -252,6 +256,15 @@ pub fn check_deposit_opening(
     let (Some(b), Some(pk)) = (blinding_hex, pk_hex) else {
         return Err(ShieldedSubmitError::DepositOpeningMissing);
     };
+    // v7 (2026-10-12): a 256-bit commitment carries a 256-bit blinding and owner key, and
+    // opens as `merge(H(DOM_VAL ‖ amount ‖ blinding), pk)`. The shape of `cm` says which
+    // format the depositor used — the same rule consensus applies (`is_v1_shaped`).
+    if !sigil_state::shielded::is_v1_shaped(cm) {
+        let amount = u64::try_from(amount).map_err(|_| ShieldedSubmitError::DepositOpeningMismatch)?;
+        let expected = sigil_shield::note_v7::commitment_from_opening_wire(amount, &hex32(b, "blinding")?, &hex32(pk, "pk_shield")?)
+            .map_err(|_| ShieldedSubmitError::DepositOpeningMismatch)?;
+        return if &expected == cm { Ok(()) } else { Err(ShieldedSubmitError::DepositOpeningMismatch) };
+    }
     let amount = u64::try_from(amount)
         .ok()
         .filter(|a| *a < (1u64 << RANGE_BITS))
@@ -331,6 +344,10 @@ impl ShieldedSubmitError {
                 .into(),
             Self::DepositOpeningMismatch => "the deposit's note does not match its amount and \
                  owner key, so it was refused (nothing was queued)"
+                .into(),
+            Self::V1DepositsClosed => "the private pool now uses 256-bit notes; deposits in the \
+                 old format are closed. Update the wallet (nothing was queued, your balance was \
+                 not touched)"
                 .into(),
         }
     }
@@ -450,9 +467,52 @@ pub struct ShieldedBridge {
     /// `remember()`. `None` (the default) publishes nothing, so every existing caller
     /// and test is unaffected; sigil-node wires the node's bus at startup.
     events: Mutex<Option<Arc<crate::events::EventBus>>>,
+    /// What the door needs to know about the pool (2026-10-12, v7): which note generation
+    /// an anchor belongs to, so the proof precheck runs the matching verifier, and whether
+    /// the v7 generation is open, so an old-format deposit is turned away at once. `None`
+    /// (tests, non-consensus callers) behaves exactly as before v7: everything is v1.
+    pool_view: Mutex<Option<Box<dyn PoolView>>>,
+}
+
+/// The door's read-only window onto the settled pool. sigil-node hands in the shared state.
+pub trait PoolView: Send + Sync {
+    fn generation_of_anchor(&self, root: &[u8; 32]) -> Option<sigil_shield::note_v7::PoolGeneration>;
+    fn v7_active(&self) -> bool;
+}
+
+impl PoolView for Arc<std::sync::RwLock<sigil_state::SigilState>> {
+    fn generation_of_anchor(&self, root: &[u8; 32]) -> Option<sigil_shield::note_v7::PoolGeneration> {
+        let g = match self.read() { Ok(g) => g, Err(p) => p.into_inner() };
+        g.shielded().generation_of_anchor(root)
+    }
+    fn v7_active(&self) -> bool {
+        let g = match self.read() { Ok(g) => g, Err(p) => p.into_inner() };
+        g.shielded().v7_active()
+    }
 }
 
 impl ShieldedBridge {
+    /// Give the door its window onto the pool. Called once at node startup.
+    pub fn set_pool_view(&self, view: impl PoolView + 'static) {
+        *self.pool_view.lock().unwrap() = Some(Box::new(view));
+    }
+
+    /// The generation the proof precheck must use for `anchor`. An anchor the view does not
+    /// know (or no view at all) is treated as v1 — today's behaviour — and the chain stays
+    /// the authority on unknown anchors.
+    fn generation_for(&self, anchor: &[u8; 32]) -> sigil_shield::note_v7::PoolGeneration {
+        self.pool_view
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|v| v.generation_of_anchor(anchor))
+            .unwrap_or(sigil_shield::note_v7::PoolGeneration::V1)
+    }
+
+    fn v7_active(&self) -> bool {
+        self.pool_view.lock().unwrap().as_ref().is_some_and(|v| v.v7_active())
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -672,6 +732,12 @@ impl ShieldedBridge {
         blinding: Option<&str>,
         pk_shield: Option<&str>,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
+        // v7 (2026-10-12), before any signature or nonce work: once the pool's 256-bit
+        // generation is open, an old-format deposit can never land (consensus refuses it),
+        // so every entry — the HTTP door, the relay, the opened variant — says so at once.
+        if self.v7_active() && sigil_state::shielded::is_v1_shaped(&hex32(cm, "cm")?) {
+            return Err(ShieldedSubmitError::V1DepositsClosed);
+        }
         if let Some(ct) = note_ciphertext {
             let limit = sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN;
             if ct.len() > limit {
@@ -903,7 +969,10 @@ impl ShieldedBridge {
         cm_outs: &[[u8; 32]],
         proof: &[u8],
     ) -> Result<(), ShieldedSubmitError> {
-        sigil_shield::note_v1::verify_spend_wire_multi(anchor, nfs, public_value, cm_outs, proof)
+        // v7 (2026-10-12): the ANCHOR's generation, read from the settled pool, selects the
+        // verifier family — never the proof's shape. Unknown anchor ⇒ v1, as before.
+        let generation = self.generation_for(anchor);
+        sigil_shield::note_v7::verify_spend_wire_dual(generation, anchor, nfs, public_value, cm_outs, proof)
             .map_err(|e| ShieldedSubmitError::ProofRejected(e.to_string()))
     }
 
@@ -1277,6 +1346,90 @@ pub struct UnshieldRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed window onto the pool, for door tests.
+    struct FixedView(Option<sigil_shield::note_v7::PoolGeneration>, bool);
+    impl PoolView for FixedView {
+        fn generation_of_anchor(&self, _: &[u8; 32]) -> Option<sigil_shield::note_v7::PoolGeneration> { self.0 }
+        fn v7_active(&self) -> bool { self.1 }
+    }
+
+    /// v7 DEPOSIT OPENING: a 256-bit commitment opens with a 256-bit blinding and owner key;
+    /// a wrong amount, blinding or owner is refused; the v1 path is untouched.
+    #[test]
+    fn a_v7_deposit_opening_is_checked_in_v7_form() {
+        use sigil_shield::note_v7::{Digest4, NoteV7};
+        use sigil_shield::spend_full_v7::OutputV7;
+        let owner = NoteV7::new(0, [0; 4], [7, 7, 7, 7]).unwrap().owner_pk();
+        let blinding = Digest4::from_u64s([11, 22, 33, 44]);
+        let out = OutputV7::new(10_000_000_000, [11, 22, 33, 44], owner);
+        let cm = out.commitment().to_wire();
+        assert!(!sigil_state::shielded::is_v1_shaped(&cm));
+        let (b, pk) = (hex::encode(blinding.to_wire()), hex::encode(owner.to_wire()));
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&b), Some(&pk)), Ok(()));
+        assert_eq!(check_deposit_opening(20_000_000_000, &cm, Some(&b), Some(&pk)), Err(ShieldedSubmitError::DepositOpeningMismatch));
+        let other = hex::encode(NoteV7::new(0, [0; 4], [8, 8, 8, 8]).unwrap().owner_pk().to_wire());
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&b), Some(&other)), Err(ShieldedSubmitError::DepositOpeningMismatch));
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, None, Some(&pk)), Err(ShieldedSubmitError::DepositOpeningMissing));
+        // a non-canonical limb in the blinding is a mismatch, never a panic
+        let mut bad = blinding.to_wire();
+        bad[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(check_deposit_opening(10_000_000_000, &cm, Some(&hex::encode(bad)), Some(&pk)), Err(ShieldedSubmitError::DepositOpeningMismatch));
+    }
+
+    /// Once the pool's v7 generation is open, an old-format deposit is refused at the door
+    /// before any signature or opening work; without a pool view (or before activation) the
+    /// same request takes the old path and fails for the old reasons.
+    #[test]
+    fn old_format_deposits_are_refused_at_the_door_once_v7_is_open() {
+        let b = ShieldedBridge::new();
+        let mut v1 = [0u8; 32];
+        v1[..8].copy_from_slice(&42u64.to_le_bytes());
+        let cm = hex::encode(v1);
+        let from = hex::encode([1u8; 32]);
+        let before = b.submit_shield_with_delivery(&from, 1_000, &cm, 0, "00", 1, None);
+        assert!(!matches!(before, Err(ShieldedSubmitError::V1DepositsClosed)), "no view ⇒ v1 behaviour: {before:?}");
+        b.set_pool_view(FixedView(None, true));
+        assert_eq!(
+            b.submit_shield_with_delivery(&from, 1_000, &cm, 0, "00", 2, None),
+            Err(ShieldedSubmitError::V1DepositsClosed)
+        );
+        assert!(ShieldedSubmitError::V1DepositsClosed.message().contains("Update the wallet"));
+    }
+
+    /// THE DOOR ROUTES BY GENERATION: a real v7 spend passes the precheck when the pool says
+    /// its anchor is v7, and is refused when the pool says v1 (or knows nothing) — the proof's
+    /// own shape never decides.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn door_precheck_routes_the_proof_by_the_anchors_generation() {
+        use sigil_shield::note_v7::{padding_leaf, NoteV7, PoolGeneration, PoolTreeV7};
+        use sigil_shield::spend_full_v7::{build_spend_full_v7_trace_seeded_u64, v7_options, OutputV7, SpendFullV7Prover, DEPTH};
+        use sigil_shield::zk_mask::HidingProver;
+        let fee = sigil_state::shielded::SHIELDED_FEE;
+        let note = NoteV7::new(5_000_000, [1, 2, 3, 4], [5, 6, 7, 8]).unwrap();
+        let bob = NoteV7::new(0, [0; 4], [9, 9, 9, 9]).unwrap().owner_pk();
+        let outs = [OutputV7::new(1_000_000, [11, 12, 13, 14], bob), OutputV7::new(5_000_000 - 1_000_000 - fee as u64, [21, 22, 23, 24], note.owner_pk())];
+        let pos = 77usize;
+        let mut leaves = vec![padding_leaf(); 1 << DEPTH];
+        leaves[pos] = note.commitment();
+        let tree = PoolTreeV7::new(leaves).unwrap();
+        let path = tree.path(pos).unwrap();
+        let t = build_spend_full_v7_trace_seeded_u64(&note, &path, fee as u64, &outs, &v7_options(), [3u8; 32]);
+        let proof = SpendFullV7Prover::new(v7_options()).prove_hiding(t).unwrap().to_bytes();
+        let anchor = hex::encode(tree.root().to_wire());
+        let nf = hex::encode(note.nullifier(pos as u64).to_wire());
+        let cms: Vec<String> = outs.iter().map(|o| hex::encode(o.commitment().to_wire())).collect();
+
+        let b = ShieldedBridge::new();
+        let refused = b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof.clone(), &[]);
+        assert!(matches!(refused, Err(ShieldedSubmitError::ProofRejected(_))), "no view ⇒ v1 verifier ⇒ refused: {refused:?}");
+        b.set_pool_view(FixedView(Some(PoolGeneration::V1), true));
+        assert!(matches!(b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof.clone(), &[]), Err(ShieldedSubmitError::ProofRejected(_))));
+        b.set_pool_view(FixedView(Some(PoolGeneration::V7), true));
+        b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof, &[]).expect("a v7 spend passes the door when its anchor is v7");
+    }
+
 
     /// The brake is opt-in: only `SIGIL_SHIELD_DEPOSITS=pause` pauses deposits. Reading
     /// only (never `set_var`), so it cannot race the rest of the suite.

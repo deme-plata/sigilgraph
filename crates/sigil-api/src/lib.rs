@@ -919,6 +919,18 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
         // very different diagnoses — and until now neither was visible.
         "registered": pool.registered_addresses(),
         "value_locked": pool.value_locked().to_string(),
+        // v7 (2026-10-12): the 256-bit generation, once the node has crossed
+        // `sigil_header::V7_POOL_ACTIVATION_HEIGHT`. A v7 wallet proves against THIS anchor
+        // and scans THIS epoch (`/v1/shielded/leaves?epoch=<v7.epoch>`). `v1_live` says
+        // whether the 64-bit epoch still takes spend outputs (it stops taking deposits the
+        // moment v7 opens).
+        "v7": pool.v7().map(|e| serde_json::json!({
+            "epoch": e.epoch(),
+            "anchor": pool.current_root_v7().map(hex::encode),
+            "notes": e.len(),
+            "value_locked": e.value_locked().to_string(),
+        })),
+        "v1_live": pool.v1_live(),
         "ts_ms": now_ms(),
     }))
 }
@@ -996,8 +1008,13 @@ pub async fn shielded_leaves_handler(
     // and the web wallet's scanner asks once a second. Slice the tail instead, and let a
     // prover that only needs commitments skip the ciphertexts entirely
     // (`?ciphertexts=0`: 32 B per note instead of ~650 B — the proof path never reads them).
+    let v7_live = pool.v7().map(|e| e.epoch());
     let (leaves_all, cts_all, anchor): (&[[u8; 32]], &[Option<String>], [u8; 32]) = if want == live {
         (pool.notes(), pool.ciphertexts(), pool.current_root())
+    } else if Some(want) == v7_live {
+        // the live v7 epoch (2026-10-12): not in the archive, numbered epoch+1
+        let e = pool.v7().expect("v7_live");
+        (e.notes(), e.ciphertexts(), pool.current_root_v7().expect("v7 root"))
     } else {
         match pool.archive().get(want as usize) {
             Some(a) => (&a.notes[..], &a.ciphertexts[..], a.root),
@@ -1037,7 +1054,10 @@ pub async fn shielded_leaves_handler(
         // The anchor a spend against THIS epoch must prove membership under. For a sealed
         // epoch it is permanent; for the live one it moves as notes arrive.
         "anchor": hex::encode(anchor),
-        "sealed": want != live,
+        "sealed": want != live && Some(want) != v7_live,
+        "generation": if Some(want) == v7_live { "v7" } else if want == live { "v1" } else {
+            pool.archive().get(want as usize).map_or("v1", |a| if a.generation == sigil_state::shielded::PoolGeneration::V7 { "v7" } else { "v1" })
+        },
         "leaves": leaves.iter().map(hex::encode).collect::<Vec<_>>(),
         "ciphertexts": ciphertexts,
         "capacity": sigil_state::shielded::POOL_CAPACITY,

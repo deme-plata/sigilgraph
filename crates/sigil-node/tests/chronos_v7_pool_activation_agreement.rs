@@ -16,6 +16,10 @@
 //!   5. FOLLOWER ≡ PRODUCER on all five roots; a third ChainTip replays every block and
 //!      re-derives every committed pool root, with v7 active exactly from the gate.
 //!   6. TEETH: the activation block with a flipped pool root is refused by a fresh follower.
+//!   7. v7 END TO END (M5): a 256-bit deposit with its v7 opening goes through the real door
+//!      and lands in the v7 tree; a real v7 STARK spend against the pool's own v7 anchor goes
+//!      through the door (routed by the anchor's generation) and settles — nullifier spent in
+//!      epoch 1, both outputs in the v7 tree, fee out of v7's own value. No wallet involved.
 //!
 //! Run under `--profile release-fast` (the STARK prover needs `debug_assertions` off).
 mod common;
@@ -121,6 +125,60 @@ fn chronos_v7_opens_beside_v1_and_producer_equals_follower_across_the_gate() {
     assert_eq!(h.chain.state().shielded().v7().unwrap().len(), 0, "and nothing in v7");
     for _ in 0..6 { h.tick(); }
 
+    // ── 7. v7 END TO END: deposit with a v7 opening, then a real v7 spend ─────────
+    {
+        use sigil_shield::note_v7::{padding_leaf, Digest4, NoteV7, PoolGeneration, PoolTreeV7};
+        use sigil_shield::spend_full_v7::{build_spend_full_v7_trace_seeded_u64, v7_options, OutputV7, SpendFullV7Prover};
+        use sigil_shield::zk_mask::HidingProver;
+        use sigil_state::shielded::POOL_CAPACITY;
+        // the door reads generations from the settled pool, as sigil-node wires it at startup
+        h.api.shielded.set_pool_view(std::sync::Arc::clone(&h.api.state));
+
+        let amount = 10_000_000u128; // a denomination
+        tick_until(&mut h, 40, "Alice funded for the v7 deposit", |h| h.chain.state().balance_of(&alice_addr, &NATIVE) >= amount);
+        let note = NoteV7::new(amount as u64, [0x1111, 0x2222, 0x3333, 0x4444], [0xA1, 0xA2, 0xA3, 0xA4]).unwrap();
+        let cm = note.commitment().to_wire();
+        let blinding = Digest4(note.blinding).to_wire();
+        let pk = note.owner_pk().to_wire();
+        let nonce = h.ticks + 1_000;
+        let sig = sign_shield(&alice_sk, &hex::encode(alice_addr), amount, &hex::encode(cm), 0, nonce);
+        let v7_before = h.chain.state().shielded().v7().unwrap().len();
+        let dep = h.api.shielded.submit_shield_opened(&hex::encode(alice_addr), amount, &hex::encode(cm), 0, &sig, nonce, None, Some(&hex::encode(blinding)), Some(&hex::encode(pk)))
+            .expect("the door takes a v7 deposit with its opening");
+        tick_until(&mut h, 40, "the v7 deposit lands", |h| matches!(h.status(&dep), Some(TxOutcome::Applied)));
+        let pool = h.chain.state().shielded();
+        assert_eq!(pool.v7().unwrap().len(), v7_before + 1, "the deposit is in the v7 tree");
+        assert_eq!(pool.value_locked_in(PoolGeneration::V7), amount, "counted in v7's own value");
+        assert_eq!(pool.len(), v1_notes_before + 2, "and not in v1");
+        let pos = pool.v7().unwrap().notes().iter().position(|c| *c == cm).expect("our commitment");
+        let v7_root = pool.current_root_v7().unwrap();
+
+        // the prover's view of the v7 epoch = the pool's own leaves, padded
+        let mut leaves: Vec<Digest4> = pool.v7().unwrap().notes().iter().map(|c| Digest4::from_wire(c).unwrap()).collect();
+        leaves.resize(POOL_CAPACITY, padding_leaf());
+        let tree = PoolTreeV7::new(leaves).unwrap();
+        assert_eq!(tree.root().to_wire(), v7_root, "node and prover agree on the v7 anchor");
+        let path = tree.path(pos).unwrap();
+        let bob7 = NoteV7::new(0, [0; 4], [0xB0, 0xB1, 0xB2, 0xB3]).unwrap().owner_pk();
+        let pay = 4_000_000u64;
+        let change = amount as u64 - pay - SHIELDED_FEE as u64;
+        let outs = [OutputV7::new(pay, [0x51, 0x52, 0x53, 0x54], bob7), OutputV7::new(change, [0x61, 0x62, 0x63, 0x64], note.owner_pk())];
+        let trace = build_spend_full_v7_trace_seeded_u64(&note, &path, SHIELDED_FEE as u64, &outs, &v7_options(), [0x77; 32]);
+        let proof = SpendFullV7Prover::new(v7_options()).prove_hiding(trace).expect("prove v7 (hiding)").to_bytes();
+        let nf = note.nullifier(pos as u64).to_wire();
+        let cms: Vec<String> = outs.iter().map(|o| hex::encode(o.commitment().to_wire())).collect();
+        let send = h.api.shielded.submit_shielded_send(&hex::encode(v7_root), &hex::encode(nf), &[], &cms, SHIELDED_FEE, proof, &[])
+            .expect("the door routes a v7 spend to the v7 verifier");
+        tick_until(&mut h, 60, "the v7 spend settles", |h| matches!(h.status(&send), Some(TxOutcome::Applied)) && h.chain.state().shielded().is_spent_in_epoch(1, &nf));
+        let pool = h.chain.state().shielded();
+        assert_eq!(pool.v7().unwrap().len(), v7_before + 3, "both v7 outputs landed in the v7 tree");
+        assert_eq!(pool.value_locked_in(PoolGeneration::V7), amount - SHIELDED_FEE, "the fee left v7's own value");
+        assert_eq!(pool.len(), v1_notes_before + 2, "v1 untouched by a v7 spend");
+        assert!(!pool.is_spent_in_epoch(0, &nf), "the nullifier is scoped to the v7 epoch");
+        eprintln!("chronos[v7 end to end]: v7 deposit at position {pos}, v7 spend settled, v7 notes {}", pool.v7().unwrap().len());
+    }
+    for _ in 0..6 { h.tick(); }
+
     // ── 5. FOLLOWER ≡ PRODUCER, and a third ChainTip re-derives every committed root ──
     assert_eq!(h.follower.height(), h.chain.height());
     assert_eq!(h.follower.parent_hash(), h.chain.parent_hash(), "follower sits on the producer's tip");
@@ -144,7 +202,7 @@ fn chronos_v7_opens_beside_v1_and_producer_equals_follower_across_the_gate() {
         if hgt == gate { activation_block = Some(b.clone()); }
     }
     let activation_block = activation_block.expect("the activation block was applied");
-    assert!(roots_seen.len() >= 4, "the pool root took only {} distinct values", roots_seen.len());
+    assert!(roots_seen.len() >= 6, "the pool root took only {} distinct values", roots_seen.len());
     eprintln!("chronos[v7 activation]: gate {gate}, {} blocks, pool root took {} distinct values, v1 spent after the gate, late v1 deposit refused, follower ≡ producer", h.applied_blocks.len(), roots_seen.len());
 
     // ── 6. TEETH: the activation block with a flipped pool root is refused ────────

@@ -1132,6 +1132,9 @@ fn run_start() -> Result<()> {
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
+                // v7 (2026-10-12): the door reads anchor generations and the v7 flag from the
+                // settled pool, so its proof precheck runs the matching verifier.
+                shielded_bridge.set_pool_view(Arc::clone(&shared));
                 let app = sigil_api::AppState {
                     mempool: Arc::clone(&mempool),
                     state: Arc::clone(&shared),

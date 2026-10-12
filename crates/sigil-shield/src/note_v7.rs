@@ -140,6 +140,12 @@ impl Digest4 {
         Ok(Self(elems))
     }
 
+    /// Four u64 limbs (each must be a canonical field element; reduced if not — use
+    /// [`Self::from_wire`] where strictness matters).
+    pub fn from_u64s(limbs: [u64; 4]) -> Self {
+        Self(limbs.map(BaseElement::new))
+    }
+
     fn from_digest(d: <Rescue as Hasher>::Digest) -> Self {
         let e = d.as_elements();
         Self([e[0], e[1], e[2], e[3]])
@@ -307,6 +313,19 @@ impl PoolTreeV7 {
         }
         Ok(MerklePathV7 { leaf, siblings, bits })
     }
+}
+
+/// What a DEPOSIT door recomputes (wire form, no field types): the v7 commitment of a note
+/// worth `amount` under `blinding` for owner `pk` — `merge(H(DOM_VAL ‖ amount ‖ blinding), pk)`.
+/// Strict canonical decode of both inputs; `amount` must be below `2^RANGE_BITS`.
+pub fn commitment_from_opening_wire(amount: u64, blinding: &[u8; 32], pk: &[u8; 32]) -> Result<[u8; 32], NoteV7Error> {
+    if amount >= (1u64 << RANGE_BITS) {
+        return Err(NoteV7Error::AmountOutOfRange { got: amount, bits: RANGE_BITS });
+    }
+    let b = Digest4::from_wire(blinding)?;
+    let owner = Digest4::from_wire(pk)?;
+    let inner = NoteV7 { value: BaseElement::new(amount), blinding: b.0, spend_key: [BaseElement::ZERO; 4] }.inner_commitment();
+    Ok(merge(inner, owner).to_wire())
 }
 
 /// The padding leaf for rounding a pool up to a power of two: a domain-separated constant,

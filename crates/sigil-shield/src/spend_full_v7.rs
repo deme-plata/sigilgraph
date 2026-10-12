@@ -767,6 +767,19 @@ pub fn build_v7_trace_unchecked(
     trace
 }
 
+/// [`build_spend_full_v7_trace_seeded`] with the public value as a plain integer, for callers
+/// that do not name field types (the API door's tests).
+pub fn build_spend_full_v7_trace_seeded_u64(
+    note: &NoteV7,
+    path: &MerklePathV7,
+    public_value: u64,
+    outs: &[OutputV7; N_OUTS],
+    options: &ProofOptions,
+    mask_seed: [u8; 32],
+) -> TraceTable<BaseElement> {
+    build_spend_full_v7_trace_seeded(note, path, BaseElement::new(public_value), outs, options, mask_seed)
+}
+
 /// Wallet entry point: fresh OS entropy for the mask.
 pub fn build_spend_full_v7_trace(
     note: &NoteV7,

@@ -1325,9 +1325,7 @@ pub fn commit_state_transition_with_master_schedule(
     // epoch and opens the 256-bit one BEFORE this block's mutations, so every node does it
     // at the same block, and a spend in this block against a now-sealed v1 anchor still
     // settles (its generation is read from the archive). Idempotent after the first block.
-    if sigil_header::v7_pool_active(expected_height)
-        && state.shielded.generation() == shielded::PoolGeneration::V1
-    {
+    if sigil_header::v7_pool_active(expected_height) && !state.shielded.v7_active() {
         state.shielded.activate_v7();
     }
     for m in &transition.mutations {
@@ -1392,8 +1390,11 @@ pub fn commit_state_transition_with_master_schedule(
                 // rejection (duplicate commitment, or the pre-existing pool-full case)
                 // leaves state completely untouched, matching every other refused
                 // mutation in this function.
+                // Which generation the deposit lands in (v1 before activation; by shape
+                // after), so its value is counted in that generation's own epoch.
+                let generation = state.shielded.generation_for_new_note(&cm)?;
                 state.shielded.append_note_with_delivery(cm, note_ciphertext)?;
-                state.shielded.lock_value(amount)?;
+                state.shielded.lock_value_in(generation, amount)?;
                 state.set_balance(from, NATIVE, after);
                 state.shielded.remember_anchor_dirty();
             }
@@ -1402,7 +1403,7 @@ pub fn commit_state_transition_with_master_schedule(
                 // A coinbase commitment is a v1 (MiMC) note; minted into a v7 epoch it could
                 // never be opened and the reward would be burned. Dormant on g2 (coinbase is
                 // transparent), refused outright until a v7 coinbase commitment exists.
-                if state.shielded.generation() == shielded::PoolGeneration::V7 {
+                if state.shielded.v7_active() {
                     return Err(CommitError::Shielded(shielded::ShieldedError::CoinbaseUnsupportedInV7));
                 }
                 // Newly emitted value: nothing is debited, and it enters the shielded
@@ -1429,6 +1430,9 @@ pub fn commit_state_transition_with_master_schedule(
                 //    window, or as the sealed final root of an earlier epoch. It also
                 //    tells us WHICH generation was proven against, which step 2 needs.
                 let Some(spend_epoch) = state.shielded.epoch_of_anchor(&anchor) else {
+                    return Err(CommitError::UnknownAnchor { anchor });
+                };
+                let Some(generation) = state.shielded.generation_of_anchor(&anchor) else {
                     return Err(CommitError::UnknownAnchor { anchor });
                 };
                 // 2. EVERY nullifier this spend reveals, gathered once so no step below can
@@ -1482,13 +1486,15 @@ pub fn commit_state_transition_with_master_schedule(
                 for nf in &nfs {
                     state.shielded.spend_nullifier_in_epoch(spend_epoch, *nf)?;
                 }
+                //    Outputs land in the tree of the generation the spend was proven in —
+                //    never chosen by shape — and the fee leaves that generation's value.
                 for (i, cm) in cm_outs.iter().enumerate() {
                     let ct = note_ciphertexts.get(i).cloned().flatten();
-                    state.shielded.append_note_with_delivery(*cm, ct)?;
+                    state.shielded.append_note_in(generation, *cm, ct)?;
                 }
                 // The fee leaves the shielded domain and is credited transparently.
                 if fee > 0 {
-                    state.shielded.unlock_value(fee)?;
+                    state.shielded.unlock_value_in(generation, fee)?;
                     if let Some(master) = state.master_wallet {
                         let cur = state.balance_of(&master, &NATIVE);
                         let next = cur
@@ -1513,6 +1519,9 @@ pub fn commit_state_transition_with_master_schedule(
                 let Some(spend_epoch) = state.shielded.epoch_of_anchor(&anchor) else {
                     return Err(CommitError::UnknownAnchor { anchor });
                 };
+                let Some(generation) = state.shielded.generation_of_anchor(&anchor) else {
+                    return Err(CommitError::UnknownAnchor { anchor });
+                };
                 if state.shielded.is_spent_in_epoch(spend_epoch, &nullifier) {
                     return Err(CommitError::Shielded(
                         shielded::ShieldedError::NullifierAlreadySpent(nullifier),
@@ -1525,10 +1534,10 @@ pub fn commit_state_transition_with_master_schedule(
                 state.shielded
                     .verify_spend_against_anchor(&anchor, std::slice::from_ref(&nullifier), amount, &cm_outs, &proof)
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
-                state.shielded.unlock_value(amount)?;
+                state.shielded.unlock_value_in(generation, amount)?;
                 state.shielded.spend_nullifier_in_epoch(spend_epoch, nullifier)?;
                 for cm in &cm_outs {
-                    state.shielded.append_note(*cm)?;
+                    state.shielded.append_note_in(generation, *cm, None)?;
                 }
                 let cur = state.balance_of(&to, &NATIVE);
                 let next = cur
@@ -2635,17 +2644,18 @@ mod v7_gate_tests {
         sigil_header::override_v7_pool_activation_for_simulation(10);
         for h in 0..10 {
             commit_state_transition(&mut state, &empty(h), h).unwrap();
-            assert_eq!(state.shielded().generation(), shielded::PoolGeneration::V1, "below the gate at {h}");
+            assert!(!state.shielded().v7_active(), "below the gate at {h}");
         }
         let root_before = state.shielded_pool_root();
         commit_state_transition(&mut state, &empty(10), 10).unwrap();
-        assert_eq!(state.shielded().generation(), shielded::PoolGeneration::V7);
-        assert_eq!(state.shielded().epoch(), 1, "the v1 epoch was sealed");
-        assert_eq!(state.shielded().archive()[0].generation, shielded::PoolGeneration::V1);
+        assert!(state.shielded().v7_active());
+        assert!(state.shielded().v1_live(), "v1 is NOT sealed at activation");
+        assert_eq!(state.shielded().epoch(), 0);
+        assert_eq!(state.shielded().v7().unwrap().epoch(), 1);
         assert_ne!(state.shielded_pool_root(), root_before, "the fifth root moves with the generation");
         let root_at_gate = state.shielded_pool_root();
         commit_state_transition(&mut state, &empty(11), 11).unwrap();
-        assert_eq!(state.shielded().epoch(), 1, "no second activation");
+        assert_eq!(state.shielded().v7().unwrap().epoch(), 1, "no second activation");
         assert_eq!(state.shielded_pool_root(), root_at_gate, "an untouched v7 pool keeps its root");
         sigil_header::override_v7_pool_activation_for_simulation(u64::MAX);
         assert!(!sigil_header::v7_pool_active(10), "the compiled-in gate is off on this network");

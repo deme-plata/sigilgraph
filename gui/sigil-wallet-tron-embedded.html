@@ -9786,6 +9786,94 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 })();
 </script>
 
+<!-- 2026-10-12 PRIVACY GAUGE (Π). Viktor: "build the Π gauge". How many people a private payment
+     hides among, as an outside chain observer can tell, read from the chain by sigil-privacy-scan
+     (crowd = 2^H over the live epoch's depositors by value; exits linked by amount count as 1).
+     The public copy carries no wallet ids. Same chip family as Κc and ⌂; docked by TOPBAR DOCK. -->
+<style>
+  #piChip{position:fixed;top:10px;right:300px;z-index:1400;display:flex;align-items:center;gap:6px;
+    padding:6px 11px;border-radius:999px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:12px;
+    background:rgba(20,10,24,.82);border:1px solid rgba(244,114,182,.45);color:#e2e8f0;user-select:none}
+  #piChip:hover{border-color:#f9a8d4}
+  #piChip .piSig{color:#f472b6;font-size:14px;font-weight:800}
+  #piChip .piV{font-weight:700;color:#f9a8d4}
+  #piChip .piDot{width:7px;height:7px;border-radius:50%;background:#64748b}
+  #piChip.thin .piDot{background:#f87171}#piChip.small .piDot{background:#fbbf24}#piChip.crowd .piDot{background:#34d399}
+  #gdock #piChip,#pdock #piChip{position:static;padding:5px 10px;font-size:11.5px}
+  #piPanel{position:fixed;top:52px;right:12px;z-index:1400;width:390px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
+    background:#140c18;border:1px solid rgba(244,114,182,.4);border-radius:14px;
+    box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 42px rgba(244,114,182,.14);color:#e2e8f0}
+  #piPanel.on{display:block}
+  html.chips-in-bar #piPanel{top:72px}
+  #piPanel .piHd{padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;gap:10px}
+  #piPanel .piT{font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:rgba(255,255,255,.42)}
+  #piPanel .piBig{font-size:28px;font-weight:800;color:#f9a8d4;line-height:1;text-align:right}
+  #piPanel .piSay{padding:11px 15px;font-size:12px;line-height:1.55;border-bottom:1px solid rgba(255,255,255,.06)}
+  #piPanel .piRow{display:grid;grid-template-columns:96px 1fr;gap:10px;padding:8px 15px;font-size:11px;line-height:1.5;border-bottom:1px solid rgba(255,255,255,.05)}
+  #piPanel .piRow b{color:#f9a8d4;font-weight:600}
+  #piPanel .piK{color:rgba(255,255,255,.45);text-transform:uppercase;letter-spacing:.08em;font-size:9.5px;padding-top:2px}
+  #piPanel .piWeak{color:#f87171}
+  #piPanel .piFoot{padding:9px 15px;font-size:9.5px;color:rgba(255,255,255,.35);line-height:1.5}
+  #piPanel .piX{cursor:pointer;color:rgba(255,255,255,.4);font-size:16px;line-height:1}
+</style>
+<script>
+(function(){
+  "use strict";
+  var URL_=(location.hostname==='sigilgraph.org'?'':'https://sigilgraph.org')+'/downloads/sigil-privacy-gauge.json';
+  var open=false, data=null;
+  function esc(x){ return String(x).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function n(x,d){ return (typeof x==='number'&&isFinite(x))?x.toLocaleString('en-US',{maximumFractionDigits:d==null?0:d}):'—'; }
+  function host(){
+    if(!document.getElementById('piChip')){
+      var c=document.createElement('div'); c.id='piChip';
+      c.title='Privacy gauge (Π): how many people a private payment hides among, as seen from the chain';
+      c.innerHTML='<span class="piSig">Π</span><span class="piV" id="piChipV">—</span><span class="piDot"></span>';
+      c.addEventListener('click',function(){ toggle(); });
+      document.documentElement.appendChild(c);
+    }
+    if(!document.getElementById('piPanel')){
+      var p=document.createElement('div'); p.id='piPanel'; document.documentElement.appendChild(p);
+    }
+  }
+  function toggle(v){ open=(v===undefined)?!open:v; var p=document.getElementById('piPanel'); if(p){ p.classList.toggle('on',open); if(open) paint(); } }
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') toggle(false); });
+  document.addEventListener('click',function(e){ var p=document.getElementById('piPanel'),c=document.getElementById('piChip');
+    if(open&&p&&c&&!p.contains(e.target)&&!c.contains(e.target)) toggle(false); },true);
+  function paint(){
+    var c=document.getElementById('piChip'), p=document.getElementById('piPanel'); if(!c||!p) return;
+    if(!data){ document.getElementById('piChipV').textContent='—'; c.className='';
+      p.innerHTML='<div class="piHd"><div class="piT">Privacy gauge · Π</div><span class="piX" id="piX">×</span></div><div class="piSay">The gauge could not be read here.'+(location.hostname==='sigilgraph.org'?'':' The local wallet cannot reach it yet; open the wallet on sigilgraph.org to see it.')+'</div>';
+      var x0=document.getElementById('piX'); if(x0) x0.onclick=function(){toggle(false);}; return; }
+    var h=data.headline||{}, cr=data.crowd||{}, mv=data.movement||{}, ed=data.edges||{}, pr=data.proof||{}, gw=data.gateway||{};
+    var pi=h.pi_outside, live=(cr.per_epoch||[]).filter(function(e){return e.live;})[0]||{};
+    var reg=pi<3?'thin':(pi<20?'small':'crowd');
+    c.className=reg; document.getElementById('piChipV').textContent=n(pi,1);
+    var age=data.generated_at_ms?Math.round((Date.now()-data.generated_at_ms)/60000):null;
+    var shares=(live.depositor_shares_by_value||[]), top=shares.length?shares[0]:null;
+    var weak=h.weakest_layer||'';
+    function row(k,html,isWeak){ return '<div class="piRow"><div class="piK'+(isWeak?' piWeak':'')+'">'+esc(k)+(isWeak?' ◂':'')+'</div><div>'+html+'</div></div>'; }
+    var ov=pr.overall||{};
+    p.innerHTML='<div class="piHd"><div><div class="piT">Privacy gauge · Π</div><div style="font-size:10px;color:rgba(255,255,255,.5);margin-top:3px">'+(age==null?'':('measured '+(age<1?'just now':age+' min ago')))+'</div></div><div><div class="piBig">'+n(pi,2)+'</div></div><span class="piX" id="piX">×</span></div>'+
+      '<div class="piSay">A private payment made now hides among about <b style="color:#f9a8d4">'+n(pi,1)+'</b> '+(pi<1.05?'person':'people')+', as an outside observer of the chain can tell. '+
+      (reg==='thin'?'That is a very small crowd: the pool is private by cryptography but almost nobody is in it.':reg==='small'?'A small crowd: more people using the pool makes everyone in it more private.':'A real crowd.')+'</div>'+
+      row('crowd','live pool generation: <b>'+n(live.notes)+'</b> notes from <b>'+n(live.distinct_depositors)+'</b> depositing wallets; effective crowd <b>'+n(live.effective_crowd_by_value,2)+'</b>'+(top!=null?' (one wallet put in '+n(top*100,1)+' % of the value)':''),weak==='crowd')+
+      row('movement','last private payment <b>'+n((mv.spends||{}).hours_since_last,1)+' h</b> ago; <b>'+n((mv.spends||{}).last_24h)+'</b> in the last 24 h. A payment made into silence is easy to spot by its timing.',weak==='movement')+
+      row('exits','<b>'+n(ed.exits_total)+'</b> withdrawals ever; <b>'+n(((ed.window_7d||{}).exactly_one_candidate))+'</b> matched to a single deposit by amount',weak==='edges')+
+      row('proofs','<b>'+n(ov.v4)+'</b> leaking (v4) proofs ever; '+n(ov.v5)+' v5 + '+n(ov.v6)+' v6 hiding proofs',weak==='proof')+
+      row('gateway','lookups that named a full commitment: <b>'+n(gw.has_cm_lines_24h)+'</b> in 24 h (insider view; wallets now ask by bucket)',false)+
+      '<div class="piFoot">Π = 2^H over the live pool generation\'s depositors weighted by value; withdrawals matched to one deposit by amount count as 1. Read from the chain by sigil-privacy-scan; wallet ids are left out of the public copy. Weakest layer: '+esc(weak)+'.</div>';
+    var x=document.getElementById('piX'); if(x) x.onclick=function(){toggle(false);};
+  }
+  function load(){
+    fetch(URL_+'?t='+Date.now(),{cache:'no-store'}).then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(j){ data=(j&&j.schema&&String(j.schema).indexOf('sigil-privacy-gauge/')===0)?j:null; paint(); })
+      .catch(function(){ data=null; paint(); });
+  }
+  host(); setInterval(host,3000); load(); setInterval(load,5*60*1000);
+})();
+</script>
+
 <!-- 2026-10-12 TOPBAR DOCK (Viktor: "the global topbar … is cluttered in the right side").
      The two gauge chips (Kc and the skyline) used to float position:fixed over the top-right corner and
      covered the bar's own pills, avatar and phone button. They now sit IN the bar (desktop) or in a row
@@ -9844,7 +9932,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   function dock(){
     var desk=!!(document.body&&document.body.classList.contains('view-desktop'));
     var t=document.getElementById(desk?'gdock':'pdock'); if(!t) return;
-    ['kgChip','skChip'].forEach(function(id){ var c=document.getElementById(id); if(c&&c.parentElement!==t) t.appendChild(c); });
+    ['piChip','kgChip','skChip'].forEach(function(id){ var c=document.getElementById(id); if(c&&c.parentElement!==t) t.appendChild(c); });
     document.documentElement.classList.toggle('chips-in-bar',desk);
   }
   function foot(id,cls,parent){

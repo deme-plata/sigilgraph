@@ -42,6 +42,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::WalletId;
 use crate::cow::CowVec;
+use sigil_shield::note_v7::{padding_leaf as padding_leaf_v7, Digest4, IncrementalTreeV7};
+pub use sigil_shield::note_v7::PoolGeneration;
 
 /// Tree depth for the shielded pool. `DEPTH + 1` must be a power of two because the
 /// spend AIR's trace length is `(DEPTH+1)·64`; 15 gives a 32,768-note anonymity set.
@@ -218,6 +220,18 @@ pub enum ShieldedError {
     /// client reusing a blinding, which is itself a note-privacy bug worth refusing).
     #[error("duplicate note commitment {0:02x?} — already in the pool (replay?)")]
     DuplicateCommitment([u8; 32]),
+    /// A v7 (256-bit) pool only holds canonical `Digest4`s: four limbs, each below p. A
+    /// second spelling of one element would be a second wire form of one nullifier.
+    #[error("note commitment {0:02x?} is not a canonical 256-bit digest (v7 pool)")]
+    NonCanonicalCommitment([u8; 32]),
+    /// The anchor is not a root this pool ever held, so its generation is unknown.
+    #[error("anchor is not a root this pool ever held")]
+    UnknownAnchor,
+    /// A shielded coinbase mints a v1 (MiMC) commitment; in a v7 pool that note could never
+    /// be opened and the reward would be burned. Refused until a v7 coinbase commitment
+    /// exists (coinbase is transparent on g2, so this path is dormant).
+    #[error("shielded coinbase is not supported in a v7 pool")]
+    CoinbaseUnsupportedInV7,
 }
 
 /// The shielded pool: append-only note commitments plus the spent-nullifier set.
@@ -352,6 +366,17 @@ pub struct ShieldedPool {
     /// node cannot disagree on it.
     #[serde(skip)]
     pub(crate) nullifier_acc_memo: Memo<[u64; 4]>,
+
+    /// Which NOTE FORMAT the live epoch holds (2026-10-12): 64-bit MiMC (`V1`) or 256-bit
+    /// Rescue-Prime (`V7`). Absent ⇒ `V1`, which is every snapshot written before v7
+    /// existed. Flipped exactly once, by [`activate_v7`](Self::activate_v7), at the height
+    /// gate `sigil_header::V7_POOL_ACTIVATION_HEIGHT`.
+    #[serde(default)]
+    pub(crate) generation: PoolGeneration,
+
+    /// Derived index over `notes` for a V7 epoch — same caching rule as `tree`.
+    #[serde(skip)]
+    pub(crate) tree_v7: Option<IncrementalTreeV7>,
 }
 
 /// A derived-value cache that is invisible to `serde` and `PartialEq`: two pools with
@@ -406,6 +431,10 @@ pub struct EpochArchive {
     /// Delivery ciphertexts, positionally aligned with `notes`, so a wallet can still
     /// trial-decrypt a sealed epoch and discover a payment it never scanned for.
     pub ciphertexts: Vec<Option<String>>,
+    /// The note format this epoch's tree was built with. Trailing and defaulted so an
+    /// archive written before v7 existed reads as `V1`, which it is.
+    #[serde(default)]
+    pub generation: PoolGeneration,
 }
 
 /// Length of a SQIsign L5 public key, in bytes.
@@ -576,6 +605,7 @@ impl ShieldedPool {
             root,
             notes: self.notes.take(),
             ciphertexts: self.note_ciphertexts.take(),
+            generation: self.generation,
         });
         // The sealed root stays spendable forever; record its epoch before bumping.
         self.anchor_epoch.insert(root, self.epoch);
@@ -587,10 +617,68 @@ impl ShieldedPool {
         self.ensure_commitment_index();
         // Fresh, empty tree for the new generation.
         self.tree = None;
+        self.tree_v7 = None;
         self.notes_root_memo = Memo::default();
         // `seen_commitments` spans ALL epochs, so it deliberately survives rotation — the
         // archived commitments are still off-limits for a replay.
         self.anchors_dirty = true;
+    }
+
+    /// Open the 256-bit note generation (2026-10-12, v7).
+    ///
+    /// Seals the live v1 epoch — even an empty one, so the epoch number and every
+    /// anchor→generation mapping move together — and starts a fresh Rescue tree. Nothing
+    /// is re-hashed: v1 notes stay in their sealed epoch, spendable against its root with
+    /// v1 proofs forever. Idempotent. Driven only by the height gate in
+    /// `commit_state_transition`, so every node does it at exactly the same block.
+    pub(crate) fn activate_v7(&mut self) {
+        if self.generation == PoolGeneration::V7 {
+            return;
+        }
+        self.rotate_epoch(); // records `generation: V1` on the sealed epoch
+        self.generation = PoolGeneration::V7;
+        self.tree = None;
+        self.tree_v7 = None;
+        self.notes_root_memo = Memo::default();
+        self.anchors_dirty = true;
+    }
+
+    /// The note format of the live epoch.
+    pub fn generation(&self) -> PoolGeneration {
+        self.generation
+    }
+
+    /// Which note format was this anchor's tree built with? `None` for a root this pool
+    /// never held. This — never the proof's shape — is what selects the verifier.
+    pub fn generation_of_anchor(&self, root: &[u8; 32]) -> Option<PoolGeneration> {
+        let e = self.epoch_of_anchor(root)?;
+        if e == self.epoch {
+            Some(self.generation)
+        } else {
+            self.archive.get(e as usize).map(|a| a.generation)
+        }
+    }
+
+    /// Settlement verification routed by the GENERATION of the anchor (2026-10-12): a v1
+    /// anchor goes to the v4/v5/v6 chokepoint exactly as before, a v7 anchor to
+    /// `spend_full_v7`. `public_value` is the fee of a send or the amount of a withdrawal.
+    pub fn verify_spend_against_anchor(
+        &self,
+        anchor: &[u8; 32],
+        nullifiers: &[[u8; 32]],
+        public_value: u128,
+        cm_outs: &[[u8; 32]],
+        proof: &[u8],
+    ) -> Result<(), ShieldedError> {
+        let generation = self.generation_of_anchor(anchor).ok_or(ShieldedError::UnknownAnchor)?;
+        sigil_shield::note_v7::verify_spend_wire_dual(generation, anchor, nullifiers, public_value, cm_outs, proof)
+            .map_err(|e| ShieldedError::ProofRejected(e.to_string()))
+    }
+
+    /// Has any epoch of this pool ever used the v7 format? Gates the root encodings below
+    /// so a chain that never activated v7 keeps byte-identical headers.
+    fn any_v7(&self) -> bool {
+        self.generation != PoolGeneration::V1 || self.archive.iter().any(|a| a.generation != PoolGeneration::V1)
     }
 
     /// Mark the note set as changed. The producer calls [`refresh_anchor`] at block close
@@ -682,6 +770,20 @@ impl ShieldedPool {
         self.tree.as_mut().unwrap()
     }
 
+    /// The V7 twin of [`tree_mut`](Self::tree_mut). A note that is not a canonical digest
+    /// cannot be in a V7 epoch (`append_note_with_delivery` refuses it), so the fallback
+    /// to the padding leaf is unreachable and exists only to keep this total.
+    fn tree_v7_mut(&mut self) -> &mut IncrementalTreeV7 {
+        if self.tree_v7.is_none() {
+            let mut t = IncrementalTreeV7::new();
+            for cm in self.notes.iter() {
+                t.append(Digest4::from_wire(cm).unwrap_or_else(|_| padding_leaf_v7()));
+            }
+            self.tree_v7 = Some(t);
+        }
+        self.tree_v7.as_mut().unwrap()
+    }
+
     /// The current anonymity-set root, as the circuit computes it.
     ///
     /// Delegates to `sigil-shield` rather than reimplementing the tree here — duplicating
@@ -693,7 +795,16 @@ impl ShieldedPool {
     /// root a full build would (`sigil_shield::note_v1::tests::sparse_root_matches_full_build`),
     /// because a root that differs from the circuit's is a silent, total outage.
     pub fn current_root(&self) -> [u8; 32] {
-        sigil_shield::note_v1::sparse_pool_root_wire(&self.notes, POOL_CAPACITY)
+        match self.generation {
+            PoolGeneration::V1 => sigil_shield::note_v1::sparse_pool_root_wire(&self.notes, POOL_CAPACITY),
+            PoolGeneration::V7 => {
+                let mut t = IncrementalTreeV7::new();
+                for cm in self.notes.iter() {
+                    t.append(Digest4::from_wire(cm).unwrap_or_else(|_| padding_leaf_v7()));
+                }
+                t.root(POOL_CAPACITY).to_wire()
+            }
+        }
     }
 
     /// The same root via the incremental tree — O(depth) rather than O(notes).
@@ -702,8 +813,13 @@ impl ShieldedPool {
     /// incremental_matches_sparse_at_every_size`, and re-checked here against live pool
     /// contents by `incremental_root_agrees_with_sparse`.
     pub(crate) fn current_root_fast(&mut self) -> [u8; 32] {
-        let t = self.tree_mut();
-        sigil_shield::note_v1::to_wire(t.root(POOL_CAPACITY))
+        match self.generation {
+            PoolGeneration::V1 => {
+                let t = self.tree_mut();
+                sigil_shield::note_v1::to_wire(t.root(POOL_CAPACITY))
+            }
+            PoolGeneration::V7 => self.tree_v7_mut().root(POOL_CAPACITY).to_wire(),
+        }
     }
 
     /// Has this nullifier been spent, as observed in `epoch`?
@@ -810,6 +926,13 @@ impl ShieldedPool {
         // silently earned nothing — was dropped at apply time with no way back. The
         // fixed-depth circuit means one tree genuinely cannot hold more, so the pool moves
         // to a new generation instead of dying in the old one. See [`rotate_epoch`].
+        // A V7 epoch holds canonical 256-bit digests only; decided before anything moves.
+        let leaf_v7 = match self.generation {
+            PoolGeneration::V1 => None,
+            PoolGeneration::V7 => {
+                Some(Digest4::from_wire(&cm).map_err(|_| ShieldedError::NonCanonicalCommitment(cm))?)
+            }
+        };
         if self.notes.len() >= POOL_CAPACITY {
             self.rotate_epoch();
         }
@@ -829,8 +952,13 @@ impl ShieldedPool {
         }
         let position = self.notes.len();
         // keep the incremental index in step with the source of truth
-        let leaf = sigil_shield::note_v1::from_wire(&cm).unwrap_or_default();
-        self.tree_mut().append(leaf);
+        match leaf_v7 {
+            None => {
+                let leaf = sigil_shield::note_v1::from_wire(&cm).unwrap_or_default();
+                self.tree_mut().append(leaf);
+            }
+            Some(leaf) => self.tree_v7_mut().append(leaf),
+        }
         self.notes.push(cm);
         self.notes_root_memo = Memo::default();
         self.note_ciphertexts.push(ciphertext);
@@ -905,9 +1033,16 @@ impl ShieldedPool {
     /// at 8–110 blk/s. That digest was written "for folding into wallet_state_root" and
     /// never got a caller; this is the version that ships.
     pub fn pool_root(&self) -> [u8; 32] {
+        // v2 encoding (2026-10-12) only once a v7 epoch exists anywhere: one generation
+        // byte after the epoch and after every sealed root, under its own domain tag, so a
+        // pool that never activated v7 hashes exactly the bytes it always did.
+        let any_v7 = self.any_v7();
         let mut h = blake3::Hasher::new();
-        h.update(b"sigil-shielded-pool-root-v1");
+        h.update(if any_v7 { b"sigil-shielded-pool-root-v2" } else { b"sigil-shielded-pool-root-v1" });
         h.update(&self.epoch.to_le_bytes());
+        if any_v7 {
+            h.update(&[u8::from(self.generation)]);
+        }
         h.update(&self.notes_root_memoized());
         h.update(&(self.notes.len() as u64).to_le_bytes());
         h.update(&(self.nullifiers.len() as u64).to_le_bytes());
@@ -916,6 +1051,9 @@ impl ShieldedPool {
         h.update(&(self.archive.len() as u64).to_le_bytes());
         for a in &self.archive {
             h.update(&a.root);
+            if any_v7 {
+                h.update(&[u8::from(a.generation)]);
+            }
         }
         *h.finalize().as_bytes()
     }
@@ -994,6 +1132,16 @@ impl ShieldedPool {
                 h.update(w);
                 h.update(&(pk.len() as u32).to_le_bytes());
                 h.update(pk);
+            }
+        }
+        // NOTE GENERATION (v7) — folded in only once a 256-bit epoch exists anywhere, for
+        // the same reason as the SQIsign keys above: a pool that never activated v7 must
+        // keep the digest it always had.
+        if self.any_v7() {
+            h.update(b"sigil-shielded-generation-v7");
+            h.update(&[u8::from(self.generation)]);
+            for a in &self.archive {
+                h.update(&[u8::from(a.generation)]);
             }
         }
         // EPOCH STATE — folded in only once a rotation has actually happened.
@@ -1423,5 +1571,164 @@ mod tests {
         p.set_encrypt_key(wallet, [9u8; 32]);
         assert_eq!(p.encrypt_key(&wallet), Some([9u8; 32]));
         assert_eq!(p.shielded_address(&wallet), None, "the two registries do not leak into each other");
+    }
+}
+
+#[cfg(test)]
+mod v7_tests {
+    use super::*;
+    use sigil_shield::note_v7::NoteV7;
+
+    fn v1_wire(i: u64) -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&i.to_le_bytes());
+        b
+    }
+    fn v7_note(i: u64) -> NoteV7 {
+        NoteV7::new(1_000 + i, [i, 2, 3, 4], [5, 6, 7, i]).unwrap()
+    }
+
+    /// ACTIVATION: the v1 epoch is sealed (generation recorded, root still an anchor that
+    /// resolves to V1), a fresh v7 epoch opens, and its first root is the empty Rescue tree.
+    #[test]
+    fn activation_seals_v1_and_opens_v7() {
+        let mut p = ShieldedPool::new();
+        for i in 0..3 {
+            p.append_note(v1_wire(i)).unwrap();
+        }
+        p.refresh_anchor();
+        let r1 = p.current_root_fast();
+        assert_eq!(p.generation(), PoolGeneration::V1);
+
+        p.activate_v7();
+        assert_eq!(p.generation(), PoolGeneration::V7);
+        assert_eq!(p.epoch(), 1);
+        assert_eq!(p.archive().len(), 1);
+        assert_eq!(p.archive()[0].generation, PoolGeneration::V1);
+        assert_eq!(p.archive()[0].notes.len(), 3);
+        assert_eq!(p.len(), 0, "the v7 epoch starts empty");
+        assert!(p.is_known_anchor(&r1), "a sealed v1 root stays spendable");
+        assert_eq!(p.generation_of_anchor(&r1), Some(PoolGeneration::V1));
+
+        p.refresh_anchor();
+        let r7 = p.current_root_fast();
+        assert_eq!(p.generation_of_anchor(&r7), Some(PoolGeneration::V7));
+        assert_eq!(r7, IncrementalTreeV7::new().root(POOL_CAPACITY).to_wire());
+        assert_eq!(p.current_root(), r7, "slow and fast roots agree on a v7 epoch");
+
+        p.activate_v7();
+        assert_eq!(p.epoch(), 1, "activation is idempotent");
+    }
+
+    /// A V7 epoch refuses a non-canonical commitment and rotates INTO another V7 epoch
+    /// when full, with the sealed epoch tagged V7.
+    #[test]
+    fn v7_epoch_refuses_non_canonical_and_rotates_within_its_generation() {
+        let mut p = ShieldedPool::new();
+        p.activate_v7();
+        let mut bad = v7_note(0).commitment().to_wire();
+        bad[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(p.append_note(bad), Err(ShieldedError::NonCanonicalCommitment(_))));
+        assert_eq!(p.len(), 0);
+        for i in 0..POOL_CAPACITY as u64 {
+            p.append_note(v7_note(i).commitment().to_wire()).unwrap();
+        }
+        assert_eq!(p.epoch(), 1);
+        let sealed = p.current_root_fast();
+        p.append_note(v7_note(POOL_CAPACITY as u64).commitment().to_wire()).unwrap();
+        assert_eq!(p.epoch(), 2);
+        assert_eq!(p.archive()[1].generation, PoolGeneration::V7);
+        assert_eq!(p.generation(), PoolGeneration::V7);
+        assert_eq!(p.generation_of_anchor(&sealed), Some(PoolGeneration::V7));
+        // the replay guard spans generations
+        assert!(matches!(p.append_note(v7_note(3).commitment().to_wire()), Err(ShieldedError::DuplicateCommitment(_))));
+    }
+
+    /// SNAPSHOT vs REPLAY: a pool serialized and read back (memos cold, generation and
+    /// archive tags carried) reports the same pool root, digest and anchor root.
+    #[test]
+    fn snapshot_round_trip_preserves_generation_and_roots() {
+        let mut a = ShieldedPool::new();
+        a.append_note(v1_wire(1)).unwrap();
+        a.activate_v7();
+        a.append_note(v7_note(1).commitment().to_wire()).unwrap();
+        a.append_note(v7_note(2).commitment().to_wire()).unwrap();
+        a.spend_nullifier_in_epoch(1, v7_note(1).nullifier(0).to_wire()).unwrap();
+        a.refresh_anchor();
+        let bytes = rmp_serde::to_vec(&a).unwrap();
+        let mut b: ShieldedPool = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(b.generation(), PoolGeneration::V7);
+        assert_eq!(b.archive()[0].generation, PoolGeneration::V1);
+        assert_eq!(a.pool_root(), b.pool_root());
+        assert_eq!(a.digest(), b.digest());
+        assert_eq!(a.current_root(), b.current_root_fast());
+        // (not `assert_eq!(a, b)`: the derived PartialEq also compares the serde-skipped
+        // `seen_commitments` cache, which is warm on `a` and cold on `b` by design.)
+        assert_eq!(a.archive(), b.archive());
+        assert_eq!(a.epoch(), b.epoch());
+        assert_eq!(a.nullifiers(), b.nullifiers());
+    }
+
+    /// A pool that never activated v7 hashes exactly the bytes it always did (v1 encoding,
+    /// no generation byte), so g2 headers are unchanged by this code.
+    #[test]
+    fn pool_root_is_byte_identical_for_a_v1_only_pool() {
+        let mut p = ShieldedPool::new();
+        p.append_note(v1_wire(5)).unwrap();
+        p.spend_nullifier(v1_wire(77)).unwrap();
+        let mut h = blake3::Hasher::new();
+        h.update(b"sigil-shielded-pool-root-v1");
+        h.update(&0u32.to_le_bytes());
+        h.update(&p.current_root());
+        h.update(&1u64.to_le_bytes());
+        h.update(&1u64.to_le_bytes());
+        h.update(&crate::acc_to_root(p.nullifier_acc()));
+        h.update(&0u128.to_le_bytes());
+        h.update(&0u64.to_le_bytes());
+        assert_eq!(p.pool_root(), *h.finalize().as_bytes());
+    }
+
+    /// SETTLEMENT ROUTING: a v7 spend proven against the pool's own v7 root verifies through
+    /// `verify_spend_against_anchor`; the same proof against the sealed v1 anchor is refused
+    /// (routed to the v1 chokepoint), and an unknown anchor is refused before any proof work.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn settlement_routes_by_anchor_generation() {
+        use sigil_shield::note_v7::{padding_leaf, PoolTreeV7};
+        use sigil_shield::spend_full_v7::{build_spend_full_v7_trace_seeded, v7_options, OutputV7, SpendFullV7Prover};
+        use sigil_shield::zk_mask::HidingProver;
+        use winterfell::math::fields::f64::BaseElement;
+
+        let mut p = ShieldedPool::new();
+        p.append_note(v1_wire(1)).unwrap();
+        p.refresh_anchor();
+        let v1_root = p.current_root_fast();
+        p.activate_v7();
+        let note = NoteV7::new(5_000_000, [11, 22, 33, 44], [55, 66, 77, 88]).unwrap();
+        p.append_note(v7_note(9).commitment().to_wire()).unwrap();
+        let pos = p.append_note(note.commitment().to_wire()).unwrap();
+        p.refresh_anchor();
+        let root = p.current_root_fast();
+
+        // the prover's view of the same pool
+        let mut leaves = vec![padding_leaf(); POOL_CAPACITY];
+        leaves[0] = v7_note(9).commitment();
+        leaves[pos] = note.commitment();
+        let tree = PoolTreeV7::new(leaves).unwrap();
+        assert_eq!(tree.root().to_wire(), root, "node tree and prover tree agree");
+        let path = tree.path(pos).unwrap();
+        let bob = v7_note(1).owner_pk();
+        let outs = [OutputV7::new(3_000_000, [1, 2, 3, 4], bob), OutputV7::new(5_000_000 - 3_000_000 - SHIELDED_FEE as u64, [5, 6, 7, 8], note.owner_pk())];
+        let t = build_spend_full_v7_trace_seeded(&note, &path, BaseElement::new(SHIELDED_FEE as u64), &outs, &v7_options(), [9u8; 32]);
+        let proof = SpendFullV7Prover::new(v7_options()).prove_hiding(t).unwrap().to_bytes();
+        let nf = note.nullifier(pos as u64).to_wire();
+        let cms = [outs[0].commitment().to_wire(), outs[1].commitment().to_wire()];
+
+        p.verify_spend_against_anchor(&root, &[nf], SHIELDED_FEE, &cms, &proof).expect("v7 spend against the v7 root");
+        assert!(p.verify_spend_against_anchor(&v1_root, &[nf], SHIELDED_FEE, &cms, &proof).is_err(), "routed to the v1 chokepoint");
+        assert!(matches!(
+            p.verify_spend_against_anchor(&[0xEE; 32], &[nf], SHIELDED_FEE, &cms, b"junk"),
+            Err(ShieldedError::UnknownAnchor)
+        ));
     }
 }

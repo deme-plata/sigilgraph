@@ -428,6 +428,46 @@ pub fn shielded_pool_root_required(height: u64) -> bool {
 pub fn shielded_pool_root_required_with(height: u64, activation: u64) -> bool {
     height >= activation
 }
+
+/// V7 POOL ACTIVATION (2026-10-12): the block at which the shielded pool seals its 64-bit
+/// (v1, MiMC) epoch and opens a 256-bit (v7, Rescue-Prime) generation — see
+/// `sigil_state::shielded::ShieldedPool::activate_v7`. Per network, baked in at build time:
+/// the rehearsal chain crosses it early; g2 and m1 are `u64::MAX` (never) until scheduled.
+/// A producer cannot be rolled back out of its own blocks: if this must move, move it
+/// BEFORE the tip reaches it, never after.
+pub const V7_POOL_ACTIVATION_HEIGHT: u64 = v7_activation_for(&NETWORK_ID);
+const fn v7_activation_for(net: &[u8; 8]) -> u64 {
+    if bytes8_eq(net, b"sigil-r1") { 1_000 } else { u64::MAX }
+}
+const fn bytes8_eq(a: &[u8; 8], b: &[u8; 8]) -> bool {
+    let mut i = 0;
+    while i < 8 {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+thread_local! {
+    static V7_POOL_ACTIVATION_OVERRIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
+/// The live v7 activation height: [`V7_POOL_ACTIVATION_HEIGHT`] unless a simulation lowered
+/// it on this thread via [`override_v7_pool_activation_for_simulation`].
+pub fn v7_pool_activation_height() -> u64 {
+    let o = V7_POOL_ACTIVATION_OVERRIDE.with(|c| c.get());
+    if o == u64::MAX { V7_POOL_ACTIVATION_HEIGHT } else { o }
+}
+/// SIMULATION ONLY: lower the v7 gate so a chain built from genesis crosses it. Thread-local;
+/// never called by `sigil-node start`. `u64::MAX` restores the compiled-in height.
+#[doc(hidden)]
+pub fn override_v7_pool_activation_for_simulation(height: u64) {
+    V7_POOL_ACTIVATION_OVERRIDE.with(|c| c.set(height));
+}
+/// Is the v7 note generation active at `height`?
+pub fn v7_pool_active(height: u64) -> bool {
+    height >= v7_pool_activation_height()
+}
 /// The gate rule as one pure function: present ⇔ required. Used by `precheck` and by
 /// the follower's root check, so the two can never drift.
 pub fn check_shielded_pool_root_gate(height: u64, present: bool, activation: u64) -> Result<(), HeaderError> {

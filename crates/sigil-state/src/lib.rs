@@ -1321,6 +1321,15 @@ pub fn commit_state_transition_with_master_schedule(
             got: transition.at_height,
         });
     }
+    // V7 NOTE GENERATION (2026-10-12). At the activation height the pool seals its 64-bit
+    // epoch and opens the 256-bit one BEFORE this block's mutations, so every node does it
+    // at the same block, and a spend in this block against a now-sealed v1 anchor still
+    // settles (its generation is read from the archive). Idempotent after the first block.
+    if sigil_header::v7_pool_active(expected_height)
+        && state.shielded.generation() == shielded::PoolGeneration::V1
+    {
+        state.shielded.activate_v7();
+    }
     for m in &transition.mutations {
         match m.clone() {
             StateMutation::SetBalance { wallet, token, amount } => {
@@ -1390,6 +1399,12 @@ pub fn commit_state_transition_with_master_schedule(
             }
 
             StateMutation::ShieldedCoinbase { pk_shield: _, amount, cm, ct } => {
+                // A coinbase commitment is a v1 (MiMC) note; minted into a v7 epoch it could
+                // never be opened and the reward would be burned. Dormant on g2 (coinbase is
+                // transparent), refused outright until a v7 coinbase commitment exists.
+                if state.shielded.generation() == shielded::PoolGeneration::V7 {
+                    return Err(CommitError::Shielded(shielded::ShieldedError::CoinbaseUnsupportedInV7));
+                }
                 // Newly emitted value: nothing is debited, and it enters the shielded
                 // domain rather than the transparent one. No denomination check — see the
                 // variant's docs for why that is a deliberate exemption rather than a gap.
@@ -1455,9 +1470,10 @@ pub fn commit_state_transition_with_master_schedule(
                 // 3. The arithmetic half. This is the step that makes the hidden amounts
                 //    safe: it proves the notes existed, were worth what was spent, and that
                 //    every output commitment is bound to an in-range conserved amount.
-                //    Verified here, in the chokepoint, so no caller can skip it. The
-                //    nullifier COUNT selects the circuit — 1 is v5/v4, 2 is v6.
-                shielded::verify_spend_proof_multi(&anchor, &nfs, fee, &cm_outs, &proof)
+                //    Verified here, in the chokepoint, so no caller can skip it. The anchor's
+                //    GENERATION selects the verifier family (v1: MiMC v4/v5/v6, where the
+                //    nullifier count then selects the circuit; v7: Rescue spend_full_v7).
+                state.shielded.verify_spend_against_anchor(&anchor, &nfs, fee, &cm_outs, &proof)
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
                 // 4. Only now mutate. ALL-OR-NOTHING: every tag was proven distinct and
                 //    fresh above, and `spend_nullifier_in_epoch` fails only on a duplicate
@@ -1506,7 +1522,8 @@ pub fn commit_state_transition_with_master_schedule(
                 // slot. This is what ties the withdrawal to a note the caller actually
                 // owns; `unlock_value`'s overdraw check alone would only cap the theft at
                 // the pool's balance, not prevent it.
-                shielded::verify_spend_proof(&anchor, &nullifier, amount, &cm_outs, &proof)
+                state.shielded
+                    .verify_spend_against_anchor(&anchor, std::slice::from_ref(&nullifier), amount, &cm_outs, &proof)
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
                 state.shielded.unlock_value(amount)?;
                 state.shielded.spend_nullifier_in_epoch(spend_epoch, nullifier)?;
@@ -2601,5 +2618,36 @@ mod master_rotation_tests {
         assert_eq!(rot_idx, set_idx + 1, "RotateMasterWallet must directly follow SetMasterWallet — never insert a variant before it");
         let back: StateMutation = bincode::deserialize(&rot).unwrap();
         assert_eq!(back, StateMutation::RotateMasterWallet { wallet: NEW_MASTER });
+    }
+}
+
+#[cfg(test)]
+mod v7_gate_tests {
+    use super::*;
+
+    /// THE HEIGHT GATE: below the activation height the pool stays v1 and its root bytes
+    /// are untouched; at it the transition seals v1 and opens v7, once, on every node that
+    /// commits that block — and never on a thread that did not lower the gate.
+    #[test]
+    fn v7_activates_exactly_at_the_gate_and_is_idempotent() {
+        let mut state = SigilState::new();
+        let empty = |h: u64| StateTransition { at_height: h, mutations: vec![] };
+        sigil_header::override_v7_pool_activation_for_simulation(10);
+        for h in 0..10 {
+            commit_state_transition(&mut state, &empty(h), h).unwrap();
+            assert_eq!(state.shielded().generation(), shielded::PoolGeneration::V1, "below the gate at {h}");
+        }
+        let root_before = state.shielded_pool_root();
+        commit_state_transition(&mut state, &empty(10), 10).unwrap();
+        assert_eq!(state.shielded().generation(), shielded::PoolGeneration::V7);
+        assert_eq!(state.shielded().epoch(), 1, "the v1 epoch was sealed");
+        assert_eq!(state.shielded().archive()[0].generation, shielded::PoolGeneration::V1);
+        assert_ne!(state.shielded_pool_root(), root_before, "the fifth root moves with the generation");
+        let root_at_gate = state.shielded_pool_root();
+        commit_state_transition(&mut state, &empty(11), 11).unwrap();
+        assert_eq!(state.shielded().epoch(), 1, "no second activation");
+        assert_eq!(state.shielded_pool_root(), root_at_gate, "an untouched v7 pool keeps its root");
+        sigil_header::override_v7_pool_activation_for_simulation(u64::MAX);
+        assert!(!sigil_header::v7_pool_active(10), "the compiled-in gate is off on this network");
     }
 }

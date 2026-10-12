@@ -321,6 +321,87 @@ pub fn padding_leaf() -> Digest4 {
     ])
 }
 
+/// `pads[k]` = the root of a height-`k` subtree made entirely of padding leaves.
+fn padding_subtree_roots_v7() -> &'static [Digest4] {
+    use std::sync::OnceLock;
+    static ROOTS: OnceLock<Vec<Digest4>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut v = vec![padding_leaf()];
+        for k in 1..=40 {
+            let prev = v[k - 1];
+            v.push(merge(prev, prev));
+        }
+        v
+    })
+}
+
+/// Append-only frontier over v7 leaves: O(depth) per append and per root, the structure a
+/// node keeps for the live epoch (the v7 twin of `note_v1::IncrementalTree`). Proven to
+/// agree with [`PoolTreeV7`] at EVERY occupancy by `incremental_matches_full_build_at_every_size`,
+/// because a wrong incremental root is a consensus split.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncrementalTreeV7 {
+    /// `frontier[k]` = a pending left node at level `k`, waiting for its right sibling.
+    frontier: Vec<Option<Digest4>>,
+    count: usize,
+}
+
+impl IncrementalTreeV7 {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Append one leaf, carrying up like binary increment.
+    pub fn append(&mut self, leaf: Digest4) {
+        let mut cur = leaf;
+        let mut level = 0usize;
+        loop {
+            if self.frontier.len() <= level {
+                self.frontier.push(None);
+            }
+            match self.frontier[level].take() {
+                None => {
+                    self.frontier[level] = Some(cur);
+                    break;
+                }
+                Some(left) => {
+                    cur = merge(left, cur);
+                    level += 1;
+                }
+            }
+        }
+        self.count += 1;
+    }
+
+    /// The root for a tree of `capacity` leaves, the rest padding.
+    pub fn root(&self, capacity: usize) -> Digest4 {
+        assert!(capacity.is_power_of_two() && capacity >= 2);
+        assert!(self.count <= capacity, "pool overflow: {} > {capacity}", self.count);
+        let pads = padding_subtree_roots_v7();
+        let depth = capacity.trailing_zeros() as usize;
+        // Exactly full: the final carry deposited the finished root one level above the climb.
+        if self.count == capacity {
+            if let Some(Some(root)) = self.frontier.get(depth) {
+                return *root;
+            }
+        }
+        let mut node = pads[0];
+        for k in 0..depth {
+            node = match self.frontier.get(k).copied().flatten() {
+                Some(left) => merge(left, node),
+                None => merge(node, pads[k]),
+            };
+        }
+        node
+    }
+}
+
 
 // ────────────────────────────────────────────────────────────────────────────────────────
 // WIRE-LEVEL VERIFICATION (M3) — the chokepoint consensus will call for a v7 spend.
@@ -331,12 +412,32 @@ use crate::note_v1::WireVerifyError;
 /// Which note generation a pool anchor belongs to. Decided by the NODE from the anchor's
 /// epoch (M4), never from the proof's shape — a proof that "looks like" a generation is
 /// exactly the ambiguity the arity dispatch in `note_v1` exists to avoid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(into = "u8", try_from = "u8")]
 pub enum PoolGeneration {
     /// 64-bit MiMC notes: `note_v1`, proofs by `spend_full_v4` / `v5` / `v6`.
+    #[default]
     V1,
     /// 256-bit Rescue notes: this module, proofs by `spend_full_v7`.
     V7,
+}
+impl From<PoolGeneration> for u8 {
+    fn from(g: PoolGeneration) -> u8 {
+        match g {
+            PoolGeneration::V1 => 1,
+            PoolGeneration::V7 => 7,
+        }
+    }
+}
+impl TryFrom<u8> for PoolGeneration {
+    type Error = String;
+    fn try_from(b: u8) -> Result<Self, String> {
+        match b {
+            1 => Ok(PoolGeneration::V1),
+            7 => Ok(PoolGeneration::V7),
+            other => Err(format!("unknown pool generation {other}")),
+        }
+    }
 }
 
 /// Verify a v7 spend from its wire form.
@@ -516,6 +617,34 @@ mod tests {
     fn amount_range_is_enforced() {
         assert!(NoteV7::new(1u64 << RANGE_BITS, [0; 4], [0; 4]).is_err());
         assert!(NoteV7::new((1u64 << RANGE_BITS) - 1, [0; 4], [0; 4]).is_ok());
+    }
+
+    /// THE INCREMENTAL GATE: the frontier root equals the full build at every occupancy
+    /// of a 16-leaf tree, including empty and exactly full.
+    #[test]
+    fn incremental_matches_full_build_at_every_size() {
+        let cap = 16usize;
+        let mut inc = IncrementalTreeV7::new();
+        for n in 0..=cap {
+            let mut leaves: Vec<Digest4> = (0..n as u64).map(|i| note(1000 + i).commitment()).collect();
+            leaves.resize(cap, padding_leaf());
+            let full = PoolTreeV7::new(leaves).unwrap().root();
+            assert_eq!(inc.root(cap), full, "incremental root must match the full build at {n} leaves");
+            if n < cap {
+                inc.append(note(1000 + n as u64).commitment());
+            }
+        }
+        assert_eq!(inc.len(), cap);
+    }
+
+    /// The generation tag round-trips as one byte and refuses unknown values.
+    #[test]
+    fn pool_generation_is_one_byte() {
+        assert_eq!(u8::from(PoolGeneration::V1), 1);
+        assert_eq!(u8::from(PoolGeneration::V7), 7);
+        assert_eq!(PoolGeneration::try_from(7u8), Ok(PoolGeneration::V7));
+        assert!(PoolGeneration::try_from(2u8).is_err());
+        assert_eq!(PoolGeneration::default(), PoolGeneration::V1);
     }
 
     /// A v7 digest is 32 bytes = 4×8 with no wasted space, versus v1's 8-of-32.

@@ -321,6 +321,102 @@ pub fn padding_leaf() -> Digest4 {
     ])
 }
 
+
+// ────────────────────────────────────────────────────────────────────────────────────────
+// WIRE-LEVEL VERIFICATION (M3) — the chokepoint consensus will call for a v7 spend.
+// ────────────────────────────────────────────────────────────────────────────────────────
+
+use crate::note_v1::WireVerifyError;
+
+/// Which note generation a pool anchor belongs to. Decided by the NODE from the anchor's
+/// epoch (M4), never from the proof's shape — a proof that "looks like" a generation is
+/// exactly the ambiguity the arity dispatch in `note_v1` exists to avoid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolGeneration {
+    /// 64-bit MiMC notes: `note_v1`, proofs by `spend_full_v4` / `v5` / `v6`.
+    V1,
+    /// 256-bit Rescue notes: this module, proofs by `spend_full_v7`.
+    V7,
+}
+
+/// Verify a v7 spend from its wire form.
+///
+/// `anchor`, `nullifiers[0]`, `cm_outs[0..2]` are 32-byte canonical [`Digest4`]s;
+/// `public_value` is what leaves the pool in the clear (a private send's fee, a
+/// withdrawal's amount). Every refusal that does not need the proof happens BEFORE the
+/// proof bytes are parsed, in this order: output arity, input arity, public-value range,
+/// canonical decode of every public input. Then the proof is parsed, its declared shape is
+/// checked against this circuit's (a mismatch is a refusal, never a re-route, and would
+/// otherwise be a process abort inside `Air::new`), and only then does any cryptography run.
+///
+/// v7 has one input form. A two-input (merge) spend is not a v7 circuit yet, so a
+/// two-nullifier declaration is `UnsupportedInputCount`; the duplicate-nullifier hazard of
+/// `spend_full_v6` therefore cannot arise here.
+pub fn verify_spend_wire_v7(
+    anchor: &[u8; 32],
+    nullifiers: &[[u8; 32]],
+    public_value: u128,
+    cm_outs: &[[u8; 32]],
+    proof: &[u8],
+) -> Result<(), WireVerifyError> {
+    use crate::spend_full_v7::{verify_spend_full_v7, SpendFullV7PublicInputs, N_OUTS, TRACE_LEN, WIDTH};
+
+    if cm_outs.len() != N_OUTS {
+        return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
+    }
+    if nullifiers.len() != 1 {
+        return Err(WireVerifyError::UnsupportedInputCount { got: nullifiers.len() });
+    }
+    if public_value >= (1u128 << RANGE_BITS) {
+        return Err(WireVerifyError::PublicValueOutOfRange(public_value));
+    }
+    let root = Digest4::from_wire(anchor)?;
+    let nf = Digest4::from_wire(&nullifiers[0])?;
+    let mut outs = [[BaseElement::ZERO; 4]; N_OUTS];
+    for (slot, cm) in outs.iter_mut().zip(cm_outs.iter()) {
+        *slot = Digest4::from_wire(cm)?.0;
+    }
+
+    let p = winterfell::Proof::from_bytes(proof).map_err(|_| WireVerifyError::MalformedProof)?;
+
+    // SHAPE GUARDS — both attacker-chosen numbers a `Proof` carries, checked before any
+    // AIR is constructed (see `note_v1::verify_spend_wire_multi` for the history). v7 has
+    // exactly one shape, so the length check is an equality, not a range.
+    let got_width = p.trace_info().main_trace_width();
+    if got_width != WIDTH {
+        return Err(WireVerifyError::WrongTraceWidth { expected: WIDTH, got: got_width });
+    }
+    let got_len = p.trace_info().length();
+    if got_len != TRACE_LEN {
+        return Err(WireVerifyError::WrongTraceLength { got: got_len, min: TRACE_LEN, max: TRACE_LEN });
+    }
+
+    let pi = SpendFullV7PublicInputs {
+        root: root.0,
+        nf: nf.0,
+        public_value: BaseElement::new(public_value as u64),
+        cm_outs: outs,
+    };
+    verify_spend_full_v7(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+}
+
+/// The dual-accept chokepoint for the migration window: the node names the generation the
+/// anchor belongs to, and the matching verifier runs. V1 keeps today's v5/v6 (and legacy
+/// v4) acceptance untouched; V7 is strict. Nothing is inferred from the proof.
+pub fn verify_spend_wire_dual(
+    generation: PoolGeneration,
+    anchor: &[u8; 32],
+    nullifiers: &[[u8; 32]],
+    public_value: u128,
+    cm_outs: &[[u8; 32]],
+    proof: &[u8],
+) -> Result<(), WireVerifyError> {
+    match generation {
+        PoolGeneration::V1 => crate::note_v1::verify_spend_wire_multi(anchor, nullifiers, public_value, cm_outs, proof),
+        PoolGeneration::V7 => verify_spend_wire_v7(anchor, nullifiers, public_value, cm_outs, proof),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +527,146 @@ mod tests {
         // asserts the encoding USES the high bytes (v1 always left them zero)
         let high_nonzero = w[8..32].iter().any(|&b| b != 0);
         assert!(high_nonzero, "v7 must carry data beyond the first 8 bytes");
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use crate::note_v1::WireVerifyError;
+    use crate::spend_full_v7::{
+        build_spend_full_v7_trace_seeded, v7_options, OutputV7, SpendFullV7Prover, DEPTH, N_OUTS, TRACE_LEN, WIDTH,
+    };
+    use winterfell::Prover;
+
+    struct Fixture {
+        anchor: [u8; 32],
+        nf: [u8; 32],
+        public_value: u128,
+        cms: Vec<[u8; 32]>,
+        proof: Vec<u8>,
+    }
+
+    /// One honest v7 spend at the real pool depth, in wire form.
+    fn v7_fixture() -> Fixture {
+        let note = NoteV7::new(1_234_567, [1, 2, 3, 4], [5, 6, 7, 8]).unwrap();
+        let bob = NoteV7::new(0, [0; 4], [9, 9, 9, 9]).unwrap().owner_pk();
+        let outs = [OutputV7::new(1_000_000, [11, 12, 13, 14], bob), OutputV7::new(234_560, [21, 22, 23, 24], note.owner_pk())];
+        let pos = 4_242usize;
+        let mut leaves = vec![padding_leaf(); 1 << DEPTH];
+        leaves[pos] = note.commitment();
+        let tree = PoolTreeV7::new(leaves).unwrap();
+        let path = tree.path(pos).unwrap();
+        let t = build_spend_full_v7_trace_seeded(&note, &path, BaseElement::new(7), &outs, &v7_options(), [3u8; 32]);
+        let proof = SpendFullV7Prover::new(v7_options()).prove(t).unwrap().to_bytes();
+        Fixture {
+            anchor: tree.root().to_wire(),
+            nf: note.nullifier(pos as u64).to_wire(),
+            public_value: 7,
+            cms: outs.iter().map(|o| o.commitment().to_wire()).collect(),
+            proof,
+        }
+    }
+
+    /// A v5 (64-bit MiMC) proof, so the two generations can be handed to each other.
+    fn v5_fixture() -> ([u8; 32], [u8; 32], Vec<[u8; 32]>, Vec<u8>) {
+        use crate::membership::CompressTree;
+        use crate::mimc::compress2;
+        use crate::note_v1::{padding_leaf as pad1, to_wire};
+        use crate::spend_full_v5::{build_spend_full_v5_trace, v5_options, SpendFullV5Prover, PK_DOMAIN};
+        let e = BaseElement::new;
+        let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
+        let pk = compress2(sk, e(PK_DOMAIN));
+        let leaf = compress2(compress2(value, blinding), pk);
+        let mut leaves: Vec<BaseElement> = (0..7).map(|i| pad1(i as u64)).collect();
+        leaves.insert(3, leaf);
+        let tree = CompressTree::new(leaves);
+        let path = tree.path(3);
+        let outs = [(e(50), e(777), pk), (e(47), e(888), pk)];
+        let t = build_spend_full_v5_trace(value, blinding, sk, e(3), &outs, &path, &v5_options());
+        let proof = SpendFullV5Prover::new(v5_options()).prove(t).unwrap().to_bytes();
+        let cm = |v, b| to_wire(compress2(compress2(v, b), pk));
+        (to_wire(tree.root()), to_wire(compress2(sk, e(3))), vec![cm(e(50), e(777)), cm(e(47), e(888))], proof)
+    }
+
+    /// ROUND TRIP through the wire chokepoint, and the dual dispatcher routes V7 to it.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn v7_wire_round_trip_and_dual_dispatch() {
+        let f = v7_fixture();
+        verify_spend_wire_v7(&f.anchor, &[f.nf], f.public_value, &f.cms, &f.proof).expect("honest v7 wire spend");
+        verify_spend_wire_dual(PoolGeneration::V7, &f.anchor, &[f.nf], f.public_value, &f.cms, &f.proof)
+            .expect("dual dispatcher, V7 generation");
+        // a flipped proof byte is a refusal, never a panic
+        let mut bad = f.proof.clone();
+        let mid = bad.len() / 2;
+        bad[mid] ^= 0x5A;
+        assert!(verify_spend_wire_v7(&f.anchor, &[f.nf], f.public_value, &f.cms, &bad).is_err());
+        // a wrong public value is a refusal
+        assert!(verify_spend_wire_v7(&f.anchor, &[f.nf], 8, &f.cms, &f.proof).is_err());
+    }
+
+    /// CROSS-GENERATION REPLAY: a v7 proof handed to the v1 chokepoint, and a v5 proof
+    /// handed to the v7 one, are both refused by the shape guard — an error, not an abort —
+    /// and the dual dispatcher follows the DECLARED generation, never the proof's shape.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn proofs_never_cross_generations() {
+        let f = v7_fixture();
+        let (a5, nf5, cms5, p5) = v5_fixture();
+        // A v7 digest uses all 32 bytes, and v1's strict decoder refuses non-zero padding —
+        // so the v1 chokepoint turns a v7 spend away at the PUBLIC INPUTS, before the proof is
+        // even parsed (measured: `BadPublicInput(DirtyPadding { at: 8 })`). Either refusal is
+        // the property; neither is a panic.
+        match crate::note_v1::verify_spend_wire_multi(&f.anchor, &[f.nf], f.public_value, &f.cms, &f.proof) {
+            Err(WireVerifyError::BadPublicInput(_)) => {}
+            Err(WireVerifyError::WrongTraceWidth { expected, got }) => {
+                assert_eq!(got, WIDTH);
+                assert_ne!(expected, WIDTH);
+            }
+            other => panic!("v7 proof into the v1 chokepoint: expected a refusal, got {other:?}"),
+        }
+        match verify_spend_wire_v7(&a5, &[nf5], 3, &cms5, &p5) {
+            Err(WireVerifyError::WrongTraceWidth { expected, got }) => {
+                assert_eq!(expected, WIDTH);
+                assert_ne!(got, WIDTH);
+            }
+            other => panic!("v5 proof into the v7 chokepoint: expected a width refusal, got {other:?}"),
+        }
+        // dual: V1 declared with a v7 proof → refused; V7 declared with a v5 proof → refused
+        assert!(verify_spend_wire_dual(PoolGeneration::V1, &f.anchor, &[f.nf], f.public_value, &f.cms, &f.proof).is_err());
+        assert!(verify_spend_wire_dual(PoolGeneration::V7, &a5, &[nf5], 3, &cms5, &p5).is_err());
+        // and the v5 proof still verifies under its own generation (dual-accept intact)
+        verify_spend_wire_dual(PoolGeneration::V1, &a5, &[nf5], 3, &cms5, &p5).expect("v5 under V1");
+    }
+
+    /// REFUSED BEFORE PARSING (runs in debug): arity, range and canonical-decode refusals
+    /// are reported as themselves even when the proof bytes are junk. If any of them
+    /// drifted behind `Proof::from_bytes`, this would read `MalformedProof` instead.
+    #[test]
+    fn wire_refusals_happen_before_the_proof_is_parsed() {
+        let d = NoteV7::new(1, [1; 4], [2; 4]).unwrap().commitment().to_wire();
+        let junk = b"not a proof";
+        assert!(matches!(
+            verify_spend_wire_v7(&d, &[d], 1, &[d], junk),
+            Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: 1 })
+        ));
+        assert!(matches!(
+            verify_spend_wire_v7(&d, &[d, d], 1, &[d, d], junk),
+            Err(WireVerifyError::UnsupportedInputCount { got: 2 })
+        ));
+        assert!(matches!(
+            verify_spend_wire_v7(&d, &[d], 1u128 << RANGE_BITS, &[d, d], junk),
+            Err(WireVerifyError::PublicValueOutOfRange(_))
+        ));
+        let mut non_canonical = d;
+        non_canonical[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(
+            verify_spend_wire_v7(&d, &[non_canonical], 1, &[d, d], junk),
+            Err(WireVerifyError::BadPublicInputV7(NoteV7Error::NonCanonical { limb: 1, .. }))
+        ));
+        // with every public input well-formed, junk bytes are a parse refusal
+        assert!(matches!(verify_spend_wire_v7(&d, &[d], 1, &[d, d], junk), Err(WireVerifyError::MalformedProof)));
+        let _ = TRACE_LEN;
     }
 }

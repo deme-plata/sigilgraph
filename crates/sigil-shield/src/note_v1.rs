@@ -503,6 +503,14 @@ pub enum WireVerifyError {
     /// from the network. Length is the second attacker-chosen shape a `Proof` carries.
     #[error("proof trace length {got} is outside the accepted range [{min}, {max}]")]
     WrongTraceLength { got: usize, min: usize, max: usize },
+    /// A v7 (256-bit) public input failed the strict canonical decode — see
+    /// `note_v7::Digest4::from_wire`.
+    #[error("malformed v7 public input: {0}")]
+    BadPublicInputV7(#[from] crate::note_v7::NoteV7Error),
+    /// The value leaving the pool in the clear is not below `2^RANGE_BITS`; the circuit's
+    /// field conservation would then not imply integer conservation.
+    #[error("public value {0} exceeds the range bound")]
+    PublicValueOutOfRange(u128),
 }
 
 /// Verify a shielded-spend proof from its wire-encoded public inputs.

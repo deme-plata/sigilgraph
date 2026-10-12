@@ -544,9 +544,148 @@ pub fn open_note_ciphertext(seed_hex: &str, ciphertext_json: &str) -> Result<Str
     .to_string())
 }
 
+// ── v7 (256-bit notes, 2026-10-12) ───────────────────────────────────────────────────
+//
+// Same seed, a second key family (`wallet_v7`). The page switches to these the moment
+// `/v1/shielded/anchor` reports `v7`: deposits carry a 32-byte blinding + 32-byte owner key,
+// the scanner opens `SIGILNT7` envelopes from the v7 epoch, and a v7 note is spent with
+// `buildPrivateSendV7`, which returns exactly the JSON `buildPrivateSendWithMemo` does so
+// the page's submit/record code is reused unchanged.
+
+/// The 32-byte v7 owner key (hex) — what a v7 payer commits a note to.
+#[wasm_bindgen(js_name = shieldPublicKeyV7)]
+pub fn shield_public_key_v7(seed_hex: &str) -> Result<String, JsValue> {
+    Ok(hex::encode(crate::wallet_v7::AccountV7::from_seed(hex32(seed_hex)?).owner_pk().to_wire()))
+}
+
+/// The v7 deposit for the self-made note at `index` worth `value`: `{cm, blinding, pk_shield}`
+/// (all hex), the three fields `/v1/shield` needs.
+#[wasm_bindgen(js_name = shieldNoteCommitmentV7)]
+pub fn shield_note_commitment_v7(seed_hex: &str, index: u32, value_str: &str) -> Result<String, JsValue> {
+    let account = crate::wallet_v7::AccountV7::from_seed(hex32(seed_hex)?);
+    let value = parse_u64(value_str, "value")?;
+    let note = account.note(index as u64, value).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(serde_json::json!({
+        "cm": hex::encode(note.commitment().to_wire()),
+        "blinding": hex::encode(crate::note_v7::Digest4(note.blinding).to_wire()),
+        "pk_shield": hex::encode(note.owner_pk().to_wire()),
+    })
+    .to_string())
+}
+
+/// The 32-byte v7 blinding of the self-made note at `index`.
+#[wasm_bindgen(js_name = noteBlindingV7)]
+pub fn note_blinding_v7(seed_hex: &str, index: u32) -> Result<String, JsValue> {
+    let account = crate::wallet_v7::AccountV7::from_seed(hex32(seed_hex)?);
+    Ok(hex::encode(crate::note_v7::Digest4(account.blinding(index as u64)).to_wire()))
+}
+
+/// The RAW v7 nullifier of this wallet's note at `position`; the chain's spent set holds
+/// it scoped by epoch — see `scopedNullifierV7`.
+#[wasm_bindgen(js_name = noteNullifierV7)]
+pub fn note_nullifier_v7(seed_hex: &str, position: u32) -> Result<String, JsValue> {
+    let account = crate::wallet_v7::AccountV7::from_seed(hex32(seed_hex)?);
+    Ok(hex::encode(account.nullifier_at(position as u64).to_wire()))
+}
+
+/// The spent-set key for a raw nullifier observed in `epoch` (= the node's `scoped_nullifier`).
+#[wasm_bindgen(js_name = scopedNullifierV7)]
+pub fn scoped_nullifier_v7(epoch: u32, nullifier_hex: &str) -> Result<String, JsValue> {
+    Ok(hex::encode(crate::wallet_v7::scoped_nullifier_v7(epoch, hex32(nullifier_hex)?)))
+}
+
+/// Seal the self-made v7 note at `index` to our own delivery key.
+#[wasm_bindgen(js_name = sealNoteToSelfV7)]
+pub fn seal_note_to_self_v7(seed_hex: &str, index: u32, value_str: &str) -> Result<String, JsValue> {
+    let account = crate::wallet_v7::AccountV7::from_seed(hex32(seed_hex)?);
+    let value = parse_u64(value_str, "value")?;
+    crate::wallet_v7::seal_output_v7(value, account.blinding(index as u64), &account.pk_enc_hex(), "")
+        .map(|c| c.0)
+        .map_err(|e| JsValue::from_str(&format!("seal: {e}")))
+}
+
+/// Open a v7 envelope with our delivery key: `{value, blinding_hex, memo}`. Errors on a
+/// stranger's note or a v1/v2 envelope (try `openNoteCiphertext` for those).
+#[wasm_bindgen(js_name = openNoteCiphertextV7)]
+pub fn open_note_ciphertext_v7(seed_hex: &str, ciphertext_json: &str) -> Result<String, JsValue> {
+    let id = crate::note_cipher::enc_identity_from_seed(&hex32(seed_hex)?);
+    let ct = crate::note_cipher::NoteCiphertext(ciphertext_json.to_string());
+    let pt = crate::note_cipher::try_open_note_v7(&ct, &id).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(serde_json::json!({
+        "value": pt.value.to_string(),
+        "blinding_hex": hex::encode(pt.blinding.to_wire()),
+        "memo": pt.memo.text(),
+    })
+    .to_string())
+}
+
+/// Build and PROVE a v7 private send of ONE note (self-made or received: pass its 32-byte
+/// blinding) against the v7 epoch's leaves, paying `amount` to a v7 owner key + delivery
+/// key, change back to us. Returns the same JSON as `buildPrivateSendWithMemo`.
+#[wasm_bindgen(js_name = buildPrivateSendV7)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_send_v7(
+    seed_hex: &str,
+    note_blinding_hex: &str,
+    note_value_str: &str,
+    note_position: u32,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+    memo: &str,
+) -> Result<String, JsValue> {
+    use crate::note_v7::Digest4;
+    use crate::wallet_v7::{build_spend_v7, seal_output_v7, AccountV7, NoteStoreV7, OwnedNoteV7};
+    let account = AccountV7::from_seed(hex32(seed_hex)?);
+    let note_value = parse_u64(note_value_str, "note_value")?;
+    let amount = parse_u64(amount_str, "amount")?;
+    let blinding = Digest4::from_wire(&hex32(note_blinding_hex)?).map_err(|e| JsValue::from_str(&format!("bad note_blinding_hex: {e}")))?;
+    let recipient_pk = Digest4::from_wire(&hex32(recipient_pk_shield_hex)?).map_err(|e| JsValue::from_str(&format!("bad recipient_pk_shield_hex: {e}")))?;
+    let leaves_hex: Vec<String> = serde_json::from_str(unpadded_leaves_json).map_err(|e| JsValue::from_str(&format!("bad unpadded_leaves_json: {e}")))?;
+    if leaves_hex.len() as u32 > capacity {
+        return Err(JsValue::from_str("more real leaves than the given capacity"));
+    }
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(leaves_hex.len());
+    for h in &leaves_hex {
+        leaves.push(hex32(h)?);
+    }
+    let change = note_value
+        .checked_sub(SHIELDED_FEE)
+        .and_then(|v| v.checked_sub(amount))
+        .ok_or_else(|| JsValue::from_str(&format!("note value {note_value} cannot cover amount {amount} + fee {SHIELDED_FEE}")))?;
+    let mut store = NoteStoreV7::new();
+    store.notes.push(OwnedNoteV7 { index: None, value: note_value, blinding: blinding.0, position: Some(note_position as u64), spent: false, memo: None });
+    let outs_spec = [(amount, recipient_pk), (change, account.owner_pk())];
+    let bundle = build_spend_v7(&account, &mut store, &leaves, capacity as usize, 0, SHIELDED_FEE, &outs_spec)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let (out0_value, out0_blinding) = bundle.out_preimages[0];
+    let ct = seal_output_v7(out0_value, out0_blinding, recipient_pk_enc_hex, memo)
+        .map_err(|e| JsValue::from_str(&format!("could not seal note to recipient: {e}")))?;
+    let (change_value, change_blinding) = bundle.out_preimages[1];
+    let change_ct = seal_output_v7(change_value, change_blinding, &account.pk_enc_hex(), "")
+        .map(|c| serde_json::Value::String(c.0))
+        .unwrap_or(serde_json::Value::Null);
+    Ok(serde_json::json!({
+        "anchor": hex::encode(bundle.anchor),
+        "nullifier": hex::encode(bundle.nullifier),
+        "extra_nullifiers": Vec::<String>::new(),
+        "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
+        "fee": SHIELDED_FEE.to_string(),
+        "proof": hex::encode(bundle.proof),
+        "note_ciphertexts": [ct.0, change_ct],
+        "change_index": bundle.out_indices.first().copied(),
+        "change_value": change_value.to_string(),
+        "change_blinding_hex": hex::encode(Digest4(change_blinding).to_wire()),
+        "generation": "v7",
+    })
+    .to_string())
+}
+
 /// Sanity/self-test entry point for the standalone WASM-loading smoke-test page: no
 /// secrets, no proving, just confirms the module loaded and its exports are callable.
 #[wasm_bindgen(js_name = wasmApiVersion)]
 pub fn wasm_api_version() -> String {
-    "sigil-shield-wasm-api/1".to_string()
+    "sigil-shield-wasm-api/2-v7".to_string()
 }

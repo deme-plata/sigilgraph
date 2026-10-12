@@ -32,6 +32,10 @@ pub mod notes;
 /// tree that consensus and the production circuit share. See the module docs for why
 /// `notes` (Rescue) and `sigil-mixer` (BLAKE3) are NOT the canonical shape.
 pub mod note_v1;
+/// v7 note format (spike, OFF-circuit): 256-bit (4-element) Rescue-Prime digests closing
+/// the "64-bit MiMC" audit item — see the module docs and `DESIGN.md`. Nothing else in the
+/// crate references it yet; wiring a v7 spend into consensus is a height-gated change.
+pub mod note_v7;
 /// Note ciphertexts — the side channel that makes RECEIVING a shielded payment
 /// possible. Safe only because notes are owner-bound; see the module docs.
 pub mod note_cipher;

@@ -2060,6 +2060,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      sees it). The send modal stays closed: the panes doShield touches are reset after. */
   window.sigilAutoShield=async function(){
     if(window.__autoShieldBusy) return false;
+    // 2026-10-12: the door can pause deposits (GET /v1/shielded/door). While paused, the
+    // background mover stays quiet instead of asking every poll. Cached 5 min; an older
+    // node without the route (404) reads as "not paused", which is what it is.
+    try{
+      var dr=window.__sigilDoorCache;
+      if(!dr||Date.now()-dr.ts>300000){
+        var rr=await fetch('/v1/shielded/door',{cache:'no-store'}); var jj=null;
+        if(rr.ok){ try{ jj=await rr.json(); }catch(_){} }
+        dr=window.__sigilDoorCache={ts:Date.now(), paused:!!(jj&&jj.door&&jj.door.deposits_paused)};
+      }
+      if(dr.paused) return false;
+    }catch(_){}
     var raw; try{ raw=BigInt(window.SIGIL_RAW||'0'); }catch(e){ return false; }
     var FLOOR=10000000n;                                  // 0.001 SIGIL — smallest note worth minting
     raw = raw - (raw % FLOOR);

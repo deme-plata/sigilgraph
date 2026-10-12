@@ -2227,17 +2227,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       _bulkTaken=t;
     }
 
+    // 2026-10-12 PRIVACY: ask for a BUCKET, never for the commitment itself. `has?cm=` made
+    // the wallet name its own seed-derived commitments to the node one by one, and the
+    // gateway's log kept them. `has_bucket?p=<first byte>` returns every commitment ever held
+    // with that byte (about 1/256 of the pool, all epochs); membership is decided HERE, so the
+    // node learns 8 bits shared by hundreds of commitments. Still fail-closed.
     async function _cmExists(hex){
       var k=String(hex).toLowerCase();
       if(k in _hasCache) return _hasCache[k];
       if(_bulkTaken) return (_hasCache[k]=!!_bulkTaken[k]);
-      var r=await fetch('/v1/shielded/has?cm='+k,{cache:'no-store'});
-      if(r.status===404){ await _loadBulk(); return (_hasCache[k]=!!_bulkTaken[k]); }
-      var j=null; try{ j=await r.json(); }catch(_){}
-      // Fail CLOSED on anything ambiguous. Submitting blind is what produced the
-      // permanently-stuck deposits; refusing costs the user one retry.
-      if(!j || j.ok!==true || typeof j.present!=='boolean') throw new Error('shielded/has unreadable');
-      return (_hasCache[k]=j.present);
+      var set=await window.__sigilCmBucket(k.slice(0,2), false);
+      if(set===null){ await _loadBulk(); return (_hasCache[k]=!!_bulkTaken[k]); }
+      return (_hasCache[k]=!!set[k]);
     }
 
     async function freeIndexFor(value){
@@ -3043,8 +3044,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       try{
         var outs=Array.isArray(cmOuts)?cmOuts:[];
         for(var oi=0; oi<outs.length && !seen; oi++){
-          var hj=await fetch('/v1/shielded/has?cm='+encodeURIComponent(String(outs[oi]).toLowerCase()),{cache:'no-store'}).then(function(r){return r.json();});
-          if(hj&&hj.ok&&hj.present===true) seen=true;
+          // 2026-10-12: by bucket, fresh each wake (see __sigilCmBucket); never the commitment itself.
+          var ck=String(outs[oi]).toLowerCase();
+          var bs=window.__sigilCmBucket ? await window.__sigilCmBucket(ck.slice(0,2), true) : null;
+          if(bs && bs[ck]) seen=true;
         }
       }catch(_){}
       if(!seen && nf){
@@ -9757,6 +9760,29 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   setInterval(host,3000);   // cheap, and the only thing that survives an arbitrary DOM swap
 
   tick(); setInterval(tick,20000);
+})();
+</script>
+
+<!-- 2026-10-12 PRIVACY: bucketed commitment lookups (see /v1/shielded/has_bucket). -->
+<script>
+(function(){
+  "use strict";
+  var cache=Object.create(null);   // first byte -> {at, set}
+  // A set of every commitment ever held whose first byte is p, or null if the node predates the
+  // endpoint (callers then fall back to the full walk, never to a single-commitment query).
+  window.__sigilCmBucket=async function(p, fresh){
+    p=String(p).toLowerCase();
+    var c=cache[p];
+    if(c && !fresh && (Date.now()-c.at)<15000) return c.set;
+    var r=await fetch('/v1/shielded/has_bucket?p='+p,{cache:'no-store'});
+    if(r.status===404) return null;
+    var j=null; try{ j=await r.json(); }catch(_){}
+    if(!j || j.ok!==true || !Array.isArray(j.cms)) throw new Error('shielded/has_bucket unreadable');
+    var set=Object.create(null);
+    for(var i=0;i<j.cms.length;i++) set[String(j.cms[i]).toLowerCase()]=1;
+    cache[p]={at:Date.now(), set:set};
+    return set;
+  };
 })();
 </script>
 

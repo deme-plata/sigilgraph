@@ -213,6 +213,7 @@ body.view-desktop .desktop{display:flex}
   <div class="notch"></div>
   <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span id="pxPhone" style="color:#c4b5fd">▮▮▮ 5G</span></div>
   <div class="phead"><img class="markimg" data-brand="flat" alt="SIGIL" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
+  <div class="pdock" id="pdock"></div>
   <div class="pscroll">
   <div class="dex-ticker dex-ticker-global" aria-label="Open live DEX markets" role="button" tabindex="0" onclick="openSwap()" onkeydown="if(event.key==='Enter'||event.key===' '){openSwap();event.preventDefault()}">
     <div class="dex-ticker-label"><span>DEX</span><small>markets</small></div>
@@ -264,7 +265,8 @@ body.view-desktop .desktop{display:flex}
     </div>
     <div class="gspacer"></div>
     <div class="gright">
-      <div class="net">grid online</div>
+      <!-- 2026-10-12: the static "grid online" pill is gone: it never changed, not even with the node down.
+           The height pill below carries a live dot instead (green = the height moved in the last 30 s). -->
       <!-- SIGIL/USDC from the Uniswap V2 pool on Polygon. Read straight from the
            pair's getReserves(), never a cached constant, and badged TESTNET because
            the pool holds about two tenths of a cent — see #pxTestnet. -->
@@ -277,13 +279,14 @@ body.view-desktop .desktop{display:flex}
               background:rgba(251,191,36,.18);color:#fbbf24;border:1px solid rgba(251,191,36,.4);
               letter-spacing:.09em;font-weight:700">TESTNET</span>
       </div>
-      <div class="pill" title="live mine-chain height · click for network stats" onclick="window.openStats&&window.openStats()" style="border-color:rgba(0,224,198,.4);cursor:pointer"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
-      <div class="pill" title="network hashrate — click for the Network Power graph" onclick="window.openPower&&window.openPower()" style="border-color:rgba(251,191,36,.4);cursor:pointer"><i class="lic" data-lucide="activity" style="width:14px;height:14px;filter:none"></i><b data-nethps>…</b></div>
-      <div class="pill" title="live miners — wallets with an unexpired hashrate report in the pool window"><i class="lic" data-lucide="users" style="width:14px;height:14px;filter:none"></i><b data-peercount>…</b></div>
+      <div class="pill" id="hPill" title="live mine-chain height · click for network stats" onclick="window.openStats&&window.openStats()" style="border-color:rgba(0,224,198,.4);cursor:pointer"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
+      <div class="pill" id="hpsPill" title="network hashrate — click for the Network Power graph" onclick="window.openPower&&window.openPower()" style="border-color:rgba(251,191,36,.4);cursor:pointer"><i class="lic" data-lucide="activity" style="width:14px;height:14px;filter:none"></i><b data-nethps>…</b></div>
+      <div class="pill" id="minersPill" title="live miners — wallets with an unexpired hashrate report in the pool window"><i class="lic" data-lucide="users" style="width:14px;height:14px;filter:none"></i><b data-peercount>…</b></div>
       <div class="pill" id="myHpsPill" style="display:none" title="your live hashrate (this wallet)"><i class="lic" data-lucide="pickaxe" style="width:14px;height:14px;filter:none"></i><b data-myhps style="color:var(--gold)">…</b></div>
-      <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b data-balance>0</b> SIGIL</div>
+      <div class="pill" id="balPill" title="your balance"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b data-balance>0</b> SIGIL</div>
+      <div class="gdock" id="gdock"></div>
       <div class="avatar" id="profileBtn" title="profile · quick links" onclick="window.toggleProfile&&window.toggleProfile(event)">◈</div>
-      <button class="collapse" onclick="setView('phone')">⤡ phone</button>
+      <button class="collapse" onclick="setView('phone')" title="switch to the phone layout">⤡<span class="clT">phone</span></button>
     </div>
     <div class="pmenu" id="pmenu">
       <div class="phd"><div class="pav">◈</div><div style="min-width:0"><div style="font-weight:700;color:var(--text)">Operator</div><div id="pmAddr" style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">sigil · g0</div></div></div>
@@ -9679,6 +9682,60 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   setInterval(host,3000);   // cheap, and the only thing that survives an arbitrary DOM swap
 
   tick(); setInterval(tick,20000);
+})();
+</script>
+
+<!-- 2026-10-12 TOPBAR DOCK (Viktor: "the global topbar … is cluttered in the right side").
+     The two gauge chips (Kc and the skyline) used to float position:fixed over the top-right corner and
+     covered the bar's own pills, avatar and phone button. They now sit IN the bar (desktop) or in a row
+     under the header (phone). Lower-priority pills drop out as the window narrows; the panels are unchanged. -->
+<style>
+  .gdock{display:flex;align-items:center;gap:6px}
+  .pdock{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;padding:0 6px 12px}
+  .gdock:empty,.pdock:empty{display:none}
+  #gdock #kgChip,#gdock #skChip,#pdock #kgChip,#pdock #skChip{position:static;top:auto;right:auto;z-index:auto;
+    padding:5px 10px;font-size:11.5px;gap:6px;backdrop-filter:none}
+  #gdock #kgChipKfix,#pdock #kgChipKfix{display:none}   /* K_fix is still in the panel */
+  html.chips-in-bar #kgPanel,html.chips-in-bar #skPanel{top:72px}
+  #hPill::before{content:'';width:7px;height:7px;border-radius:50%;background:#64748b;flex:none}
+  #hPill.live::before{background:var(--teal);box-shadow:0 0 8px var(--teal);animation:blink 2s infinite}
+  #hPill.stale::before{background:#fbbf24;box-shadow:none;animation:none}
+  #hPill.stale{border-color:rgba(251,191,36,.5)!important}
+  /* one line per pill; the search box gives way first */
+  .gbar .gright{flex:none;gap:9px}
+  .gbar .gright>*{flex:none;white-space:nowrap}
+  .gbar .search{min-width:150px;flex:1 1 260px}
+  .gbar .gspacer{flex:1 1 0}
+  .gbar .search>.lic,.gbar .search>svg,.gbar .search>kbd{flex:none}
+  .gbar .search input{min-width:0;flex:1 1 auto;width:auto}
+  #hPill .lic,#hpsPill .lic,#minersPill .lic{display:none}   /* the text already says H / ⚡ / 👥 */
+  @media(max-width:1679px){#minersPill,#balPill{display:none!important}}
+  @media(max-width:1439px){#pxChg{display:none!important}#gdock .kgReg,#gdock .skReg{display:none}}
+  @media(max-width:1279px){#pxPill{display:none!important}.gbar .collapse .clT{display:none}}
+  @media(max-width:1023px){#hpsPill{display:none!important}.gbar .search kbd{display:none}}
+</style>
+<script>
+(function(){
+  "use strict";
+  var last='', lastAt=0;
+  function dock(){
+    var desk=!!(document.body&&document.body.classList.contains('view-desktop'));
+    var t=document.getElementById(desk?'gdock':'pdock'); if(!t) return;
+    ['kgChip','skChip'].forEach(function(id){ var c=document.getElementById(id); if(c&&c.parentElement!==t) t.appendChild(c); });
+    document.documentElement.classList.toggle('chips-in-bar',desk);
+  }
+  function live(){
+    var p=document.getElementById('hPill'); if(!p) return;
+    var b=p.querySelector('b'), v=b?b.textContent:'';
+    if(v!==last&&/\d/.test(v)){ last=v; lastAt=Date.now(); }
+    var age=lastAt?(Date.now()-lastAt)/1000:-1, ok=lastAt>0&&age<30;
+    p.classList.toggle('live',ok); p.classList.toggle('stale',lastAt>0&&!ok);
+    p.title=!lastAt?'waiting for the first height reading · click for network stats'
+      :ok?'live: the chain height moved '+Math.round(age)+' s ago · click for network stats'
+      :'no new height for '+Math.round(age)+' s: the node may be unreachable · click for network stats';
+  }
+  function step(){ try{ dock(); live(); }catch(e){} }
+  step(); setInterval(step,1500);   // the gate swaps <body> and the skyline chip re-hosts itself on <html>; re-dock
 })();
 </script>
 

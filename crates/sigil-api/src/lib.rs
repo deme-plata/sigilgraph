@@ -1075,6 +1075,35 @@ pub async fn shielded_has_commitment_handler(
     }))
 }
 
+/// Bucketed membership (2026-10-12). `/v1/shielded/has?cm=` makes a wallet name the exact
+/// commitment it cares about, and a gateway (or its log) can tie that to the asker. Here the
+/// wallet names only the FIRST BYTE of the encoding and gets back every commitment ever held
+/// with that byte, all epochs (~1/256 of the pool), then checks membership locally. The node
+/// learns 8 bits, shared by hundreds of commitments. Exactly one byte: a longer prefix would
+/// shrink the bucket and leak more, so it is refused.
+#[flux_api_macros::api(GET, "/v1/shielded/has_bucket", summary = "All commitments (any epoch) whose first byte is p — check membership client-side")]
+pub async fn shielded_has_bucket_handler(
+    State(st): State<AppState>,
+    Query(q): Query<ShieldedBucketQuery>,
+) -> Json<serde_json::Value> {
+    let Some(p) = hex::decode(&q.p).ok().filter(|b| b.len() == 1) else {
+        return Json(serde_json::json!({
+            "ok": false, "error": "p must be exactly 2 hex chars (one byte)", "ts_ms": now_ms(),
+        }));
+    };
+    let guard = match st.state.read() { Ok(g) => g, Err(x) => x.into_inner() };
+    let cms: Vec<String> = guard.shielded().commitments_with_prefix(&p).iter().map(hex::encode).collect();
+    Json(serde_json::json!({
+        "ok": true,
+        "p": q.p.to_lowercase(),
+        "bits": 8,
+        "count": cms.len(),
+        "cms": cms,
+        "epoch": guard.shielded().epoch(),
+        "ts_ms": now_ms(),
+    }))
+}
+
 #[flux_api_macros::api(GET, "/v1/shielded/leaves", summary = "Real (unpadded) note commitments plus delivery ciphertexts, for wallet/miner note discovery and spend proving")]
 pub async fn shielded_leaves_handler(
     State(st): State<AppState>,
@@ -1292,6 +1321,12 @@ pub async fn shielded_nullifiers_handler(State(st): State<AppState>) -> Json<ser
 #[derive(serde::Deserialize)]
 pub struct ShieldedHasQuery {
     pub cm: String,
+}
+
+/// `?p=<2 hex>` on `/v1/shielded/has_bucket`.
+#[derive(serde::Deserialize)]
+pub struct ShieldedBucketQuery {
+    pub p: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -2692,6 +2727,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/leaves", get(shielded_leaves_handler))
         .route("/v1/shielded/tags", get(shielded_tags_handler))
         .route("/v1/shielded/has", get(shielded_has_commitment_handler))
+        .route("/v1/shielded/has_bucket", get(shielded_has_bucket_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
         .route("/v1/aether/root", get(aether::aether_root))

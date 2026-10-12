@@ -1066,6 +1066,25 @@ impl ShieldedPool {
             || self.archive.iter().any(|a| a.notes.contains(cm))
     }
 
+    /// Every commitment ever held, in any epoch, whose wire encoding starts with `prefix`
+    /// (2026-10-12, for `/v1/shielded/has_bucket`). A wallet asks for a BUCKET and checks
+    /// membership itself, so the node never learns which commitment it cared about. Read-only.
+    pub fn commitments_with_prefix(&self, prefix: &[u8]) -> Vec<[u8; 32]> {
+        let prefix = &prefix[..prefix.len().min(32)];
+        if let Some(seen) = self.seen_commitments.as_ref() {
+            let mut lo = [0u8; 32];
+            lo[..prefix.len()].copy_from_slice(prefix);
+            return seen.range(lo..).take_while(|c| c.starts_with(prefix)).copied().collect();
+        }
+        let mut out: Vec<[u8; 32]> = self.notes.iter().filter(|c| c.starts_with(prefix)).copied().collect();
+        for a in self.archive.iter() {
+            out.extend(a.notes.iter().filter(|c| c.starts_with(prefix)).copied());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Build the all-epoch commitment index. Cheap to call repeatedly — it is a no-op once
     /// built, and `append_note_with_delivery` keeps it in step from then on.
     pub(crate) fn ensure_commitment_index(&mut self) {
@@ -1627,6 +1646,28 @@ mod tests {
         );
         assert!(p.has_ever_held(&wire(5)));
         assert!(!p.has_ever_held(&wire(3_000_000)));
+    }
+
+    /// The bucket a wallet asks for spans sealed and live epochs, holds every commitment with
+    /// that first byte and nothing else, whether or not the all-epoch index has been built.
+    #[test]
+    fn prefix_bucket_spans_epochs_and_matches_has_ever_held() {
+        let mut p = ShieldedPool::new();
+        fill_to_capacity(&mut p);
+        p.append_note(wire(2_000_000)).unwrap();
+        assert_eq!(p.epoch(), 1);
+        for byte in [0x05u8, 0x80, 0xff] {
+            let b = p.commitments_with_prefix(&[byte]);
+            assert!(b.iter().all(|c| c[0] == byte));
+            assert!(b.iter().all(|c| p.has_ever_held(c)));
+            let expected = (0..POOL_CAPACITY as u64).chain([2_000_000u64]).filter(|i| (i & 0xff) as u8 == byte).count();
+            assert_eq!(b.len(), expected, "bucket {byte:#04x}");
+        }
+        p.ensure_commitment_index();
+        let indexed = p.commitments_with_prefix(&[0x80]);
+        let mut scanned = p.clone();
+        scanned.seen_commitments = None;
+        assert_eq!(indexed, scanned.commitments_with_prefix(&[0x80]), "index and scan agree");
     }
 
     /// The digest folds into `wallet_state_root`, which settled headers commit to. It must

@@ -972,6 +972,8 @@ impl ShieldedBridge {
         cm_outs: &[[u8; 32]],
         proof: &[u8],
     ) -> Result<(), ShieldedSubmitError> {
+        // (g3 port of 4e3ecd74, 2026-10-19: the g2 door refused v4 proofs inside the v1 family; on g3 the
+        // v1 pool is closed and empty from genesis, so the generation dispatch below is the whole rule.)
         // v7 (2026-10-12): the ANCHOR's generation, read from the settled pool, selects the
         // verifier family — never the proof's shape. Unknown anchor ⇒ v1, as before.
         let generation = self.generation_for(anchor);

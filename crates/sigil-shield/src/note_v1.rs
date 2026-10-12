@@ -568,6 +568,35 @@ pub fn verify_spend_wire_multi(
     cm_outs: &[[u8; 32]],
     proof: &[u8],
 ) -> Result<(), WireVerifyError> {
+    verify_spend_wire_multi_impl(anchor, nullifiers, fee, cm_outs, proof, true)
+}
+
+/// The DOOR's check (2026-10-12): hiding circuits only.
+///
+/// Identical to [`verify_spend_wire_multi`] except that a one-input spend must verify under
+/// v5. The legacy v4 proof is sound but publishes the recipient key and both output amounts
+/// verbatim, so admitting one puts a payment's whole content on chain. Settlement keeps the
+/// dual-accept window (closing it there is a consensus change: a height gate, follower-first);
+/// the producer's admission door closes it now, which is enough while it is the only author.
+/// Every wallet built since 2026-08-28 proves with v5/v6.
+pub fn verify_spend_wire_multi_hiding(
+    anchor: &[u8; 32],
+    nullifiers: &[[u8; 32]],
+    fee: u128,
+    cm_outs: &[[u8; 32]],
+    proof: &[u8],
+) -> Result<(), WireVerifyError> {
+    verify_spend_wire_multi_impl(anchor, nullifiers, fee, cm_outs, proof, false)
+}
+
+fn verify_spend_wire_multi_impl(
+    anchor: &[u8; 32],
+    nullifiers: &[[u8; 32]],
+    fee: u128,
+    cm_outs: &[[u8; 32]],
+    proof: &[u8],
+    allow_legacy_v4: bool,
+) -> Result<(), WireVerifyError> {
     use crate::spend_full_v4::{verify_spend_full_v4, SpendFullV4PublicInputs, N_OUTS};
     use crate::spend_full_v5::{verify_spend_full_v5, SpendFullV5PublicInputs};
     use crate::spend_full_v5::WIDTH as V5_WIDTH;
@@ -664,6 +693,19 @@ pub fn verify_spend_wire_multi(
             match verify_spend_full_v5(p, SpendFullV5PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
             {
                 Ok(()) => Ok(()),
+                // Hiding-only: still run v4 once, purely to tell the sender WHY (an outdated
+                // wallet deserves "update", not a bare verifier error).
+                Err(v5_err) if !allow_legacy_v4 => match verify_spend_full_v4(
+                    p4,
+                    SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs },
+                ) {
+                    Ok(()) => Err(WireVerifyError::VerifierRejected(
+                        "legacy v4 proof refused: it publishes the recipient key and both amounts \
+                         in the clear. Update the wallet (every wallet since 2026-08-28 proves with v5)"
+                            .into(),
+                    )),
+                    Err(_) => Err(WireVerifyError::VerifierRejected(format!("{v5_err:?}"))),
+                },
                 Err(v5_err) => verify_spend_full_v4(
                     p4,
                     SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs },
@@ -895,6 +937,49 @@ mod tests {
             SpendFullV4PublicInputs { root: pool.root(), nf, fee, cm_outs },
         )
         .expect("SECURITY: off-circuit note shape must verify against the in-circuit AIR");
+    }
+
+    /// The door (2026-10-12): the hiding-only check refuses a v4 proof that settlement still
+    /// accepts, says why, and admits a v5 proof of the same spend. Run with --profile
+    /// release-fast (v4 proving trips winterfell's debug-only degree check, see above).
+    #[test]
+    fn hiding_only_door_refuses_v4_and_admits_v5() {
+        use crate::spend_full_v5 as v5;
+        let spender = Note::new(100, 4242, 0xDEAD).expect("in range");
+        let mut leaves: Vec<BaseElement> = (0..7)
+            .map(|i| Note::new(10 + i, 900 + i, 5000 + i).unwrap().commitment())
+            .collect();
+        let position = 3usize;
+        leaves.insert(position, spender.commitment());
+        let pool = ShieldedPoolTree::new(leaves).expect("pool");
+        let fee = 3u128;
+        let me = spender.owner_pk();
+        let outs = [(e(50), e(777), me), (e(47), e(888), me)];
+        let path = pool.path(position);
+        let anchor = to_wire(pool.root());
+        let nf = to_wire(spender.nullifier(position as u64));
+        let cms: Vec<[u8; 32]> =
+            outs.iter().map(|(v, b, pk)| to_wire(compress2(compress2(*v, *b), *pk))).collect();
+
+        let t4 = build_spend_full_v4_trace(
+            spender.value, spender.blinding, spender.spend_key, e(fee as u64), &outs, &path,
+        );
+        let p4 = SpendFullV4Prover::new(mimc_options()).prove(t4).expect("v4 proves").to_bytes();
+        verify_spend_wire_multi(&anchor, &[nf], fee, &cms, &p4).expect("settlement still accepts v4");
+        let err = verify_spend_wire_multi_hiding(&anchor, &[nf], fee, &cms, &p4)
+            .expect_err("the door must refuse v4");
+        assert!(err.to_string().contains("legacy v4"), "unexpected reason: {err}");
+
+        let t5 = v5::build_spend_full_v5_trace(
+            spender.value, spender.blinding, spender.spend_key, e(fee as u64), &outs, &path,
+            &v5::v5_options(),
+        );
+        let p5 = v5::SpendFullV5Prover::new(v5::v5_options()).prove(t5).expect("v5 proves").to_bytes();
+        verify_spend_wire_multi_hiding(&anchor, &[nf], fee, &cms, &p5).expect("the door admits v5");
+        verify_spend_wire_multi(&anchor, &[nf], fee, &cms, &p5).expect("settlement admits v5");
+        // a garbage proof is still a plain rejection, not the v4 message
+        let junk = verify_spend_wire_multi_hiding(&anchor, &[nf], fee, &cms, b"junk").expect_err("junk");
+        assert!(!junk.to_string().contains("legacy v4"));
     }
 
     /// Wire encoding round-trips, and every malleable spelling is refused. Two encodings

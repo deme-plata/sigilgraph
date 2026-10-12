@@ -60,6 +60,8 @@ pub mod spend_full_v5;
 /// Two-input spend: the circuit that lets a wallet MERGE notes. v5 stays the 1-input
 /// circuit; see docs/SIGIL_MULTI_INPUT_SPEND_DESIGN.md for why adding beats generalising.
 pub mod spend_full_v6;
+/// v7 single-input Rescue spend AIR (M1: value opening, owner, membership, nullifier, position).
+pub mod spend_full_v7;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;

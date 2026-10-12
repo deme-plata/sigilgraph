@@ -79,9 +79,9 @@ pub type Rescue = Rp64_256;
 
 // Domain separators ("SIGIL_v7" family), distinct 64-bit tags so the three hash call sites
 // cannot be made to collide by an attacker who chooses their inputs. ASCII, big-endian.
-const DOM_PK: u64 = 0x5347_4C37_5F5F_504B; // "SGL7__PK"
-const DOM_VAL: u64 = 0x5347_4C37_5F56_414C; // "SGL7_VAL"
-const DOM_NF: u64 = 0x5347_4C37_5F5F_4E46; // "SGL7__NF"
+pub const DOM_PK: u64 = 0x5347_4C37_5F5F_504B; // "SGL7__PK"
+pub const DOM_VAL: u64 = 0x5347_4C37_5F56_414C; // "SGL7_VAL"
+pub const DOM_NF: u64 = 0x5347_4C37_5F5F_4E46; // "SGL7__NF"
 
 /// Errors from v7 note construction / decoding.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

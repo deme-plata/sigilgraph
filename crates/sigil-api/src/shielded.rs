@@ -236,12 +236,219 @@ pub enum ShieldedSubmitError {
     /// refuses it too (`sigil_state::shielded::ShieldedError::V1DepositsClosed`); the door
     /// says so immediately so the wallet is not left waiting on a rejection.
     V1DepositsClosed,
+    /// The withdrawal brake is full (`SIGIL_UNSHIELD_DAILY_CAP`, see `UnshieldWindow`).
+    /// All amounts in glyphs; `retry_after_secs` is when enough of the window has expired
+    /// for THIS withdrawal to fit, or `None` when it can never fit (larger than the cap).
+    UnshieldCapReached { cap: u128, available: u128, retry_after_secs: Option<u64> },
 }
 
 /// Whether transparent → shielded deposits are paused by the operator. Opt-in brake:
 /// `SIGIL_SHIELD_DEPOSITS=pause`. Deposits are otherwise open, each one opening-checked.
 pub fn shield_deposits_paused() -> bool {
     matches!(std::env::var("SIGIL_SHIELD_DEPOSITS").as_deref(), Ok("pause"))
+}
+
+/// Glyphs per SIGIL on g2 (10 decimals).
+const GLYPHS_PER_SIGIL: u128 = 10_000_000_000;
+
+fn fmt_sigil(glyphs: u128) -> String {
+    let whole = glyphs / GLYPHS_PER_SIGIL;
+    let frac = glyphs % GLYPHS_PER_SIGIL;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let f = format!("{frac:010}");
+    format!("{whole}.{}", f.trim_end_matches('0'))
+}
+
+fn fmt_wait(secs: u64) -> String {
+    let (h, m) = (secs / 3600, (secs % 3600 + 59) / 60);
+    match (h, m) {
+        (0, m) => format!("{m} min"),
+        (h, 60) => format!("{} h", h + 1),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// The withdrawal brake (2026-10-12): at most `cap` glyphs may leave the private pool per
+/// rolling `window`, summed over every shielded → transparent withdrawal this door admits.
+///
+/// Why it exists: a note commitment is ONE 64-bit field element, so finding two openings
+/// of the same commitment is a ~2^32 birthday search. A note committed with a small value
+/// and spent proving a large one passes every check the door and the chain make today.
+/// The only way that value reaches anyone is a withdrawal, so this caps the damage per day
+/// until notes are re-committed with 256-bit digests. It costs nothing in privacy: a
+/// withdrawal's amount is public already.
+///
+/// Opt-in, like the deposit pause: `SIGIL_UNSHIELD_DAILY_CAP=<whole SIGIL>` turns it on,
+/// unset or `off` leaves it off (followers, sigil-top and the tests are unaffected).
+/// `SIGIL_UNSHIELD_CAP_FILE=<path>` persists the window so a restart cannot reset it.
+/// Counted at admission, after the proof verifies, and never refunded: conservative.
+#[derive(Debug)]
+pub struct UnshieldWindow {
+    cap: Option<u128>,
+    window_secs: u64,
+    entries: std::collections::VecDeque<(u64, u128)>,
+    path: Option<std::path::PathBuf>,
+}
+
+impl Default for UnshieldWindow {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+/// The door's brakes as one JSON-able snapshot (`GET /v1/shielded/door`).
+#[derive(Debug, Clone, Serialize)]
+pub struct DoorStatus {
+    pub deposits_paused: bool,
+    pub unshield_cap_active: bool,
+    pub unshield_cap_glyphs: Option<String>,
+    pub unshield_used_glyphs: String,
+    pub unshield_available_glyphs: Option<String>,
+    pub unshield_window_secs: u64,
+    pub unshield_admitted_in_window: usize,
+}
+
+impl UnshieldWindow {
+    pub const DAY_SECS: u64 = 24 * 60 * 60;
+
+    pub fn from_env() -> Self {
+        let cap = match std::env::var("SIGIL_UNSHIELD_DAILY_CAP").as_deref().map(str::trim) {
+            Ok("") | Ok("off") | Err(_) => None,
+            Ok(v) => match v.parse::<u128>() {
+                Ok(whole) => Some(whole.saturating_mul(GLYPHS_PER_SIGIL)),
+                // A typo must not silently lift the brake: an unparseable value is the
+                // tightest cap there is.
+                Err(_) => {
+                    eprintln!("⚠ SIGIL_UNSHIELD_DAILY_CAP={v:?} is not a whole number; capping at 0");
+                    Some(0)
+                }
+            },
+        };
+        let path = std::env::var("SIGIL_UNSHIELD_CAP_FILE")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .map(std::path::PathBuf::from);
+        let mut w = Self::with_cap(cap, Self::DAY_SECS, path);
+        w.load();
+        w
+    }
+
+    pub fn with_cap(cap: Option<u128>, window_secs: u64, path: Option<std::path::PathBuf>) -> Self {
+        Self { cap, window_secs, entries: Default::default(), path }
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn load(&mut self) {
+        let Some(path) = &self.path else { return };
+        let Ok(raw) = std::fs::read_to_string(path) else { return };
+        match serde_json::from_str::<Vec<(u64, String)>>(&raw) {
+            Ok(v) => {
+                self.entries = v
+                    .into_iter()
+                    .filter_map(|(t, a)| a.parse::<u128>().ok().map(|a| (t, a)))
+                    .collect();
+            }
+            Err(e) => {
+                // Unreadable state must not lift the brake: assume the window is full.
+                eprintln!("⚠ unshield window {} unreadable ({e}); treating the window as full", path.display());
+                if let Some(cap) = self.cap {
+                    self.entries.push_back((Self::now_secs(), cap));
+                }
+            }
+        }
+    }
+
+    fn persist(&self) {
+        let Some(path) = &self.path else { return };
+        let v: Vec<(u64, String)> = self.entries.iter().map(|(t, a)| (*t, a.to_string())).collect();
+        let tmp = path.with_extension("tmp");
+        let ok = serde_json::to_vec(&v)
+            .ok()
+            .and_then(|bytes| std::fs::write(&tmp, bytes).ok())
+            .and_then(|_| std::fs::rename(&tmp, path).ok());
+        if ok.is_none() {
+            eprintln!("⚠ could not persist the unshield window to {}", path.display());
+        }
+    }
+
+    fn prune(&mut self, now: u64) {
+        let horizon = now.saturating_sub(self.window_secs);
+        while matches!(self.entries.front(), Some((t, _)) if *t <= horizon) {
+            self.entries.pop_front();
+        }
+    }
+
+    fn used(&self) -> u128 {
+        self.entries.iter().map(|(_, a)| *a).fold(0u128, u128::saturating_add)
+    }
+
+    /// Would `amount` fit now? The refusal, if not. Does not record anything.
+    pub fn check_at(&mut self, now: u64, amount: u128) -> Result<(), ShieldedSubmitError> {
+        let Some(cap) = self.cap else { return Ok(()) };
+        self.prune(now);
+        let used = self.used();
+        if used.saturating_add(amount) <= cap {
+            return Ok(());
+        }
+        let available = cap.saturating_sub(used);
+        let retry_after_secs = if amount > cap {
+            None
+        } else {
+            // Walk the oldest entries until enough has expired for `amount` to fit.
+            let mut still = used;
+            let mut at = None;
+            for (t, a) in &self.entries {
+                still = still.saturating_sub(*a);
+                if still.saturating_add(amount) <= cap {
+                    at = Some((t + self.window_secs).saturating_sub(now).max(1));
+                    break;
+                }
+            }
+            at
+        };
+        Err(ShieldedSubmitError::UnshieldCapReached { cap, available, retry_after_secs })
+    }
+
+    /// Check and, if it fits, record `amount` at `now`.
+    pub fn take_at(&mut self, now: u64, amount: u128) -> Result<(), ShieldedSubmitError> {
+        self.check_at(now, amount)?;
+        if self.cap.is_some() {
+            self.entries.push_back((now, amount));
+            self.persist();
+        }
+        Ok(())
+    }
+
+    pub fn check(&mut self, amount: u128) -> Result<(), ShieldedSubmitError> {
+        self.check_at(Self::now_secs(), amount)
+    }
+
+    pub fn take(&mut self, amount: u128) -> Result<(), ShieldedSubmitError> {
+        self.take_at(Self::now_secs(), amount)
+    }
+
+    pub fn status(&mut self) -> DoorStatus {
+        self.prune(Self::now_secs());
+        let used = self.used();
+        DoorStatus {
+            deposits_paused: shield_deposits_paused(),
+            unshield_cap_active: self.cap.is_some(),
+            unshield_cap_glyphs: self.cap.map(|c| c.to_string()),
+            unshield_used_glyphs: used.to_string(),
+            unshield_available_glyphs: self.cap.map(|c| c.saturating_sub(used).to_string()),
+            unshield_window_secs: self.window_secs,
+            unshield_admitted_in_window: self.entries.len(),
+        }
+    }
 }
 
 /// Recompute a deposit's leaf from its opening and require it to equal `cm`.
@@ -355,6 +562,21 @@ impl ShieldedSubmitError {
                  old format are closed. Update the wallet (nothing was queued, your balance was \
                  not touched)"
                 .into(),
+            Self::UnshieldCapReached { cap, available, retry_after_secs } => {
+                let when = match retry_after_secs {
+                    Some(s) => format!("this withdrawal fits again in about {}", fmt_wait(*s)),
+                    None => "this withdrawal is larger than the whole limit: split the note \
+                             with a private send to yourself first, then withdraw the parts"
+                        .to_string(),
+                };
+                format!(
+                    "withdrawals from the private pool are limited to {} SIGIL per 24 hours \
+                     while a security upgrade is prepared; {} SIGIL is free right now and {when}. \
+                     Nothing was queued and your note is untouched",
+                    fmt_sigil(*cap),
+                    fmt_sigil(*available)
+                )
+            }
         }
     }
 }
@@ -478,6 +700,9 @@ pub struct ShieldedBridge {
     /// the v7 generation is open, so an old-format deposit is turned away at once. `None`
     /// (tests, non-consensus callers) behaves exactly as before v7: everything is v1.
     pool_view: Mutex<Option<Box<dyn PoolView>>>,
+    /// The withdrawal brake — see `UnshieldWindow`. Off unless the operator sets
+    /// `SIGIL_UNSHIELD_DAILY_CAP`.
+    unshield_window: Mutex<UnshieldWindow>,
 }
 
 /// The door's read-only window onto the settled pool. sigil-node hands in the shared state.
@@ -911,8 +1136,15 @@ impl ShieldedBridge {
         // 2026-10-19: the change outputs carry delivery envelopes too — same rules as a send.
         check_output_envelopes(outs.len(), note_ciphertexts)?;
         self.reject_if_queued(&nf)?;
+        // Value leaving the pool is the amount plus the fee. Cheap refusal first, so an
+        // over-limit withdrawal costs no proof verification.
+        let leaving = amount.saturating_add(fee);
+        self.unshield_window.lock().unwrap().check(leaving)?;
         // The withdrawn amount sits in the circuit's public-value slot.
         self.precheck_proof(&anchor_b, &nf, amount, &outs, &proof)?;
+        // Record only a withdrawal whose proof verified, so junk cannot fill the window.
+        // Check-and-record under one lock: two concurrent withdrawals cannot both fit.
+        self.unshield_window.lock().unwrap().take(leaving)?;
 
         let proof_hex = hex::encode(&proof);
         let tx = SigilTx::Unshield {
@@ -932,6 +1164,11 @@ impl ShieldedBridge {
             note_ciphertexts: note_ciphertexts.to_vec(),
         }));
         Ok(id)
+    }
+
+    /// Both door brakes, for `GET /v1/shielded/door`.
+    pub fn door_status(&self) -> DoorStatus {
+        self.unshield_window.lock().unwrap().status()
     }
 
     fn decode_outs(&self, cm_outs: &[String]) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
@@ -1473,6 +1710,62 @@ mod tests {
         b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof, &g3_envelopes(2)).expect("a v7 spend passes the door when its anchor is v7");
     }
 
+
+    const S: u128 = GLYPHS_PER_SIGIL;
+
+    /// The brake admits up to the cap per rolling day, refuses the rest with an honest
+    /// wait, frees itself as the window rolls, and refuses outright what can never fit.
+    #[test]
+    fn unshield_window_caps_a_rolling_day() {
+        let day = UnshieldWindow::DAY_SECS;
+        let mut w = UnshieldWindow::with_cap(Some(1_000 * S), day, None);
+        w.take_at(100, 500 * S).unwrap();
+        w.take_at(200, 500 * S).unwrap();
+        match w.take_at(300, 1 * S) {
+            Err(ShieldedSubmitError::UnshieldCapReached { available, retry_after_secs, .. }) => {
+                assert_eq!(available, 0);
+                // The first 500 expires at 100 + day; that is when 1 SIGIL fits again.
+                assert_eq!(retry_after_secs, Some(100 + day - 300));
+            }
+            other => panic!("expected the cap, got {other:?}"),
+        }
+        // Refusals record nothing.
+        assert_eq!(w.used(), 1_000 * S);
+        // One second after the first entry leaves the window, it fits.
+        w.take_at(100 + day, 400 * S).unwrap();
+        // Larger than the cap: never fits, says so.
+        match w.check_at(100 + day, 2_000 * S) {
+            Err(ShieldedSubmitError::UnshieldCapReached { retry_after_secs: None, .. }) => {}
+            other => panic!("expected a permanent refusal, got {other:?}"),
+        }
+        let msg = w.check_at(100 + day, 2_000 * S).unwrap_err().message();
+        assert!(msg.contains("1000 SIGIL per 24 hours"), "{msg}");
+    }
+
+    /// Off means off, and the window survives a restart through its file.
+    #[test]
+    fn unshield_window_off_and_persisted() {
+        let mut off = UnshieldWindow::with_cap(None, UnshieldWindow::DAY_SECS, None);
+        off.take_at(1, u128::MAX / 2).unwrap();
+        assert!(!off.status().unshield_cap_active);
+
+        let dir = std::env::temp_dir().join(format!("sigil-unshield-window-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("window.json");
+        let now = UnshieldWindow::now_secs();
+        let mut a = UnshieldWindow::with_cap(Some(10 * S), UnshieldWindow::DAY_SECS, Some(path.clone()));
+        a.take_at(now, 7 * S).unwrap();
+        let mut b = UnshieldWindow::with_cap(Some(10 * S), UnshieldWindow::DAY_SECS, Some(path.clone()));
+        b.load();
+        assert!(b.check_at(now, 4 * S).is_err(), "a restart must not reset the window");
+        b.check_at(now, 3 * S).unwrap();
+        // A corrupt file is a full window, not an empty one.
+        std::fs::write(&path, b"not json").unwrap();
+        let mut c = UnshieldWindow::with_cap(Some(10 * S), UnshieldWindow::DAY_SECS, Some(path));
+        c.load();
+        assert!(c.check_at(UnshieldWindow::now_secs(), 1).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// The brake is opt-in: only `SIGIL_SHIELD_DEPOSITS=pause` pauses deposits. Reading
     /// only (never `set_var`), so it cannot race the rest of the suite.

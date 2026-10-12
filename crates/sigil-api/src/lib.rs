@@ -1081,6 +1081,15 @@ pub async fn shielded_has_commitment_handler(
 /// with that byte, all epochs (~1/256 of the pool), then checks membership locally. The node
 /// learns 8 bits, shared by hundreds of commitments. Exactly one byte: a longer prefix would
 /// shrink the bucket and leak more, so it is refused.
+/// The door's two brakes (2026-10-12): whether deposits are paused, and how much of the
+/// rolling 24-hour withdrawal limit is used. Amounts in glyphs (1 SIGIL = 10^10), as
+/// strings because they exceed a JSON double. Public: every number here is public anyway.
+#[flux_api_macros::api(GET, "/v1/shielded/door", summary = "Deposit pause and withdrawal limit, as the door applies them now")]
+pub async fn shielded_door_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let d = st.shielded.door_status();
+    Json(serde_json::json!({ "ok": true, "door": d, "ts_ms": now_ms() }))
+}
+
 #[flux_api_macros::api(GET, "/v1/shielded/has_bucket", summary = "All commitments (any epoch) whose first byte is p — check membership client-side")]
 pub async fn shielded_has_bucket_handler(
     State(st): State<AppState>,
@@ -2728,6 +2737,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/tags", get(shielded_tags_handler))
         .route("/v1/shielded/has", get(shielded_has_commitment_handler))
         .route("/v1/shielded/has_bucket", get(shielded_has_bucket_handler))
+        .route("/v1/shielded/door", get(shielded_door_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
         .route("/v1/aether/root", get(aether::aether_root))

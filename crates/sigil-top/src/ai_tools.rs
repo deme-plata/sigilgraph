@@ -248,6 +248,17 @@ pub(crate) fn create_wallet() -> Result<(String, String), String> {
     if let Some(w) = own_wallet() { return Err(format!("this node already has a wallet ({}) — not creating a second one", short(&w))); }
     let path = wallet_seed_path();
     if std::path::Path::new(&path).exists() { return Err(format!("{path} already exists — not overwriting it")); }
+    // 10.4.22: a new wallet is a 12-word phrase (kept beside the key), so the SAME words also open it
+    // on sigilgraph.org and in the phone app. Before, this was a bare random key nobody could type.
+    #[cfg(feature = "shield-register")]
+    {
+        let got = crate::wallet_phrase::install_in(&crate::flux_home(), &crate::wallet_phrase::generate_phrase())?;
+        let seed_hex = std::fs::read_to_string(&path).map_err(|e| format!("cannot read back {path}: {e}"))?;
+        std::env::set_var("SIGIL_MINE_SEED", seed_hex.trim());
+        crate::set_mine_wallet(&got.address);
+        return Ok((got.address, path));
+    }
+    #[allow(unreachable_code)]
     let seed = sigil_oauth::random_seed();
     let hex_seed: String = seed.iter().map(|b| format!("{b:02x}")).collect();
     let _ = std::fs::create_dir_all(format!("{}/.flux", crate::flux_home()));

@@ -9891,6 +9891,29 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 })();
 </script>
 
+<!-- 2026-10-12 PRIVACY: bucketed commitment lookups (see /v1/shielded/has_bucket). -->
+<script>
+(function(){
+  "use strict";
+  var cache=Object.create(null);   // first byte -> {at, set}
+  // A set of every commitment ever held whose first byte is p, or null if the node predates the
+  // endpoint (callers then fall back to the full walk, never to a single-commitment query).
+  window.__sigilCmBucket=async function(p, fresh){
+    p=String(p).toLowerCase();
+    var c=cache[p];
+    if(c && !fresh && (Date.now()-c.at)<15000) return c.set;
+    var r=await fetch('/v1/shielded/has_bucket?p='+p,{cache:'no-store'});
+    if(r.status===404) return null;
+    var j=null; try{ j=await r.json(); }catch(_){}
+    if(!j || j.ok!==true || !Array.isArray(j.cms)) throw new Error('shielded/has_bucket unreadable');
+    var set=Object.create(null);
+    for(var i=0;i<j.cms.length;i++) set[String(j.cms[i]).toLowerCase()]=1;
+    cache[p]={at:Date.now(), set:set};
+    return set;
+  };
+})();
+</script>
+
 <!-- 2026-10-12 PRIVACY GAUGE (Π). Viktor: "build the Π gauge". How many people a private payment
      hides among, as an outside chain observer can tell, read from the chain by sigil-privacy-scan
      (crowd = 2^H over the live epoch's depositors by value; exits linked by amount count as 1).
@@ -9976,29 +9999,6 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       .catch(function(){ data=null; paint(); });
   }
   host(); setInterval(host,3000); load(); setInterval(load,5*60*1000);
-})();
-</script>
-
-<!-- 2026-10-12 PRIVACY: bucketed commitment lookups (see /v1/shielded/has_bucket). -->
-<script>
-(function(){
-  "use strict";
-  var cache=Object.create(null);   // first byte -> {at, set}
-  // A set of every commitment ever held whose first byte is p, or null if the node predates the
-  // endpoint (callers then fall back to the full walk, never to a single-commitment query).
-  window.__sigilCmBucket=async function(p, fresh){
-    p=String(p).toLowerCase();
-    var c=cache[p];
-    if(c && !fresh && (Date.now()-c.at)<15000) return c.set;
-    var r=await fetch('/v1/shielded/has_bucket?p='+p,{cache:'no-store'});
-    if(r.status===404) return null;
-    var j=null; try{ j=await r.json(); }catch(_){}
-    if(!j || j.ok!==true || !Array.isArray(j.cms)) throw new Error('shielded/has_bucket unreadable');
-    var set=Object.create(null);
-    for(var i=0;i<j.cms.length;i++) set[String(j.cms[i]).toLowerCase()]=1;
-    cache[p]={at:Date.now(), set:set};
-    return set;
-  };
 })();
 </script>
 

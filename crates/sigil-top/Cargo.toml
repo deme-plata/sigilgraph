@@ -24,7 +24,7 @@ name = "sigil-top"
 # falling straight through to the existing recovery-phrase flow on any failure. Does
 # NOT change sigilgraph.org's behavior — that's a different process with no such
 # endpoint and no access to this box's secret.
-version = "10.4.16"
+version = "10.4.24"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -144,6 +144,8 @@ sigil-shield = { path = "../sigil-shield", optional = true }
 # Part of `shield-register`, since that is the feature that publishes the key.
 flux-sqisign = { path = "../../../flux/crates/flux-sqisign", optional = true }
 sha3 = { workspace = true, optional = true }
+# 10.4.22: the browser/phone v2 phrase derivation (Argon2id) — wallet_phrase.rs; same 0.5 as the phone core.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"], optional = true }
 # 2026-08-26 (mine_local_api.rs's native Shield/PrivateSend fast path): sigil-shield's
 # public API (ShieldedAccount::blinding/note/public_key, Note::commitment, build_spend's
 # out_preimages, note_cipher's NotePlaintext) is typed in terms of
@@ -211,7 +213,7 @@ sqisign = []
 # the much heavier sigil-node/DagKnight graph) so a build that only needs this stays
 # comparatively light; still toggleable if build time ever matters more than this
 # being on by default: `--no-default-features --features gpu`.
-shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign"]
+shield-register = ["dep:sigil-shield", "dep:sha3", "dep:argon2", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign"]
 # v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
 # Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
 # dependency block above for why each crate is here.

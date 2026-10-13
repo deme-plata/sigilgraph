@@ -82,6 +82,13 @@ export function buildPrivateSendReceived(seed_hex: string, note_blinding_hex: st
 export function buildPrivateSendReceivedWithMemo(seed_hex: string, note_blinding_hex: string, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
 
 /**
+ * Build and PROVE a v7 private send of ONE note (self-made or received: pass its 32-byte
+ * blinding) against the v7 epoch's leaves, paying `amount` to a v7 owner key + delivery
+ * key, change back to us. Returns the same JSON as `buildPrivateSendWithMemo`.
+ */
+export function buildPrivateSendV7(seed_hex: string, note_blinding_hex: string, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
  * [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
  * bytes) sealed to the recipient alongside the note. A separate export rather than an
  * extra parameter so pages built against the memo-less signature keep working unchanged.
@@ -95,7 +102,18 @@ export function buildPrivateSendWithMemo(seed_hex: string, note_index: number, n
  */
 export function noteBlinding(seed_hex: string, index: number): string;
 
+/**
+ * The 32-byte v7 blinding of the self-made note at `index`.
+ */
+export function noteBlindingV7(seed_hex: string, index: number): string;
+
 export function noteNullifier(seed_hex: string, position: number): string;
+
+/**
+ * The RAW v7 nullifier of this wallet's note at `position`; the chain's spent set holds
+ * it scoped by epoch — see `scopedNullifierV7`.
+ */
+export function noteNullifierV7(seed_hex: string, position: number): string;
 
 /**
  * Trial-open ONE published note ciphertext with this seed's encryption key.
@@ -106,6 +124,17 @@ export function noteNullifier(seed_hex: string, position: number): string;
  * to us, which is the common case and carries no information.
  */
 export function openNoteCiphertext(seed_hex: string, ciphertext_json: string): string;
+
+/**
+ * Open a v7 envelope with our delivery key: `{value, blinding_hex, memo}`. Errors on a
+ * stranger's note or a v1/v2 envelope (try `openNoteCiphertext` for those).
+ */
+export function openNoteCiphertextV7(seed_hex: string, ciphertext_json: string): string;
+
+/**
+ * The spent-set key for a raw nullifier observed in `epoch` (= the node's `scoped_nullifier`).
+ */
+export function scopedNullifierV7(epoch: number, nullifier_hex: string): string;
 
 /**
  * The nullifier this wallet's note at pool leaf `position` publishes when spent —
@@ -123,6 +152,11 @@ export function openNoteCiphertext(seed_hex: string, ciphertext_json: string): s
  * index its own way and going blind to the others' deposits.
  */
 export function sealNoteToSelf(seed_hex: string, index: number, value_str: string): string;
+
+/**
+ * Seal the self-made v7 note at `index` to our own delivery key.
+ */
+export function sealNoteToSelfV7(seed_hex: string, index: number, value_str: string): string;
 
 /**
  * The X25519 note-delivery key ciphertexts are sealed to — the OTHER half of this
@@ -148,11 +182,22 @@ export function shieldEncryptPublicKey(seed_hex: string): string;
 export function shieldNoteCommitment(seed_hex: string, index: number, value_str: string): string;
 
 /**
+ * The v7 deposit for the self-made note at `index` worth `value`: `{cm, blinding, pk_shield}`
+ * (all hex), the three fields `/v1/shield` needs.
+ */
+export function shieldNoteCommitmentV7(seed_hex: string, index: number, value_str: string): string;
+
+/**
  * This account's wire-hex `pk_shield` — the circuit key a payer binds an output note
  * to. Publish this (together with an X25519 encryption key) via
  * `POST /v1/shielded/register` so others can pay you privately.
  */
 export function shieldPublicKey(seed_hex: string): string;
+
+/**
+ * The 32-byte v7 owner key (hex) — what a v7 payer commits a note to.
+ */
+export function shieldPublicKeyV7(seed_hex: string): string;
 
 /**
  * Sanity/self-test entry point for the standalone WASM-loading smoke-test page: no
@@ -168,14 +213,22 @@ export interface InitOutput {
     readonly buildPrivateSend2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number) => [number, number, number, number];
     readonly buildPrivateSendReceived: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number) => [number, number, number, number];
     readonly buildPrivateSendReceivedWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => [number, number, number, number];
+    readonly buildPrivateSendV7: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => [number, number, number, number];
     readonly buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
     readonly noteBlinding: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly noteBlindingV7: (a: number, b: number, c: number) => [number, number, number, number];
     readonly noteNullifier: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly noteNullifierV7: (a: number, b: number, c: number) => [number, number, number, number];
     readonly openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly openNoteCiphertextV7: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly scopedNullifierV7: (a: number, b: number, c: number) => [number, number, number, number];
     readonly sealNoteToSelf: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly sealNoteToSelfV7: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly shieldEncryptPublicKey: (a: number, b: number) => [number, number, number, number];
     readonly shieldNoteCommitment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly shieldNoteCommitmentV7: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly shieldPublicKey: (a: number, b: number) => [number, number, number, number];
+    readonly shieldPublicKeyV7: (a: number, b: number) => [number, number, number, number];
     readonly wasmApiVersion: () => [number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

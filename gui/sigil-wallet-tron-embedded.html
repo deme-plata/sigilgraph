@@ -851,6 +851,32 @@ body.view-desktop .desktop{display:flex}
   //      matching, so spends would no longer net out.
   //
   // Walk every epoch, and scope the nullifier the same way consensus does.
+  // ── v7 POOL GENERATION (2026-10-13) ──────────────────────────────────────
+  // The node reports `v7` on /v1/shielded/anchor once the 256-bit note generation is open
+  // (sigil_header::V7_POOL_ACTIVATION_HEIGHT). v1 stays live beside it until it seals.
+  // Deposits, the scanner, registration, the recipient check and sends all switch on this;
+  // with no `v7` in the reply every path below behaves exactly as before.
+  var _poolGen={at:0, info:null, inflight:null};
+  function _poolGenParse(a){
+    var d=(a&&a.data)?a.data:a;
+    var v7=(d&&d.v7&&typeof d.v7.epoch==='number')?d.v7:null;
+    return { v7:v7, epoch:(d&&typeof d.epoch==='number')?d.epoch:0, v1Live:!(d&&d.v1_live===false), capacity:(d&&typeof d.capacity==='number')?d.capacity:32768 };
+  }
+  window.__sigilPoolGenFrom=function(a){ var info=_poolGenParse(a); _poolGen.info=info; _poolGen.at=Date.now(); return info; };
+  window.__sigilPoolGen=async function(fresh){
+    if(!fresh && _poolGen.info && (Date.now()-_poolGen.at)<5000) return _poolGen.info;
+    if(_poolGen.inflight) return _poolGen.inflight;
+    _poolGen.inflight=(async function(){
+      try{ var a=await fetch('/v1/shielded/anchor',{cache:'no-store'}).then(function(r){return r.json();}); window.__sigilPoolGenFrom(a); }
+      catch(_){ if(!_poolGen.info) _poolGen.info=_poolGenParse(null); }
+      return _poolGen.info;
+    })().finally(function(){ _poolGen.inflight=null; });
+    return _poolGen.inflight;
+  };
+  // A v1 key or commitment is ONE 8-byte field element followed by 24 zero bytes; a v7 one is
+  // a full 256-bit digest. The shape is how the chain itself tells the generations apart.
+  window.__sigilIsV1Shaped=function(hex){ return /^[0-9a-f]{16}0{48}$/i.test(String(hex||'')); };
+
   function _hexToBytes(h){ var o=new Uint8Array(h.length/2); for(var i=0;i<o.length;i++) o[i]=parseInt(h.substr(i*2,2),16); return o; }
   function _bytesToHex(b){ return Array.from(b).map(function(x){return x.toString(16).padStart(2,'0');}).join(''); }
 
@@ -913,9 +939,10 @@ body.view-desktop .desktop{display:flex}
   var _shieldCache = { epochs:Object.create(null), spentSeen:0 };
 
   function _seedHexOf(seed){ try{ if(typeof seed==='string') return seed; return Array.from(seed).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); }catch(_){ return ''; } }
-  async function _scanEpochTail(e, live, seed, M, S, spent){
+  async function _scanEpochTail(e, live, seed, M, S, spent, gen){
     var c=_shieldCache.epochs[e];
-    if(!c){ c={ scanned:0, mine:[], gross:0n }; _shieldCache.epochs[e]=c; }
+    if(!c){ c={ scanned:0, mine:[], gross:0n, gen:gen||'v1' }; _shieldCache.epochs[e]=c; }
+    if(gen) c.gen=gen;
     // 2026-09-09: the first refresh fires ~200 ms BEFORE the WASM decoder finishes loading
     // (measured 3/3 fresh loads: wasm=false at 1.4 s, scanned=2482, mine=0). The old JS
     // opener understands none of the current ciphertexts, so that pass opened 0 notes and
@@ -924,6 +951,7 @@ body.view-desktop .desktop{display:flex}
     // note covers …' on a wallet holding 1.5 SIGIL). No decoder ⇒ do not scan, do not
     // advance `scanned`; the caller reports 'scanning…' and the next tick retries.
     if(!(window.sigilShieldWasm && window.sigilShieldWasm.openNoteCiphertext)) return c;
+    if(c.gen==='v7' && !window.sigilShieldWasm.openNoteCiphertextV7) return c;   // 2026-10-13: no v7 decoder ⇒ do not advance
     var url='/v1/shielded/leaves?from='+c.scanned+(e===live?'':('&epoch='+e));
     var page=await fetch(url,{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;});
     if(!page || page.ok===false) return c;
@@ -945,8 +973,10 @@ body.view-desktop .desktop{display:flex}
       // received notes (25 sealed notes in the pool, none opened) while doPrivateSend
       // — using the WASM opener — could spend them. One decoder, not two.
       var W=window.sigilShieldWasm;
-      if(W && W.openNoteCiphertext){
-        try{ var oj=JSON.parse(W.openNoteCiphertext(_seedHexOf(seed), typeof ct==='string'?ct:JSON.stringify(ct))); if(oj && oj.value!=null) opened={ value: BigInt(oj.value) }; }catch(_){ opened=null; }
+      // 2026-10-13: a v7 epoch holds SIGILNT7 envelopes — its own opener, never the v1 one.
+      var _open=(c.gen==='v7') ? (W&&W.openNoteCiphertextV7) : (W&&W.openNoteCiphertext);
+      if(_open){
+        try{ var oj=JSON.parse(_open(_seedHexOf(seed), typeof ct==='string'?ct:JSON.stringify(ct))); if(oj && oj.value!=null) opened={ value: BigInt(oj.value) }; }catch(_){ opened=null; }
       } else {
         try{ opened=S.decodeNote(S.openEnvelope(ct, S.__enc)); }catch(_){ opened=null; }
       }
@@ -984,6 +1014,9 @@ body.view-desktop .desktop{display:flex}
     var spendKey=M.deriveField(seed,'spend-key',0);
     var anchor=await fetch('/v1/shielded/anchor',{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;});
     var live=(anchor && typeof anchor.epoch==='number') ? anchor.epoch : 0;
+    // 2026-10-13: the 256-bit generation, when the node has opened it (numbered live+1).
+    var _pg=(anchor && window.__sigilPoolGenFrom) ? window.__sigilPoolGenFrom(anchor) : null;
+    var v7ep=(_pg && _pg.v7) ? _pg.v7.epoch : null;
 
     // The spent set is small next to the leaf list, but still worth not re-pulling
     // when nothing has been spent since last time.
@@ -995,12 +1028,40 @@ body.view-desktop .desktop{display:flex}
     }
     var spent=_shieldCache.spent;
 
-    for(var e=0;e<=live;e++){ await _scanEpochTail(e, live, seed, M, S, spent); }
+    // 2026-09-24: LIVE EPOCH FIRST, SEALED EPOCHS ONCE. Measured on the live page: the first
+    // landing fetched /v1/shielded/leaves?epoch=0 WITH ciphertexts — 40,262,203 bytes for the
+    // sealed generation — before it would show any balance (the tester saw "—" for 20 s on a
+    // wired box; on a phone it is a minute or a timeout), and the cache lived only in memory,
+    // so every reload paid it again. A sealed epoch is FINAL (append-only, and closed), so
+    // its scan result is persisted per wallet and never refetched. The live epoch (3 MB, then
+    // only its tail) is scanned first and rendered at once; older epochs are opened in the
+    // background, one at a time, and the balance re-renders when they land.
+    var tag=_scanCacheTag(seed, M);
+    for(var pe=0; pe<live; pe++){ if(!_shieldCache.epochs[pe]){ var saved=_loadSealedEpoch(tag, pe); if(saved) _shieldCache.epochs[pe]=saved; } }
+    await _scanEpochTail(live, live, seed, M, S, spent);
+    if(v7ep!==null) await _scanEpochTail(v7ep, live, seed, M, S, spent, 'v7');
+    var sealedTotals={}; try{ (anchor.sealed_epochs||[]).forEach(function(se){ sealedTotals[se.epoch]=se.notes; }); }catch(_){}
+    var pendingSealed=[];
+    for(var se2=0; se2<live; se2++){ var cs=_shieldCache.epochs[se2]; if(!cs || !cs.complete) pendingSealed.push(se2); }
+    if(pendingSealed.length && !_shieldCache.sealedJob){
+      _shieldCache.sealedJob=(async function(){
+        for(var q=0;q<pendingSealed.length;q++){
+          var ep=pendingSealed[q];
+          try{
+            var cc=await _scanEpochTail(ep, live, seed, M, S, spent);
+            var want=sealedTotals[ep];
+            if(cc && (typeof want!=='number' || cc.scanned>=want)){ cc.complete=true; _saveSealedEpoch(tag, ep, cc); }
+          }catch(_){}
+          try{ if(window.refreshShielded) window.refreshShielded(); }catch(_){}
+        }
+      })().finally(function(){ _shieldCache.sealedJob=null; });
+    }
 
-    var balance=0n, gross=0n, notes=0, sealed=0;
-    for(var ee=0;ee<=live;ee++){
+    var balance=0n, gross=0n, notes=0, sealed=0, v7notes=0;
+    var _eps=[]; for(var ei=0;ei<=live;ei++) _eps.push(ei); if(v7ep!==null && _eps.indexOf(v7ep)<0) _eps.push(v7ep);
+    for(var ex=0;ex<_eps.length;ex++){ var ee=_eps[ex];
       var c=_shieldCache.epochs[ee]; if(!c) continue;
-      if(ee!==live && c.scanned>0) sealed++;
+      if(ee!==live && ee!==v7ep && c.scanned>0) sealed++;
       gross+=c.gross;
       for(var i=0;i<c.mine.length;i++){
         var n=c.mine[i], isSpent=false;
@@ -1009,14 +1070,39 @@ body.view-desktop .desktop{display:flex}
           // leaf 2438 JS 43cc93… vs chain 1f2a01…), so spent notes were never netted.
           var raw;
           var W2=window.sigilShieldWasm;
+          if(c.gen==='v7'){
+            // 2026-10-13: the v7 nullifier comes from the v7 key family; if this build cannot
+            // derive it the note is not counted (never a figure that cannot be netted).
+            try{ raw=(W2&&W2.noteNullifierV7)?String(W2.noteNullifierV7(_seedHexOf(seed), n.pos)).toLowerCase():null; }catch(_){ raw=null; }
+            if(!raw) continue;
+          } else {
           if(W2 && W2.noteNullifier){ try{ raw=String(W2.noteNullifier(_seedHexOf(seed), n.pos)).toLowerCase(); }catch(_){ raw=null; } }
           if(!raw){ raw=M.toWireHex(M.compress2(spendKey, BigInt(n.pos))).toLowerCase(); }
+          }
           isSpent=spent.has(_scopedNullifier(M, ee, raw));
         }
-        if(!isSpent){ balance+=n.value; notes++; }
+        if(!isSpent){ balance+=n.value; notes++; if(c.gen==='v7') v7notes++; }
       }
     }
-    return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed };
+    return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed, sealedPending:pendingSealed.length, v7:(v7ep!==null), v7notes:v7notes };
+  }
+  // Persisted sealed-epoch scans. Keyed by a hash of the seed (never the seed itself);
+  // a sealed epoch never changes, so the record is final once `complete`.
+  function _scanCacheTag(seed, M){
+    try{ var h=_bytesToHex(M.blake3(new TextEncoder().encode('sigil-scan-cache-v1|'+_seedHexOf(seed)))); return h.slice(0,32); }catch(_){ return null; }
+  }
+  function _loadSealedEpoch(tag, e){
+    if(!tag) return null;
+    try{
+      var j=JSON.parse(localStorage.getItem('sigil-sealed-scan-'+tag+'-'+e)||'null'); if(!j || !j.complete) return null;
+      return { scanned:j.scanned|0, gross:BigInt(j.gross||'0'), complete:true,
+               mine:(j.mine||[]).map(function(n){ return { pos:n.pos|0, value:BigInt(n.value||'0') }; }) };
+    }catch(_){ return null; }
+  }
+  function _saveSealedEpoch(tag, e, c){
+    if(!tag || !c) return;
+    try{ localStorage.setItem('sigil-sealed-scan-'+tag+'-'+e, JSON.stringify({ scanned:c.scanned, gross:String(c.gross), complete:true,
+           mine:c.mine.map(function(n){ return { pos:n.pos, value:String(n.value) }; }) })); }catch(_){}
   }
   // 2026-08-27: exposed so the Activity ledger's shielded observer can reuse the
   // SAME scanner the Shield card uses, rather than a second implementation of
@@ -1053,7 +1139,7 @@ body.view-desktop .desktop{display:flex}
         // Never present a gross figure as a balance: if spends could not be netted,
         // say so. A number that can only go up is wrong in the direction that matters.
         nt.textContent = r.netted
-          ? (r.notes+' note'+(r.notes===1?'':'s')+(r.sealed?(' · '+r.epochs+' epochs'):''))
+          ? (r.notes+' note'+(r.notes===1?'':'s')+(r.sealed?(' · '+r.epochs+' epochs'):'')+(r.sealedPending?(' · checking '+r.sealedPending+' older epoch'+(r.sealedPending===1?'':'s')+' in the background…'):'')+(r.v7?(' · 256-bit pool'+(r.v7notes?(': '+r.v7notes+' note'+(r.v7notes===1?'':'s')):'')):''))
           : '⚠ gross — spends not netted';
         nt.style.color = r.netted ? '' : '#fbbf24';
       }
@@ -1782,6 +1868,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // Wait at most 4 minutes per address for an in-flight registration, then say 'not registered'.
   function freshWaitAllowed(addr){ if(window.__freshWaitAddr!==addr){ window.__freshWaitAddr=addr; window.__freshWaitUntil=Date.now()+45000; } return Date.now()<window.__freshWaitUntil; }
   function regWaitAllowed(addr){ if(window.__regWaitAddr!==addr){ window.__regWaitAddr=addr; window.__regWaitUntil=Date.now()+240000; } return Date.now()<window.__regWaitUntil; }
+  // 2026-10-13: a v7 spend mints v7 notes and a v1 spend mints v1 notes — by construction there is
+  // no payment across generations. So the published key's SHAPE must match the pool we would spend
+  // from, or the recipient could never spend what we sent. Say it before any amount is typed.
+  async function _privGenCheck(pk){
+    try{
+      var pg=window.__sigilPoolGen?await window.__sigilPoolGen():null; if(!pg) return null;
+      var v1=window.__sigilIsV1Shaped(pk);
+      if(pg.v7 && v1) return '✗ that wallet\'s receiving key is the OLD note format, and this pool now issues 256-bit notes — a payment to it could not be spent. Ask them to open their wallet once (it republishes the new key by itself), then check again.';
+      if(!pg.v7 && !v1) return '✗ that wallet\'s receiving key is the NEW (256-bit) note format but this pool has not switched yet — it cannot be paid from here.';
+    }catch(_){}
+    return null;
+  }
   window.checkShieldedAddr=async function(){
     var rawIn=(document.getElementById('checkAddr').value||'').trim();
     var box=document.getElementById('privSendBox'); if(box) box.style.display='none';
@@ -1795,6 +1893,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(addr){ try{ var rr=await fetch('/v1/shielded/address?wallet='+addr,{cache:'no-store'}); var jj=await rr.json();
         if(jj&&jj.ok&&jj.pk_shield&&(String(jj.pk_shield).toLowerCase()!==pp.pk_shield||String(jj.pk_encrypt||'').toLowerCase()!==pp.pk_encrypt)){
           checkStatus('✗ this payment code carries keys that do NOT match the keys published on chain for that wallet — tampered, or made for a different wallet. Refusing.', '#ff8a8a'); return; } }catch(_){} }
+      var _gm1=await _privGenCheck(pp.pk_shield); if(_gm1){ window.__privRecipient=null; checkStatus(_gm1, '#fbbf24'); return; }
       window.__privRecipient={wallet:addr||pp.pk_shield, pk_shield:pp.pk_shield, pk_encrypt:pp.pk_encrypt};
       checkStatus('✓ payment code carries the receiving key — pick an amount below to pay them privately.', '#00e0c6');
       if(box) box.style.display='flex'; return;
@@ -1804,6 +1903,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var r=await fetch('/v1/shielded/address?wallet='+addr,{cache:'no-store'});
       var j=null; try{ j=await r.json(); }catch(_){}
       if(j && j.ok && j.pk_encrypt){
+        var _gm2=await _privGenCheck(j.pk_shield); if(_gm2){ window.__privRecipient=null; checkStatus(_gm2, '#fbbf24'); return; }
         window.__privRecipient={wallet:addr, pk_shield:j.pk_shield, pk_encrypt:j.pk_encrypt};
         checkStatus('✓ registered — pk_shield '+j.pk_shield.slice(0,12)+'… — pick an amount below to pay them privately.', '#00e0c6');
         if(box) box.style.display='flex';
@@ -1846,8 +1946,16 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.openSend=function(){
     var m=document.getElementById('send-modal'); if(!m) return;
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/GLYPH, f=(raw%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
-      document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
+    // 2026-09-24: "available" is what this wallet can SEND — private notes plus the transparent
+    // balance the unified flow will shield on the way. It used to show the transparent figure
+    // alone, so a wallet whose money was all private (every wallet paid by another wallet, and
+    // every tester's) read "available 0.0000000000 SIGIL" right above a Send button that worked.
+    try{
+      var rawT=0n, rawP=0n; try{ rawT=BigInt(window.SIGIL_RAW||'0'); }catch(_){} try{ rawP=BigInt(window.__sigilShieldRaw||0); }catch(_){}
+      var tot=rawT+rawP, w=tot/GLYPH, f=(tot%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
+      document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f;
+      window.__sendAvailBreakdown = 'private '+glyphStr(rawP.toString())+' · transparent '+glyphStr(rawT.toString())+' SIGIL';
+    }catch(e){}
     sendStatus(''); checkStatus(''); abRender(); m.style.display='flex';
     // ── unified flow reset (2026-08-26) — start clean, mirror the balance, and put
     // the cursor on the RECIPIENT box, because that is now question ① not question ②.
@@ -1859,7 +1967,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var ac=document.getElementById('uniAddrChip'); if(ac) ac.textContent='';
       uniGlow('uniAddr',null); uniGlow('uniAmt',null); uniMsg('');
       var st=document.getElementById('uniSteps'); if(st) st.style.display='none';
-      var av=document.getElementById('uniAvail'); if(av) av.textContent='';
+      var av=document.getElementById('uniAvail'); if(av) av.textContent=window.__sendAvailBreakdown||'';
       // advance to the NEXT secret on every open, so it's a new one each time
       uniNextSecret();
       // idempotent listener wiring (openSend can run many times)
@@ -1905,7 +2013,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{
       var r=await fetch('/v1/shielded/anchor',{cache:'no-store'});
       var j=await r.json(); var d=(j&&j.data)?j.data:j;
-      var n=d&&d.notes; return (typeof n==='number')?n:null;
+      var n=d&&d.notes; if(typeof n==='number' && d.v7 && typeof d.v7.notes==='number') n+=d.v7.notes;   // 2026-10-13: a v7 deposit grows the v7 count
+      return (typeof n==='number')?n:null;
     }catch(e){ return null; }
   }
 
@@ -1966,11 +2075,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(rc) rc.style.display='flex';
   }
 
-  function noteRecord(addr,index,value){
+  function noteRecord(addr,index,value,gen){
     try{
       var key='sigil-shielded-notes-'+addr;
       var arr=JSON.parse(localStorage.getItem(key)||'[]');
-      arr.push({index:index,value:value,ts:Date.now()});
+      var rec={index:index,value:value,ts:Date.now()}; if(gen) rec.gen=gen;   // 2026-10-13: 'v7' = 256-bit note
+      arr.push(rec);
       localStorage.setItem(key,JSON.stringify(arr));
     }catch(e){}
   }
@@ -2008,6 +2118,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      sees it). The send modal stays closed: the panes doShield touches are reset after. */
   window.sigilAutoShield=async function(){
     if(window.__autoShieldBusy) return false;
+    // 2026-10-12: the door can pause deposits (GET /v1/shielded/door). While paused, the
+    // background mover stays quiet instead of asking every poll. Cached 5 min; an older
+    // node without the route (404) reads as "not paused", which is what it is.
+    try{
+      var dr=window.__sigilDoorCache;
+      if(!dr||Date.now()-dr.ts>300000){
+        var rr=await fetch('/v1/shielded/door',{cache:'no-store'}); var jj=null;
+        if(rr.ok){ try{ jj=await rr.json(); }catch(_){} }
+        dr=window.__sigilDoorCache={ts:Date.now(), paused:!!(jj&&jj.door&&jj.door.deposits_paused)};
+      }
+      if(dr.paused) return false;
+    }catch(_){}
     var raw; try{ raw=BigInt(window.SIGIL_RAW||'0'); }catch(e){ return false; }
     var FLOOR=10000000n;                                  // 0.001 SIGIL — smallest note worth minting
     raw = raw - (raw % FLOOR);
@@ -2081,8 +2203,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     // seed configured, this page loaded from a remote host like sigilgraph.org which has
     // no such endpoint, a malformed amount) it falls straight through to the existing
     // recovery-phrase flow below, unchanged. See sigil-top's src/mine_local_api.rs.
+    // 2026-10-13: which generation the pool issues now. The 256-bit path proves in THIS page.
+    var _pgD=null; try{ _pgD=window.__sigilPoolGen?await window.__sigilPoolGen(true):null; }catch(_){}
+    var V7D=!!(_pgD&&_pgD.v7);
     var fastShieldBtn=document.getElementById('sendGo');
     try{
+      if(V7D) throw new Error('256-bit pool: the local endpoint predates it');
       if(fastShieldBtn)fastShieldBtn.disabled=true;
       sendStatus('Shielding locally…', '#6df3ff');
       var ffr=await fetch('/api/v1/mine-shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount:base.toString()})});
@@ -2172,25 +2298,41 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         if(!j || !j.ok || !j.leaves) throw new Error('pool unreadable (epoch '+e+')');
         for(var i=0;i<j.leaves.length;i++) t[String(j.leaves[i]).toLowerCase()]=1;
       }
+      if(a && a.v7 && typeof a.v7.epoch==='number'){   // 2026-10-13: the 256-bit epoch too
+        var r7=await fetch('/v1/shielded/leaves?epoch='+a.v7.epoch+'&ciphertexts=0',{cache:'no-store'});
+        var j7=null; try{ j7=await r7.json(); }catch(_){}
+        if(!j7 || !j7.ok || !j7.leaves) throw new Error('pool unreadable (v7 epoch '+a.v7.epoch+')');
+        for(var i7=0;i7<j7.leaves.length;i7++) t[String(j7.leaves[i7]).toLowerCase()]=1;
+      }
       _bulkTaken=t;
     }
 
+    // 2026-10-12 PRIVACY: ask for a BUCKET, never for the commitment itself. `has?cm=` made
+    // the wallet name its own seed-derived commitments to the node one by one, and the
+    // gateway's log kept them. `has_bucket?p=<first byte>` returns every commitment ever held
+    // with that byte (about 1/256 of the pool, all epochs); membership is decided HERE, so the
+    // node learns 8 bits shared by hundreds of commitments. Still fail-closed.
     async function _cmExists(hex){
       var k=String(hex).toLowerCase();
       if(k in _hasCache) return _hasCache[k];
       if(_bulkTaken) return (_hasCache[k]=!!_bulkTaken[k]);
-      var r=await fetch('/v1/shielded/has?cm='+k,{cache:'no-store'});
-      if(r.status===404){ await _loadBulk(); return (_hasCache[k]=!!_bulkTaken[k]); }
-      var j=null; try{ j=await r.json(); }catch(_){}
-      // Fail CLOSED on anything ambiguous. Submitting blind is what produced the
-      // permanently-stuck deposits; refusing costs the user one retry.
-      if(!j || j.ok!==true || typeof j.present!=='boolean') throw new Error('shielded/has unreadable');
-      return (_hasCache[k]=j.present);
+      var set=await window.__sigilCmBucket(k.slice(0,2), false);
+      if(set===null){ await _loadBulk(); return (_hasCache[k]=!!_bulkTaken[k]); }
+      return (_hasCache[k]=!!set[k]);
     }
 
+    var _seedHexD=Array.from(seed32).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
     async function freeIndexFor(value){
+      var W7=window.sigilShieldWasm;
+      if(V7D && !(W7 && W7.shieldNoteCommitmentV7 && W7.sealNoteToSelfV7)) throw new Error('this wallet build cannot make 256-bit notes — reload the page');
       for(var idx=0; idx<4096; idx++){
         if(usedIdx[idx]) continue;
+        if(V7D){
+          // 2026-10-13: the 256-bit note — {cm, blinding, pk_shield} are the door's three fields.
+          var d7=JSON.parse(W7.shieldNoteCommitmentV7(_seedHexD, idx, String(value)));
+          if(!(await _cmExists(String(d7.cm).toLowerCase()))){ usedIdx[idx]=1; return {index:idx, cmHex:String(d7.cm).toLowerCase(), v7:d7}; }
+          continue;
+        }
         var b=S.deriveField(seed32,'blinding',idx);
         var innr=S.compress2(BigInt(value),b);
         var c=S.compress2(innr,pk);
@@ -2230,10 +2372,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // 2026-09-08: seal the note to OUR OWN delivery key so every client of this seed
           // (phone, MCP, sigil-top, this page) finds the deposit by trial-decryption —
           // no more index guessing that left each client blind to the others' deposits.
-          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,blinding:S.toWireHex(slot.blinding),pk_shield:S.toWireHex(pk),fee:String(fee),sig:sig,req_nonce:reqNonce,
-            note_ciphertext:(function(){ try{ var W=window.sigilShieldWasm; if(!W||!W.sealNoteToSelf) return undefined; var sh=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); return W.sealNoteToSelf(sh, index, value.toString()); }catch(_){ return undefined; } })()})});
+          // 2026-10-13: a 256-bit note carries its 32-byte blinding + owner key and a SIGILNT7 envelope.
+          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,blinding:slot.v7?slot.v7.blinding:S.toWireHex(slot.blinding),pk_shield:slot.v7?slot.v7.pk_shield:S.toWireHex(pk),fee:String(fee),sig:sig,req_nonce:reqNonce,
+            note_ciphertext:(function(){ try{ var W=window.sigilShieldWasm; var sh=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); if(slot.v7) return W.sealNoteToSelfV7(sh, index, value.toString()); if(!W||!W.sealNoteToSelf) return undefined; return W.sealNoteToSelf(sh, index, value.toString()); }catch(_){ return undefined; } })()})});
         var j=null; try{ j=await r.json(); }catch(_){}
-        if(r.ok && j && j.ok){ noteRecord(from,index,Number(value)); bookedIndices.push(index); landed.push({txid:j.txid,value:value}); }
+        if(r.ok && j && j.ok){ noteRecord(from,index,Number(value),slot.v7?'v7':undefined); bookedIndices.push(index); landed.push({txid:j.txid,value:value}); }
         else { failed=(j&&(j.error||j.message))||('HTTP '+r.status); break; }
       }catch(e){ failed='network error — node unreachable'; break; }
     }
@@ -2621,7 +2764,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js?v=910');
+      var mod = await import('./wasm/sigil_shield.js?v=911');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
@@ -2693,6 +2836,16 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       pkShield  = wasm.shieldPublicKey(seedHex);
       pkEncrypt = wasm.shieldEncryptPublicKey(seedHex);
     }catch(e){ return {ok:false, reason:'key derivation failed: '+(e&&e.message||e)}; }
+    // 2026-10-13 v7: once the node has opened the 256-bit generation, the key a payer commits a
+    // note to is the v7 owner key. The delivery key is the same identity in both generations.
+    var pkShieldV1 = pkShield;
+    try{
+      var pgR = window.__sigilPoolGen ? await window.__sigilPoolGen() : null;
+      if(pgR && pgR.v7){
+        if(!wasm.shieldPublicKeyV7) return {ok:false, reason:'this wallet build has no 256-bit key — reload the page'};
+        pkShield = wasm.shieldPublicKeyV7(seedHex);
+      }
+    }catch(e){ return {ok:false, reason:'could not read the pool generation'}; }
 
     try{
       var r = await fetch('/v1/shielded/address?wallet='+addr, {cache:'no-store'});
@@ -2700,6 +2853,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(j && j.ok && j.pk_shield){
         var pkShieldMatch  = String(j.pk_shield).toLowerCase()  === String(pkShield).toLowerCase();
         var pkEncryptMatch = String(j.pk_encrypt||'').toLowerCase() === String(pkEncrypt).toLowerCase();
+        // Same seed, OLD note format (its v1 key is on chain while the pool issues v7 notes).
+        var oldGenMatch    = !pkShieldMatch && String(j.pk_shield).toLowerCase() === String(pkShieldV1).toLowerCase();
         if(pkShieldMatch && pkEncryptMatch){
           st[addr] = 'ours';
           return {ok:true, already:true};
@@ -2717,6 +2872,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // the old key stay unrecoverable — nothing but the old key could open them.
           log('⟳ '+addr.slice(0,10)+'… had a stale delivery key — republishing so payments can be received.');
           // fall through to the register call below with the correct pk_shield+pk_encrypt
+        } else if(oldGenMatch){
+          // 2026-10-13: the chain holds this seed's OLD-format key. A payer sealing to it would mint a
+          // note this wallet can never spend in the new pool, so republish the 256-bit key (the node
+          // overwrites on register). The delivery key is unchanged, so nothing already paid is lost.
+          log('⟳ '+addr.slice(0,10)+'… has its old-format receiving key on chain — publishing the 256-bit key so payments can reach it.');
         } else {
           // Registered to a DIFFERENT shield key: rewards and payments would mint
           // into notes THIS seed cannot spend — strictly worse than unregistered.
@@ -2955,7 +3115,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{ var r=await fetch('/v1/finality/certificate',{cache:'no-store'}); var j=await r.json(); var c=j&&j.certificate; if(c&&c.height) return Number(c.height); }catch(_){}
     return 0;
   }
-  async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
+  async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr, cmOuts){
     if(!txid) return;
     var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0, dsUntil=0;
     // 2026-09-12: PUSH, not poll. /v1/transactions/:hash/wait holds the request open and
@@ -2980,9 +3140,32 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         try{ var tj=await fetch('/v1/transactions/'+txid,{cache:'no-store'}).then(function(r){return r.json();});
              var d=(tj&&tj.data)||{}; st=d.status||null; reason=d.reason||''; }catch(_){}
       }
-      // The nullifier set stays the ground truth; one read per wake is cheap.
-      try{ var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
-           if(nl&&nl.nullifiers) seen=nl.nullifiers.map(function(h){return String(h).toLowerCase();}).indexOf(nf)>=0; }catch(_){}
+      // 2026-09-24: the chain is the ground truth, and the cheapest unforgeable witness is OUR
+      // OWN OUTPUT COMMITMENT — the change note (or the payee's note) this very spend created.
+      // It exists on chain if and only if this spend applied; no other transaction can mint it.
+      // The old check compared the RAW nullifier against the chain's EPOCH-SCOPED set, so it
+      // never matched after the 2026-09-19 rotation. Measured live today: a payment applied
+      // (change note at leaf 2281), the braid re-offered it, three refusals, and /wait said
+      // "rejected: double-spend" — this footer then told the tester "not sent" for money that
+      // had moved. One GET per output per wake.
+      try{
+        var outs=Array.isArray(cmOuts)?cmOuts:[];
+        for(var oi=0; oi<outs.length && !seen; oi++){
+          // 2026-10-12: by bucket, fresh each wake (see __sigilCmBucket); never the commitment itself.
+          var ck=String(outs[oi]).toLowerCase();
+          var bs=window.__sigilCmBucket ? await window.__sigilCmBucket(ck.slice(0,2), true) : null;
+          if(bs && bs[ck]) seen=true;
+        }
+      }catch(_){}
+      if(!seen && nf){
+        // Secondary witness: our nullifier, scoped the way consensus stores it.
+        try{ var an=await fetch('/v1/shielded/anchor',{cache:'no-store'}).then(function(r){return r.json();});
+             var ep=(an&&typeof an.epoch==='number')?an.epoch:0;
+             var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
+             if(nl&&nl.nullifiers){ var nset=new Set(nl.nullifiers.map(function(h){return String(h).toLowerCase();}));
+               seen = nset.has(nf) || (window.__sigilShield && (nset.has(_scopedNullifier(window.__sigilShield, ep, nf))
+                      || (pick && typeof pick._noteEp==='number' && nset.has(_scopedNullifier(window.__sigilShield, pick._noteEp, nf))))); } }catch(_){}
+      }
       unknowns=(st==='unknown')?unknowns+1:0;
       // 2026-09-25 rocky-help-0925: a "double-spend" verdict on OUR tx is, today, most often the braid
       // re-offering a payment that ALREADY APPLIED (node journal: "evicted after 3 permanent refusals"),
@@ -2993,10 +3176,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         if(!dsUntil){ dsUntil=Date.now()+5*60*1000; privMsg('⏳ the node reports this input as already spent — checking whether the payment itself landed (up to a few minutes)…', '#fbbf24'); }
         if(Date.now()<dsUntil){ await new Promise(function(r){ setTimeout(r,5000); }); continue; }
       }
-      // A refusal is authoritative (since the 2026-09-08 node fix a 'rejected' is real).
-      // It must beat a seen nullifier: if the note was ALREADY spent by an older
-      // transaction its nullifier is on chain and would read as 'our' success.
-      if(st==='rejected'){
+      // A refusal is authoritative ONLY while our output is not on chain. If our own change
+      // note exists, the spend applied whatever the status endpoint says (the braid can refuse
+      // a re-offered, already-applied tx — see above). The old "must beat a seen nullifier"
+      // worry (a note spent EARLIER by someone with the same seed) cannot fool the commitment
+      // check: an earlier spend would not have minted THIS blinding's output.
+      if(st==='rejected' && !seen){
         // 2026-09-25 rocky-help-0925: retire-not-restore — a double-spend verdict means the input IS spent.
         if(/already spent|double.?spend/i.test(reason||'')) privRetire(from, pick, pick&&pick._retireTag, pick&&pick._noteEp, [nf], changeIndex);
         else privRollback(from, pick, changeIndex);
@@ -3005,8 +3190,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         return;
       }
       if(seen || st==='applied'){
-        privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).', '#00e0c6');
-        privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.');
+        var dup = (st==='rejected') ? ' (the node\'s status feed reported a duplicate attempt as refused; the payment itself is on chain)' : '';
+        privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).'+dup, '#00e0c6');
+        privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.'+(dup?'<br>'+dup.trim():''));
         // Phase 3 (2026-09-08): say WHICH certificate it settled under, and check the
         // validator's signature here — the client's own verification, not the node's word.
         sigilCertificateLine().then(function(line){ if(line) privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> '+line); }).catch(function(){});
@@ -3015,7 +3201,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         setTimeout(function(){ if(window.refresh)refresh(); }, 600);
         return;
       }
-      if(st==='rejected' || unknowns>=12){
+      if((st==='rejected' || unknowns>=12) && !seen){
         // 2026-09-25 rocky-help-0925: retire-not-restore — a double-spend verdict means the input IS spent.
         if(/already spent|double.?spend/i.test(reason||'')) privRetire(from, pick, pick&&pick._retireTag, pick&&pick._noteEp, [nf], changeIndex);
         else privRollback(from, pick, changeIndex);
@@ -3048,9 +3234,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function sigilRenderInbox(wasm, seedHex, lj){
     var box=document.getElementById('privInbox'); if(!box || !wasm || !wasm.openNoteCiphertext) return 0;
     var cts=(lj&&lj.ciphertexts)||[], base=(lj&&lj.from)||0, found=[];
+    var _opI=(lj&&lj.generation==='v7')?wasm.openNoteCiphertextV7:wasm.openNoteCiphertext;   // 2026-10-13
     for(var i=0;i<cts.length;i++){
       var c=cts[i]; if(!c) continue;
-      try{ var o=JSON.parse(wasm.openNoteCiphertext(seedHex, c)); found.push({pos:base+i, value:o.value, memo:o.memo||''}); }catch(_){ /* not ours — the common case */ }
+      try{ var o=JSON.parse(_opI(seedHex, c)); found.push({pos:base+i, value:o.value, memo:o.memo||''}); }catch(_){ /* not ours — the common case */ }
     }
     while(box.firstChild) box.removeChild(box.firstChild);
     if(!found.length) return 0;
@@ -3081,7 +3268,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     privMsg('Scanning the shielded pool for notes sealed to you…', '#6df3ff');
     try{
-      var lr=await fetch('/v1/shielded/leaves',{cache:'no-store'}); var lj=await lr.json();
+      var _pgI=null; try{ _pgI=window.__sigilPoolGen?await window.__sigilPoolGen():null; }catch(_){}
+      var lr=await fetch((_pgI&&_pgI.v7)?('/v1/shielded/leaves?epoch='+_pgI.v7.epoch):'/v1/shielded/leaves',{cache:'no-store'}); var lj=await lr.json();
       if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
       var n=sigilRenderInbox(wasm, bytesToHex(kp.priv), lj);
       privMsg(n ? ('✓ '+n+' note(s) sealed to you') : 'no notes sealed to you yet', n ? '#00e0c6' : '#8fb3c2');
@@ -3098,6 +3286,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ privMsg('No wallet address loaded.', '#ff8a8a'); return; }
 
+    // 2026-10-13: which generation this send spends from. V7 = the 256-bit epoch the node reports.
+    var _pgS=null; try{ _pgS=window.__sigilPoolGen?await window.__sigilPoolGen(true):null; }catch(_){}
+    var V7=(_pgS&&_pgS.v7)?_pgS.v7:null;
     // FAST PATH (2026-08-26): same idea as doShield()'s fast path above — try
     // sigil-top's own local endpoint first, which re-derives the seed and re-proves the
     // REAL zk-STARK natively (the same crate the WASM module below is compiled from), so
@@ -3113,7 +3304,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     // send — ~1.3 s and a console error before the real path ran (sibling lane measured it today).
     var localFast = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) || location.port==='9800';
     try{
-      if(!localFast) throw new Error('no local node endpoint on this origin');
+      if(!localFast || V7) throw new Error('no local node endpoint on this origin');
       if(fastPrivBtn)fastPrivBtn.disabled=true;
       privMsg('Building the private spend locally…', '#6df3ff');
       var candNotes=myNotes(from).filter(function(n){ return !n.spent; }).map(function(n){ return {index:n.index, value:String(n.value)}; });
@@ -3165,10 +3356,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var btn=document.getElementById('privGo'); if(btn)btn.disabled=true;
     privMsg('Loading your shielded notes…', '#6df3ff');
     try{
-      var lr=await fetch('/v1/shielded/leaves',{cache:'no-store'});
+      var lr=await fetch(V7?('/v1/shielded/leaves?epoch='+V7.epoch):'/v1/shielded/leaves',{cache:'no-store'});
       var lj=await lr.json();
       if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
       var leaves=lj.leaves||[], capacity=lj.capacity;
+      if(V7 && !(wasm.buildPrivateSendV7 && wasm.openNoteCiphertextV7 && wasm.noteNullifierV7 && wasm.shieldNoteCommitmentV7 && wasm.noteBlindingV7)){ privMsg('✗ this wallet build cannot spend 256-bit notes — reload the page.', '#ff8a8a'); return; }
       try{ sigilRenderInbox(wasm, seedHex, lj); }catch(_){}
 
       var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE (g2: 100_000 glyphs; was 1000 on g1) — mirrored in wasm_api.rs too
@@ -3211,6 +3403,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
                                                                        : String(wasm.shieldPublicKey(seedHex)).toLowerCase().slice(0,32); }catch(_){ _retireTag=null; }
       var retired=privRetired(_retireTag);
       var rawNfAt=function(pos){
+        if(V7){ try{ return String(wasm.noteNullifierV7(seedHex, pos)).toLowerCase(); }catch(_){ return null; } }
         try{ if(wasm.noteNullifier) return String(wasm.noteNullifier(seedHex, pos)).toLowerCase(); }catch(_){}
         try{ if(M && spendKey) return M.toWireHex(M.compress2(spendKey, BigInt(pos))).toLowerCase(); }catch(_){}
         return null;
@@ -3234,11 +3427,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // ── (a) SELF-CREATED notes, from this browser's own bookkeeping ──────────
       // Addressed by derivation index: the blinding is blinding(seed, index), so the
       // index is the whole record, and only this browser can know it.
-      var notes=myNotes(from).filter(function(n){ return !n.spent; });
+      var notes=myNotes(from).filter(function(n){ return !n.spent && (V7 ? n.gen==='v7' : !n.gen); });   // 2026-10-13: one generation per send
       var deadSelf=[];
       for(var i=0;i<notes.length;i++){
         var n=notes[i];
-        var cm; try{ cm=wasm.shieldNoteCommitment(seedHex, n.index, String(n.value)); }catch(e){ continue; }
+        var cm; try{ cm = V7 ? String(JSON.parse(wasm.shieldNoteCommitmentV7(seedHex, n.index, String(n.value))).cm).toLowerCase() : wasm.shieldNoteCommitment(seedHex, n.index, String(n.value)); }catch(e){ continue; }
         var pos=leaves.indexOf(cm);
         if(pos<0){ unlanded++; continue; } // not landed yet (still finalizing) — skip, don't fail the whole send
         // 2026-09-25 rocky-help-0925: epoch-scoped spent check for SELF-MADE notes too (there was none —
@@ -3266,7 +3459,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var seenPos = {};
       for(var sp=0; sp<candidates.length; sp++) seenPos[candidates[sp].position]=1;
       for(var sp2=0; sp2<small.length; sp2++) seenPos[small[sp2].position]=1; // 2026-09-25 rocky-help-0925: a self note in `small` must not reappear as a recv note
-      if(cts.length && wasm.buildPrivateSendReceived){
+      if(cts.length && (V7 ? wasm.buildPrivateSendV7 : wasm.buildPrivateSendReceived)){
         // Which of ours are already spent? Nullifiers are public; derive ours the way the
         // balance scan does. If that helper is not loaded we simply do not net — the node
         // then refuses with "nullifier already spent", a loud honest failure rather than
@@ -3275,7 +3468,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         for(var ci=0; ci<cts.length; ci++){
           if(!cts[ci] || seenPos[ci]) continue;
           var op=null;
-          try{ op=JSON.parse(wasm.openNoteCiphertext(seedHex, typeof cts[ci]==='string'?cts[ci]:JSON.stringify(cts[ci]))); }
+          try{ op=JSON.parse((V7?wasm.openNoteCiphertextV7:wasm.openNoteCiphertext)(seedHex, typeof cts[ci]==='string'?cts[ci]:JSON.stringify(cts[ci]))); }
           catch(_){ continue; }              // not ours — the AEAD tag IS the ownership proof
           if(!op || op.blinding_hex==null) continue;
           var rv; try{ rv=BigInt(op.value); }catch(_){ continue; }
@@ -3288,7 +3481,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // Prefer the SMALLEST covering note — leaves bigger notes free for bigger sends
       // later. Two notes can fund one payment; more than two are combined first (below).
       candidates.sort(function(a,b){ return Number(a.value-b.value); });
-      if(!candidates.length && small.length>=2 && wasm.buildPrivateSend2){
+      if(!V7 && !candidates.length && small.length>=2 && wasm.buildPrivateSend2){   // 2026-10-13: the v7 circuit is 1-in/2-out so far
         small.sort(function(a,b){ return Number(b.value-a.value); });
         var x=small[0], y=small[1];
         if(x.value+y.value >= amountRaw+FEE){
@@ -3314,7 +3507,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var reachable = landedTotal - FEE*mergesToOne;
         var transparent=0n; try{ transparent=BigInt(window.SIGIL_RAW||'0'); }catch(_){}
         var need=amountRaw+FEE;
-        if(small.length>=2 && reachable>=need && wasm.buildPrivateSend2){
+        if(!V7 && small.length>=2 && reachable>=need && wasm.buildPrivateSend2){
           small.sort(function(a,b){ return Number(b.value-a.value); });
           var mx=small[0], my=small[1];
           var mxb=null, myb=null;
@@ -3355,6 +3548,14 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           var shielded=false; try{ shielded=await window.sigilAutoShield(); }catch(_){}
           return 'retry';
         }
+        if(V7 && small.length>=1 && landedTotal>=need){
+          // 2026-10-13: the money is there but split across notes, and the 256-bit circuit cannot
+          // combine two notes yet. Say exactly that, with the largest single payment possible.
+          small.sort(function(a,b){ return Number(b.value-a.value); });
+          var _max7 = small[0].value>FEE ? (small[0].value-FEE) : 0n;
+          privMsg('✗ no single 256-bit note covers '+glyphStr(need.toString())+' SIGIL (fee included) — the new pool cannot combine two notes yet. The largest payment possible right now is '+glyphStr(_max7.toString())+' SIGIL; or deposit the full amount first so one note holds it.', '#fbbf24');
+          return;
+        }
         var avail = landedTotal+transparent;
         privMsg('✗ this wallet holds '+glyphStr(avail.toString())+' SIGIL spendable'+(unlanded>0?' (+ '+unlanded+' note'+(unlanded===1?'':'s')+' still settling)':'')+' and this payment needs '+glyphStr(need.toString())+' including the fee. Send a smaller amount, or wait for more to arrive.', '#fbbf24');
         return;
@@ -3365,13 +3566,21 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         ? ('combining two notes — '+glyphStr(pick.notes[0].value.toString())+' + '+glyphStr(pick.notes[1].value.toString())+' SIGIL (pool leaves #'+pick.notes[0].position+' + #'+pick.notes[1].position+', epoch '+noteEp+')')
         : ('spending a '+glyphStr(pick.value.toString())+' SIGIL '+(pick.kind==='recv'?'received/mined':'self-made')+' note (pool leaf #'+pick.position+', epoch '+noteEp+')');
 
-      privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
+      privMsg('Building + proving the private spend — real zk-STARK, client-side ('+(V7?'256-bit note, ~3 s':'~0.5-2s')+')…', '#6df3ff');
       var reqJson;
       try{
         var memo=sigilPrivMemo();
         if(new TextEncoder().encode(memo).length>512){ privMsg('✗ memo is over 512 bytes — shorten it.', '#ff8a8a'); return; }
         if(memo && !wasm.buildPrivateSendWithMemo){ privMsg('✗ this wallet build cannot seal memos yet — reload the page.', '#ff8a8a'); return; }
-        if(pick.kind==='multi'){
+        if(V7){
+          // 2026-10-13: ONE note (self-made: blinding re-derived from its index; received: the
+          // blinding from its envelope) against the v7 epoch's leaves. The builder seals the change
+          // to this wallet's delivery key itself, so the scanner finds it like any received note.
+          var vb7 = pick.kind==='recv' ? pick.recv.blinding : String(wasm.noteBlindingV7(seedHex, pick.note.index));
+          var vv7 = pick.kind==='recv' ? pick.recv.value : String(pick.note.value);
+          reqJson = wasm.buildPrivateSendV7(seedHex, vb7, vv7, pick.position, JSON.stringify(leaves), capacity,
+                recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString(), memo||'');
+        } else if(pick.kind==='multi'){
           var xn=pick.notes[0], yn=pick.notes[1];
           reqJson = wasm.buildPrivateSend2(
                 seedHex, xn.value.toString(), pick.blindings[0], xn.position,
@@ -3454,7 +3663,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var sn=spentInputs[si]; if(sn.kind==='recv' || !sn.note) continue;
         for(var k=0;k<updated.length;k++){ if(updated[k].index===sn.note.index){ updated[k].spent=true; } }
       }
-      if(req.change_index!==null && req.change_index!==undefined){
+      // 2026-10-13: a v7 change note is sealed to ourselves by the builder and its derivation index is
+      // a 64-bit tag, so it is NOT booked by index here — the scanner opens it like a received note.
+      if(!V7 && req.change_index!==null && req.change_index!==undefined){
         updated.push({index:req.change_index, value:Number(req.change_value), ts:Date.now()});
       }
       saveMyNotes(from, updated);
@@ -3464,7 +3675,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.
       try{ showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
-      try{ pick._retireTag=_retireTag; pick._noteEp=noteEp; sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, req.change_index, amtStr); }catch(e){}
+      try{ pick._retireTag=_retireTag; pick._noteEp=noteEp; sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, V7?null:req.change_index, amtStr, req.cm_outs); }catch(e){}
       return true;
     }catch(e){
       privMsg('✗ network error — node unreachable.', '#ff8a8a');
@@ -6516,7 +6727,8 @@ async function sigilPaymentCode(){
         if(kp0&&kp0.address===a&&kp0.priv){ var w0=window.sigilShieldWasm||await window.sigilShieldWasmReady;
           var hx0=Array.from(kp0.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
           var s0=String(w0.shieldPublicKey(hx0)).toLowerCase(), e0=String(w0.shieldEncryptPublicKey(hx0)).toLowerCase();
-          mismatch=(s0!==s)||(e0!==e); } }
+          var s7=null; try{ if(w0.shieldPublicKeyV7) s7=String(w0.shieldPublicKeyV7(hx0)).toLowerCase(); }catch(_){}   // 2026-10-13: either generation's key is ours
+          mismatch=((s0!==s)&&(s7!==s))||(e0!==e); } }
   }catch(_){} }
   if(mismatch){ window.__sigilRecvKeyMismatch=true; }
   if(!s){
@@ -6529,6 +6741,7 @@ async function sigilPaymentCode(){
         if(kp&&kp.address===a&&kp.priv){ var wasm=window.sigilShieldWasm||await window.sigilShieldWasmReady;
           var hx=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
           s=String(wasm.shieldPublicKey(hx)).toLowerCase(); e=String(wasm.shieldEncryptPublicKey(hx)).toLowerCase();
+          try{ var pgC=window.__sigilPoolGen?await window.__sigilPoolGen():null; if(pgC&&pgC.v7&&wasm.shieldPublicKeyV7) s=String(wasm.shieldPublicKeyV7(hx)).toLowerCase(); }catch(_){}   // 2026-10-13
           if(window.sigilEnsureRegistered) window.sigilEnsureRegistered(a, kp.priv); } }
     }catch(_){}
   }
@@ -9685,6 +9898,117 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 })();
 </script>
 
+<!-- 2026-10-12 PRIVACY GAUGE (Π). Viktor: "build the Π gauge". How many people a private payment
+     hides among, as an outside chain observer can tell, read from the chain by sigil-privacy-scan
+     (crowd = 2^H over the live epoch's depositors by value; exits linked by amount count as 1).
+     The public copy carries no wallet ids. Same chip family as Κc and ⌂; docked by TOPBAR DOCK. -->
+<style>
+  #piChip{position:fixed;top:10px;right:300px;z-index:1400;display:flex;align-items:center;gap:6px;
+    padding:6px 11px;border-radius:999px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:12px;
+    background:rgba(20,10,24,.82);border:1px solid rgba(244,114,182,.45);color:#e2e8f0;user-select:none}
+  #piChip:hover{border-color:#f9a8d4}
+  #piChip .piSig{color:#f472b6;font-size:14px;font-weight:800}
+  #piChip .piV{font-weight:700;color:#f9a8d4}
+  #piChip .piDot{width:7px;height:7px;border-radius:50%;background:#64748b}
+  #piChip.thin .piDot{background:#f87171}#piChip.small .piDot{background:#fbbf24}#piChip.crowd .piDot{background:#34d399}
+  #gdock #piChip,#pdock #piChip{position:static;padding:5px 10px;font-size:11.5px}
+  #piPanel{position:fixed;top:52px;right:12px;z-index:1400;width:390px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
+    background:#140c18;border:1px solid rgba(244,114,182,.4);border-radius:14px;
+    box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 42px rgba(244,114,182,.14);color:#e2e8f0}
+  #piPanel.on{display:block}
+  html.chips-in-bar #piPanel{top:72px}
+  #piPanel .piHd{padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;gap:10px}
+  #piPanel .piT{font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:rgba(255,255,255,.42)}
+  #piPanel .piBig{font-size:28px;font-weight:800;color:#f9a8d4;line-height:1;text-align:right}
+  #piPanel .piSay{padding:11px 15px;font-size:12px;line-height:1.55;border-bottom:1px solid rgba(255,255,255,.06)}
+  #piPanel .piRow{display:grid;grid-template-columns:96px 1fr;gap:10px;padding:8px 15px;font-size:11px;line-height:1.5;border-bottom:1px solid rgba(255,255,255,.05)}
+  #piPanel .piRow b{color:#f9a8d4;font-weight:600}
+  #piPanel .piK{color:rgba(255,255,255,.45);text-transform:uppercase;letter-spacing:.08em;font-size:9.5px;padding-top:2px}
+  #piPanel .piWeak{color:#f87171}
+  #piPanel .piFoot{padding:9px 15px;font-size:9.5px;color:rgba(255,255,255,.35);line-height:1.5}
+  #piPanel .piX{cursor:pointer;color:rgba(255,255,255,.4);font-size:16px;line-height:1}
+</style>
+<script>
+(function(){
+  "use strict";
+  var URL_=(location.hostname==='sigilgraph.org'?'':'https://sigilgraph.org')+'/downloads/sigil-privacy-gauge.json';
+  var open=false, data=null;
+  function esc(x){ return String(x).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function n(x,d){ return (typeof x==='number'&&isFinite(x))?x.toLocaleString('en-US',{maximumFractionDigits:d==null?0:d}):'—'; }
+  function host(){
+    if(!document.getElementById('piChip')){
+      var c=document.createElement('div'); c.id='piChip';
+      c.title='Privacy gauge (Π): how many people a private payment hides among, as seen from the chain';
+      c.innerHTML='<span class="piSig">Π</span><span class="piV" id="piChipV">—</span><span class="piDot"></span>';
+      c.addEventListener('click',function(){ toggle(); });
+      document.documentElement.appendChild(c);
+    }
+    if(!document.getElementById('piPanel')){
+      var p=document.createElement('div'); p.id='piPanel'; document.documentElement.appendChild(p);
+    }
+  }
+  function toggle(v){ open=(v===undefined)?!open:v; var p=document.getElementById('piPanel'); if(p){ p.classList.toggle('on',open); if(open) paint(); } }
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') toggle(false); });
+  document.addEventListener('click',function(e){ var p=document.getElementById('piPanel'),c=document.getElementById('piChip');
+    if(open&&p&&c&&!p.contains(e.target)&&!c.contains(e.target)) toggle(false); },true);
+  function paint(){
+    var c=document.getElementById('piChip'), p=document.getElementById('piPanel'); if(!c||!p) return;
+    if(!data){ document.getElementById('piChipV').textContent='—'; c.className='';
+      p.innerHTML='<div class="piHd"><div class="piT">Privacy gauge · Π</div><span class="piX" id="piX">×</span></div><div class="piSay">The gauge could not be read here.'+(location.hostname==='sigilgraph.org'?'':' The local wallet cannot reach it yet; open the wallet on sigilgraph.org to see it.')+'</div>';
+      var x0=document.getElementById('piX'); if(x0) x0.onclick=function(){toggle(false);}; return; }
+    var h=data.headline||{}, cr=data.crowd||{}, mv=data.movement||{}, ed=data.edges||{}, pr=data.proof||{}, gw=data.gateway||{};
+    var pi=h.pi_outside, live=(cr.per_epoch||[]).filter(function(e){return e.live;})[0]||{};
+    var reg=pi<3?'thin':(pi<20?'small':'crowd');
+    c.className=reg; document.getElementById('piChipV').textContent=n(pi,1);
+    var age=data.generated_at_ms?Math.round((Date.now()-data.generated_at_ms)/60000):null;
+    var shares=(live.depositor_shares_by_value||[]), top=shares.length?shares[0]:null;
+    var weak=h.weakest_layer||'';
+    function row(k,html,isWeak){ return '<div class="piRow"><div class="piK'+(isWeak?' piWeak':'')+'">'+esc(k)+(isWeak?' ◂':'')+'</div><div>'+html+'</div></div>'; }
+    var ov=pr.overall||{};
+    p.innerHTML='<div class="piHd"><div><div class="piT">Privacy gauge · Π</div><div style="font-size:10px;color:rgba(255,255,255,.5);margin-top:3px">'+(age==null?'':('measured '+(age<1?'just now':age+' min ago')))+'</div></div><div><div class="piBig">'+n(pi,2)+'</div></div><span class="piX" id="piX">×</span></div>'+
+      '<div class="piSay">A private payment made now hides among about <b style="color:#f9a8d4">'+n(pi,1)+'</b> '+(pi<1.05?'person':'people')+', as an outside observer of the chain can tell. '+
+      (reg==='thin'?'That is a very small crowd: the pool is private by cryptography but almost nobody is in it.':reg==='small'?'A small crowd: more people using the pool makes everyone in it more private.':'A real crowd.')+'</div>'+
+      row('crowd','live pool generation: <b>'+n(live.notes)+'</b> notes from <b>'+n(live.distinct_depositors)+'</b> depositing wallets; effective crowd <b>'+n(live.effective_crowd_by_value,2)+'</b>'+(top!=null?' (one wallet put in '+n(top*100,1)+' % of the value)':''),weak==='crowd')+
+      row('movement','last private payment <b>'+n((mv.spends||{}).hours_since_last,1)+' h</b> ago; <b>'+n((mv.spends||{}).last_24h)+'</b> in the last 24 h. A payment made into silence is easy to spot by its timing.',weak==='movement')+
+      row('exits','<b>'+n(ed.exits_total)+'</b> withdrawals ever; <b>'+n(((ed.window_7d||{}).exactly_one_candidate))+'</b> matched to a single deposit by amount',weak==='edges')+
+      row('proofs','<b>'+n(ov.v4)+'</b> leaking (v4) proofs ever; '+n(ov.v5)+' v5 + '+n(ov.v6)+' v6 hiding proofs',weak==='proof')+
+      row('gateway','lookups that named a full commitment: <b>'+n(gw.has_cm_lines_24h)+'</b> in 24 h (insider view; wallets now ask by bucket)',false)+
+      '<div class="piFoot">Π = 2^H over the live pool generation\'s depositors weighted by value; withdrawals matched to one deposit by amount count as 1. Read from the chain by sigil-privacy-scan; wallet ids are left out of the public copy. Weakest layer: '+esc(weak)+'.</div>';
+    var x=document.getElementById('piX'); if(x) x.onclick=function(){toggle(false);};
+  }
+  function load(){
+    fetch(URL_+'?t='+Date.now(),{cache:'no-store'}).then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(j){ data=(j&&j.schema&&String(j.schema).indexOf('sigil-privacy-gauge/')===0)?j:null; paint(); })
+      .catch(function(){ data=null; paint(); });
+  }
+  host(); setInterval(host,3000); load(); setInterval(load,5*60*1000);
+})();
+</script>
+
+<!-- 2026-10-12 PRIVACY: bucketed commitment lookups (see /v1/shielded/has_bucket). -->
+<script>
+(function(){
+  "use strict";
+  var cache=Object.create(null);   // first byte -> {at, set}
+  // A set of every commitment ever held whose first byte is p, or null if the node predates the
+  // endpoint (callers then fall back to the full walk, never to a single-commitment query).
+  window.__sigilCmBucket=async function(p, fresh){
+    p=String(p).toLowerCase();
+    var c=cache[p];
+    if(c && !fresh && (Date.now()-c.at)<15000) return c.set;
+    var r=await fetch('/v1/shielded/has_bucket?p='+p,{cache:'no-store'});
+    if(r.status===404) return null;
+    var j=null; try{ j=await r.json(); }catch(_){}
+    if(!j || j.ok!==true || !Array.isArray(j.cms)) throw new Error('shielded/has_bucket unreadable');
+    var set=Object.create(null);
+    for(var i=0;i<j.cms.length;i++) set[String(j.cms[i]).toLowerCase()]=1;
+    cache[p]={at:Date.now(), set:set};
+    return set;
+  };
+})();
+</script>
+
 <!-- 2026-10-12 TOPBAR DOCK (Viktor: "the global topbar … is cluttered in the right side").
      The two gauge chips (Kc and the skyline) used to float position:fixed over the top-right corner and
      covered the bar's own pills, avatar and phone button. They now sit IN the bar (desktop) or in a row
@@ -9743,7 +10067,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   function dock(){
     var desk=!!(document.body&&document.body.classList.contains('view-desktop'));
     var t=document.getElementById(desk?'gdock':'pdock'); if(!t) return;
-    ['kgChip','skChip'].forEach(function(id){ var c=document.getElementById(id); if(c&&c.parentElement!==t) t.appendChild(c); });
+    ['piChip','kgChip','skChip'].forEach(function(id){ var c=document.getElementById(id); if(c&&c.parentElement!==t) t.appendChild(c); });
     document.documentElement.classList.toggle('chips-in-bar',desk);
   }
   function foot(id,cls,parent){

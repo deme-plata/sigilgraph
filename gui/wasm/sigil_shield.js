@@ -256,6 +256,57 @@ export function buildPrivateSendReceivedWithMemo(seed_hex, note_blinding_hex, no
 }
 
 /**
+ * Build and PROVE a v7 private send of ONE note (self-made or received: pass its 32-byte
+ * blinding) against the v7 epoch's leaves, paying `amount` to a v7 owner key + delivery
+ * key, change back to us. Returns the same JSON as `buildPrivateSendWithMemo`.
+ * @param {string} seed_hex
+ * @param {string} note_blinding_hex
+ * @param {string} note_value_str
+ * @param {number} note_position
+ * @param {string} unpadded_leaves_json
+ * @param {number} capacity
+ * @param {string} recipient_pk_shield_hex
+ * @param {string} recipient_pk_enc_hex
+ * @param {string} amount_str
+ * @param {string} memo
+ * @returns {string}
+ */
+export function buildPrivateSendV7(seed_hex, note_blinding_hex, note_value_str, note_position, unpadded_leaves_json, capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo) {
+    let deferred10_0;
+    let deferred10_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(note_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(note_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(unpadded_leaves_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(recipient_pk_shield_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(recipient_pk_enc_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(amount_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(memo, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ret = wasm.buildPrivateSendV7(ptr0, len0, ptr1, len1, ptr2, len2, note_position, ptr3, len3, capacity, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7);
+        var ptr9 = ret[0];
+        var len9 = ret[1];
+        if (ret[3]) {
+            ptr9 = 0; len9 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred10_0 = ptr9;
+        deferred10_1 = len9;
+        return getStringFromWasm0(ptr9, len9);
+    } finally {
+        wasm.__wbindgen_free(deferred10_0, deferred10_1, 1);
+    }
+}
+
+/**
  * [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
  * bytes) sealed to the recipient alongside the note. A separate export rather than an
  * extra parameter so pages built against the memo-less signature keep working unchanged.
@@ -334,6 +385,33 @@ export function noteBlinding(seed_hex, index) {
 }
 
 /**
+ * The 32-byte v7 blinding of the self-made note at `index`.
+ * @param {string} seed_hex
+ * @param {number} index
+ * @returns {string}
+ */
+export function noteBlindingV7(seed_hex, index) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.noteBlindingV7(ptr0, len0, index);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * @param {string} seed_hex
  * @param {number} position
  * @returns {string}
@@ -345,6 +423,34 @@ export function noteNullifier(seed_hex, position) {
         const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.noteNullifier(ptr0, len0, position);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * The RAW v7 nullifier of this wallet's note at `position`; the chain's spent set holds
+ * it scoped by epoch — see `scopedNullifierV7`.
+ * @param {string} seed_hex
+ * @param {number} position
+ * @returns {string}
+ */
+export function noteNullifierV7(seed_hex, position) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.noteNullifierV7(ptr0, len0, position);
         var ptr2 = ret[0];
         var len2 = ret[1];
         if (ret[3]) {
@@ -394,6 +500,63 @@ export function openNoteCiphertext(seed_hex, ciphertext_json) {
 }
 
 /**
+ * Open a v7 envelope with our delivery key: `{value, blinding_hex, memo}`. Errors on a
+ * stranger's note or a v1/v2 envelope (try `openNoteCiphertext` for those).
+ * @param {string} seed_hex
+ * @param {string} ciphertext_json
+ * @returns {string}
+ */
+export function openNoteCiphertextV7(seed_hex, ciphertext_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(ciphertext_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.openNoteCiphertextV7(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * The spent-set key for a raw nullifier observed in `epoch` (= the node's `scoped_nullifier`).
+ * @param {number} epoch
+ * @param {string} nullifier_hex
+ * @returns {string}
+ */
+export function scopedNullifierV7(epoch, nullifier_hex) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(nullifier_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.scopedNullifierV7(epoch, ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * The nullifier this wallet's note at pool leaf `position` publishes when spent —
  * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
  * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
@@ -421,6 +584,36 @@ export function sealNoteToSelf(seed_hex, index, value_str) {
         const ptr1 = passStringToWasm0(value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.sealNoteToSelf(ptr0, len0, index, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Seal the self-made v7 note at `index` to our own delivery key.
+ * @param {string} seed_hex
+ * @param {number} index
+ * @param {string} value_str
+ * @returns {string}
+ */
+export function sealNoteToSelfV7(seed_hex, index, value_str) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sealNoteToSelfV7(ptr0, len0, index, ptr1, len1);
         var ptr3 = ret[0];
         var len3 = ret[1];
         if (ret[3]) {
@@ -505,6 +698,37 @@ export function shieldNoteCommitment(seed_hex, index, value_str) {
 }
 
 /**
+ * The v7 deposit for the self-made note at `index` worth `value`: `{cm, blinding, pk_shield}`
+ * (all hex), the three fields `/v1/shield` needs.
+ * @param {string} seed_hex
+ * @param {number} index
+ * @param {string} value_str
+ * @returns {string}
+ */
+export function shieldNoteCommitmentV7(seed_hex, index, value_str) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.shieldNoteCommitmentV7(ptr0, len0, index, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
  * This account's wire-hex `pk_shield` — the circuit key a payer binds an output note
  * to. Publish this (together with an X25519 encryption key) via
  * `POST /v1/shielded/register` so others can pay you privately.
@@ -518,6 +742,32 @@ export function shieldPublicKey(seed_hex) {
         const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.shieldPublicKey(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * The 32-byte v7 owner key (hex) — what a v7 payer commits a note to.
+ * @param {string} seed_hex
+ * @returns {string}
+ */
+export function shieldPublicKeyV7(seed_hex) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shieldPublicKeyV7(ptr0, len0);
         var ptr2 = ret[0];
         var len2 = ret[1];
         if (ret[3]) {

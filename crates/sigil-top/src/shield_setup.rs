@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::{Signer, SigningKey};
 use sigil_shield::note_v1::to_wire;
 use sigil_shield::wallet::ShieldedAccount;
+use sigil_shield::wallet_v7::AccountV7;
 
 /// Decode a 64-hex-char string to 32 raw bytes. Deliberately the SAME parsing
 /// `hex_to_32` (main.rs) uses for `SIGIL_MINE_SEED` elsewhere — not reimplemented
@@ -68,11 +69,44 @@ pub enum RegisterOutcome {
 /// request, and submit it to `node_url`. Synchronous/blocking — this runs once,
 /// before the mining loop starts, so there is no async runtime to thread through.
 pub fn register_for_shielded_mining(node_url: &str, seed_hex: &str) -> RegisterOutcome {
+    // 2026-10-13 v7: the node says which note generation the pool issues; the key we publish
+    // must be of that generation or a payer would mint notes this seed cannot spend there.
+    match pool_issues_v7(node_url) {
+        Ok(v7) => register_for_shielded_mining_gen(node_url, seed_hex, v7),
+        Err(reason) => {
+            let wallet_hex = wallet_signing_key(seed_hex)
+                .map(|sk| hex::encode(sk.verifying_key().to_bytes()))
+                .unwrap_or_default();
+            RegisterOutcome::Failed { wallet_hex, reason }
+        }
+    }
+}
+
+/// Does the node's pool currently issue v7 (256-bit) notes? Read from `/v1/shielded/anchor`
+/// (`v7.epoch` present). Fail closed: an unreadable anchor is an error, never "v1".
+pub fn pool_issues_v7(node_url: &str) -> Result<bool, String> {
+    let url = format!("{}/v1/shielded/anchor", node_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let v = http_json(&client, &url).ok_or_else(|| "could not read the shielded anchor".to_string())?;
+    let d = v.get("data").unwrap_or(&v);
+    Ok(d.get("v7").and_then(|x| x.get("epoch")).and_then(|x| x.as_u64()).is_some())
+}
+
+/// [`register_for_shielded_mining`] for a KNOWN generation (`v7` = publish the 256-bit owner
+/// key; otherwise the v1 shield key). The delivery key is the same identity either way.
+pub fn register_for_shielded_mining_gen(node_url: &str, seed_hex: &str, v7: bool) -> RegisterOutcome {
     let Some(seed) = seed_bytes(seed_hex) else { return RegisterOutcome::BadSeed };
     let sk = SigningKey::from_bytes(&seed);
     let wallet_hex = hex::encode(sk.verifying_key().to_bytes());
     let account = ShieldedAccount::from_seed(seed);
-    let pk_shield_hex = hex::encode(to_wire(account.public_key()));
+    let pk_shield_hex = if v7 {
+        hex::encode(AccountV7::from_seed(seed).owner_pk().to_wire())
+    } else {
+        hex::encode(to_wire(account.public_key()))
+    };
     // 2026-08-24: the note-delivery key, derived from the SAME seed via
     // `note_cipher::enc_identity_from_seed`'s own domain separation — a third
     // independent key from the one seed a miner already backs up. Without publishing
@@ -201,6 +235,11 @@ pub enum RegistrationState {
     /// spend, which is worse than being unregistered, so the keeper stops and says so
     /// loudly rather than fighting whoever holds the other seed.
     Foreign { pk_shield: String },
+    /// Registered to THIS seed's key of the OTHER note generation (2026-10-13): the chain still
+    /// holds our v1 key while the pool issues v7 notes (or the reverse). Not foreign — same
+    /// seed — but a payer sealing to it would mint a note this wallet cannot spend in the
+    /// current pool, so it is republished for the current generation.
+    OldGeneration { pk_shield: String },
     /// Nothing published — rewards stay transparent until we register.
     Absent,
     /// Couldn't tell (node unreachable, unparseable answer). Deliberately distinct from
@@ -214,6 +253,17 @@ pub fn registration_state(
     node_url: &str,
     wallet_hex: &str,
     expect_pk_shield: &str,
+) -> RegistrationState {
+    registration_state_gen(node_url, wallet_hex, expect_pk_shield, None)
+}
+
+/// [`registration_state`] that also knows this seed's key of the OTHER generation, so a
+/// stale-but-ours key reads as [`RegistrationState::OldGeneration`] instead of `Foreign`.
+pub fn registration_state_gen(
+    node_url: &str,
+    wallet_hex: &str,
+    expect_pk_shield: &str,
+    other_gen_pk_shield: Option<&str>,
 ) -> RegistrationState {
     let url = format!(
         "{}/v1/shielded/address?wallet={wallet_hex}",
@@ -247,6 +297,9 @@ pub fn registration_state(
     }
     match parsed.get("pk_shield").and_then(|v| v.as_str()) {
         Some(pk) if pk.eq_ignore_ascii_case(expect_pk_shield) => RegistrationState::Ours,
+        Some(pk) if other_gen_pk_shield.is_some_and(|o| pk.eq_ignore_ascii_case(o)) => {
+            RegistrationState::OldGeneration { pk_shield: pk.to_string() }
+        }
         Some(pk) => RegistrationState::Foreign { pk_shield: pk.to_string() },
         None => RegistrationState::Unknown("registered but no pk_shield in response".into()),
     }
@@ -255,6 +308,11 @@ pub fn registration_state(
 /// The shield public key `seed_hex` derives — what [`registration_state`] compares against.
 pub fn expected_pk_shield(seed_hex: &str) -> Option<String> {
     Some(hex::encode(to_wire(ShieldedAccount::from_seed(seed_bytes(seed_hex)?).public_key())))
+}
+
+/// The v7 (256-bit) owner key `seed_hex` derives — what a v7 pool's registry must hold.
+pub fn expected_pk_shield_v7(seed_hex: &str) -> Option<String> {
+    Some(hex::encode(AccountV7::from_seed(seed_bytes(seed_hex)?).owner_pk().to_wire()))
 }
 
 /// Register this wallet for shielded mining and KEEP it registered, on a background
@@ -286,7 +344,8 @@ where
 {
     let sk = wallet_signing_key(seed_hex)?;
     let wallet_hex = hex::encode(sk.verifying_key().to_bytes());
-    let pk_shield = expected_pk_shield(seed_hex)?;
+    let pk_shield_v1 = expected_pk_shield(seed_hex)?;
+    let pk_shield_v7 = expected_pk_shield_v7(seed_hex)?;
     let node = node_url.to_string();
     let seed = seed_hex.to_string();
 
@@ -297,7 +356,29 @@ where
         // first-time registration.
         let mut announced_registered = false;
         loop {
-            match registration_state(&node, &wallet_hex, &pk_shield) {
+            // 2026-10-13 v7: which key the pool wants NOW. The node decides, every cycle, so a
+            // pool that switches generations while this process runs is followed, not fought.
+            let v7 = match pool_issues_v7(&node) {
+                Ok(v) => v,
+                Err(why) => {
+                    log(format!("… shielded registration: cannot read the pool generation ({why}) — retrying"));
+                    std::thread::sleep(RETRY_AFTER_FAILURE);
+                    continue;
+                }
+            };
+            let (pk_shield, other_pk): (&str, &str) =
+                if v7 { (&pk_shield_v7, &pk_shield_v1) } else { (&pk_shield_v1, &pk_shield_v7) };
+            match registration_state_gen(&node, &wallet_hex, pk_shield, Some(other_pk)) {
+                RegistrationState::OldGeneration { .. } => {
+                    announced_registered = false;
+                    log(format!(
+                        "⟳ {short}… has its {}-format receiving key on chain while the pool issues {} notes — \
+                         republishing the {} key so payments can reach it",
+                        if v7 { "old" } else { "new" },
+                        if v7 { "256-bit" } else { "v1" },
+                        if v7 { "256-bit" } else { "v1" }
+                    ));
+                }
                 RegistrationState::Ours => {
                     // Announce it ONCE, then keep watching. Re-checking (rather than
                     // returning) is what makes this survive a chain reset — see
@@ -341,7 +422,7 @@ where
                 }
             }
 
-            match register_for_shielded_mining(&node, &seed) {
+            match register_for_shielded_mining_gen(&node, &seed, v7) {
                 RegisterOutcome::Registered { txid, .. } => {
                     log(format!(
                         "🔐 registered {short}… for shielded mining (tx {}…) — takes ~30 min to \
@@ -375,7 +456,7 @@ where
             while Instant::now() < deadline {
                 std::thread::sleep(POLL_EVERY);
                 if let RegistrationState::Ours =
-                    registration_state(&node, &wallet_hex, &pk_shield)
+                    registration_state(&node, &wallet_hex, pk_shield)
                 {
                     landed = true;
                     break;
@@ -567,6 +648,11 @@ pub struct ShieldedSnapshot {
     pub registered: usize,
     /// Chain-wide spent-nullifier count.
     pub nullifiers: usize,
+    /// 2026-10-13: the live v7 (256-bit) epoch, when the pool has opened one.
+    pub v7_epoch: Option<u32>,
+    /// Notes in that epoch (pool-wide), and this wallet's spendable value among them.
+    pub v7_notes: usize,
+    pub v7_balance: u128,
 }
 
 impl ShieldedSnapshot {
@@ -678,6 +764,41 @@ pub fn scan_shielded(node_url: &str, seed_hex: &str) -> Option<ShieldedSnapshot>
     snap.balance = store.balance();
     snap.owned = store.notes.iter().filter(|n| n.position.is_some()).count();
     snap.spent = store.notes.iter().filter(|n| n.spent).count();
+
+    // 2026-10-13 v7: the 256-bit epoch (numbered live+1) sits beside the v1 epochs with its own
+    // envelopes, keys and epoch-scoped nullifiers. Its notes are this wallet's money too.
+    if let Some(v7_epoch) = anchor.get("v7").and_then(|x| x.get("epoch")).and_then(|x| x.as_u64()) {
+        let account7 = AccountV7::from_seed(seed);
+        let page = http_json(&client, &format!("{base}/v1/shielded/leaves?epoch={v7_epoch}"))?;
+        if page.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return None;
+        }
+        let leaves: Vec<[u8; 32]> = page
+            .get("leaves")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().and_then(wire32)).collect())
+            .unwrap_or_default();
+        let cts: Vec<sigil_shield::note_cipher::NoteCiphertext> = page
+            .get("ciphertexts")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| sigil_shield::note_cipher::NoteCiphertext(s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut store7 = sigil_shield::wallet_v7::NoteStoreV7::new();
+        store7.scan_ciphertexts(&account7.enc_identity(), &cts);
+        store7.scan_owned(&account7, &leaves);
+        store7.mark_spent(&account7, &spent, v7_epoch as u32);
+        snap.v7_epoch = Some(v7_epoch as u32);
+        snap.v7_notes = anchor.get("v7").and_then(|x| x.get("notes")).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        snap.v7_balance = store7.balance();
+        snap.balance += store7.balance();
+        snap.owned += store7.notes.iter().filter(|n| n.position.is_some()).count();
+        snap.spent += store7.notes.iter().filter(|n| n.spent).count();
+    }
     Some(snap)
 }
 
@@ -743,4 +864,72 @@ pub fn wallet_is_registered(node_url: &str, wallet_hex: &str) -> bool {
     http_json(&client, &url)
         .map(|v| v.get("pk_shield").and_then(|p| p.as_str()).is_some_and(|s| !s.is_empty()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod v7_generation_tests {
+    //! 2026-10-13: the registration keeper follows the pool's note generation.
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A one-reply stub node: answers every request with `reply`.
+    fn stub(reply: String) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming().take(8) {
+                let Ok(mut s) = s else { break };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    reply.len(),
+                    reply
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn the_v7_key_is_a_full_digest_and_differs_from_the_v1_key() {
+        let seed = hex::encode([0x5a; 32]);
+        let v1 = expected_pk_shield(&seed).unwrap();
+        let v7 = expected_pk_shield_v7(&seed).unwrap();
+        assert_ne!(v1, v7);
+        assert_eq!(v7.len(), 64);
+        assert!(v1[16..].bytes().all(|b| b == b'0'), "v1 = one field element + 24 zero bytes");
+        assert!(!v7[16..].bytes().all(|b| b == b'0'), "v7 = a 256-bit digest");
+    }
+
+    #[test]
+    fn our_old_generation_key_on_chain_reads_as_old_generation_not_foreign() {
+        let seed = hex::encode([0x5a; 32]);
+        let v1 = expected_pk_shield(&seed).unwrap();
+        let v7 = expected_pk_shield_v7(&seed).unwrap();
+        // The pool issues v7; the chain still holds this seed's v1 key.
+        let node = stub(serde_json::json!({"ok": true, "pk_shield": v1, "pk_encrypt": "00"}).to_string());
+        match registration_state_gen(&node, "ab", &v7, Some(&v1)) {
+            RegistrationState::OldGeneration { pk_shield } => assert_eq!(pk_shield, v1),
+            _ => panic!("expected OldGeneration"),
+        }
+        // Without the other-generation hint the pre-v7 verdict stands: a different key is foreign.
+        assert!(matches!(registration_state(&node, "ab", &v7), RegistrationState::Foreign { .. }));
+        // The v7 key on chain is simply ours.
+        let node2 = stub(serde_json::json!({"ok": true, "pk_shield": v7, "pk_encrypt": "00"}).to_string());
+        assert!(matches!(registration_state_gen(&node2, "ab", &v7, Some(&v1)), RegistrationState::Ours));
+        // And a genuinely foreign key is still foreign, whichever generation the pool is in.
+        let node3 = stub(serde_json::json!({"ok": true, "pk_shield": "ff".repeat(32), "pk_encrypt": "00"}).to_string());
+        assert!(matches!(registration_state_gen(&node3, "ab", &v7, Some(&v1)), RegistrationState::Foreign { .. }));
+    }
+
+    #[test]
+    fn the_pool_generation_is_read_from_the_anchor_and_fails_closed() {
+        let v7node = stub(serde_json::json!({"ok": true, "epoch": 0, "v7": {"epoch": 1, "notes": 3}}).to_string());
+        assert_eq!(pool_issues_v7(&v7node), Ok(true));
+        let v1node = stub(serde_json::json!({"ok": true, "epoch": 2}).to_string());
+        assert_eq!(pool_issues_v7(&v1node), Ok(false));
+        assert!(pool_issues_v7("http://127.0.0.1:9").is_err(), "an unreachable node is an error, never v1");
+    }
 }

@@ -100,6 +100,9 @@ mod shield_ops {
     use sigil_shield::note_cipher::{seal_note, NotePlaintext, ShieldedAddress};
     use sigil_shield::note_v1::{from_wire, padding_leaf_wire, to_wire};
     use sigil_shield::wallet::{build_spend, NoteStore, OwnedNote, ShieldedAccount};
+    // 2026-10-13: the 256-bit generation — same seed, second key family (`wallet_v7`).
+    use sigil_shield::note_v7::Digest4;
+    use sigil_shield::wallet_v7::{build_spend_v7, scoped_nullifier_v7, seal_output_v7, AccountV7, NoteStoreV7, OwnedNoteV7};
     use winterfell::math::fields::f64::BaseElement;
 
     use super::{bad_request, not_available, ok_json, outcome_unknown, nullifier_in_reply};
@@ -168,6 +171,29 @@ mod shield_ops {
         TEST_CTX
             .with(|c| c.borrow().as_ref().map(|t| t.node.clone()))
             .unwrap_or_else(crate::engine_node_url)
+    }
+
+    /// Which note generation the pool issues NOW, from the node's own anchor: `Some(epoch)`
+    /// when a live v7 (256-bit) epoch is open, `None` while the pool is v1-only. The node
+    /// decides — never the shape of what we hold. Fail closed: an unreadable anchor is an
+    /// error, not "v1".
+    fn pool_v7_epoch(client: &reqwest::blocking::Client, node: &str) -> Result<Option<u32>, String> {
+        let url = format!("{}/v1/shielded/anchor", node.trim_end_matches('/'));
+        let v: serde_json::Value = client
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| format!("could not read the shielded anchor ({e}) — not guessing the note generation"))?
+            .json()
+            .map_err(|e| format!("bad /v1/shielded/anchor response: {e}"))?;
+        let d = v.get("data").unwrap_or(&v);
+        Ok(d.get("v7").and_then(|x| x.get("epoch")).and_then(|x| x.as_u64()).map(|e| e as u32))
+    }
+
+    /// A v1 key or commitment is ONE 8-byte field element followed by 24 zero bytes; a v7
+    /// one is a full 256-bit digest. The shape is how the chain tells the generations apart.
+    fn is_v1_shaped(b: &[u8; 32]) -> bool {
+        b[8..].iter().all(|x| *x == 0)
     }
 
     /// Persistent per-wallet note-derivation-index counter — part of the money path, not
@@ -328,9 +354,35 @@ mod shield_ops {
         account: &ShieldedAccount,
         base: u64,
         parts: &[u128],
+        taken: F,
+    ) -> Result<Vec<(u64, u64, String)>, String>
+    where
+        F: FnMut(&str) -> Result<bool, String>,
+    {
+        choose_indices_by(
+            base,
+            parts,
+            |idx, value| {
+                account
+                    .note(idx, value)
+                    .map(|n| hex::encode(to_wire(n.commitment())))
+                    .map_err(|e| format!("note build failed at index {idx}: {e}"))
+            },
+            taken,
+        )
+    }
+
+    /// [`choose_indices`] with the commitment function injected, so the v7 (256-bit) note
+    /// family walks the same allocation: `cm_of(index, value)` is the hex commitment the
+    /// chain would see for that pair in whichever generation the pool issues now.
+    fn choose_indices_by<C, F>(
+        base: u64,
+        parts: &[u128],
+        mut cm_of: C,
         mut taken: F,
     ) -> Result<Vec<(u64, u64, String)>, String>
     where
+        C: FnMut(u64, u64) -> Result<String, String>,
         F: FnMut(&str) -> Result<bool, String>,
     {
         let ceiling = base.saturating_add(INDEX_SCAN_LIMIT);
@@ -340,10 +392,7 @@ mod shield_ops {
             let value = *value128 as u64; // denominations top out at 2e17, well within u64
             let mut slot = None;
             while idx < ceiling {
-                let note = account
-                    .note(idx, value)
-                    .map_err(|e| format!("note build failed at index {idx}: {e}"))?;
-                let cm = hex::encode(to_wire(note.commitment()));
+                let cm = cm_of(idx, value)?;
                 let used = chosen.iter().any(|(_, _, c)| c == &cm) || taken(&cm)?;
                 idx += 1;
                 if !used {
@@ -473,6 +522,14 @@ mod shield_ops {
             Ok(c) => c,
             Err(e) => return bad_request(format!("http client init failed: {e}")),
         };
+        // 2026-10-13 v7: the node says which note generation the pool issues now. A v7 epoch
+        // means 256-bit notes (`AccountV7`), opened on the wire with blinding + owner key.
+        let v7_epoch = match pool_v7_epoch(&client, &node) {
+            Ok(e) => e,
+            Err(e) => return bad_request(e),
+        };
+        let account7 = AccountV7::from_seed(seed);
+        let generation = if v7_epoch.is_some() { "v7" } else { "v1" };
 
         // ── ALLOCATE FIRST, PUBLISH SECOND ──────────────────────────────────────────
         // Everything down to the `save_note_index` below happens BEFORE a single byte is
@@ -493,8 +550,21 @@ mod shield_ops {
             Ok(b) => b,
             Err(e) => return bad_request(e),
         };
-        let chosen = match choose_indices(&account, base, &parts, |cm| {
-            commitment_is_taken(&client, &node, cm)
+        let taken = |cm: &str| commitment_is_taken(&client, &node, cm);
+        let chosen = match (if v7_epoch.is_some() {
+            choose_indices_by(
+                base,
+                &parts,
+                |idx, value| {
+                    account7
+                        .note(idx, value)
+                        .map(|n| hex::encode(n.commitment().to_wire()))
+                        .map_err(|e| format!("v7 note build failed at index {idx}: {e}"))
+                },
+                taken,
+            )
+        } else {
+            choose_indices(&account, base, &parts, taken)
         }) {
             Ok(c) => c,
             Err(e) => return bad_request(e),
@@ -520,15 +590,36 @@ mod shield_ops {
             // seed (phone, browser, MCP) finds this deposit by trial-decryption instead of
             // guessing the derivation index its own way. Optional on the wire; an older
             // node simply ignores it.
-            let note_ciphertext: Option<String> = u64::try_from(value).ok().and_then(|v| {
-                seal_note(&NotePlaintext::new(v, account.blinding(this_index)), &account.address(&seed))
-                    .ok()
-                    .map(|c| c.0)
-            });
+            // 2026-10-13: the deposit's OPENING (blinding + owner key) rides along so the door
+            // can check that the commitment matches the amount, and the envelope is sealed in
+            // the note's own generation (v1 `NotePlaintext` / v7 `SIGILNT7`).
+            let (blinding_hex, pk_shield_hex, note_ciphertext): (String, String, Option<String>) =
+                if v7_epoch.is_some() {
+                    let b = account7.blinding(this_index);
+                    (
+                        hex::encode(Digest4(b).to_wire()),
+                        hex::encode(account7.owner_pk().to_wire()),
+                        u64::try_from(value)
+                            .ok()
+                            .and_then(|v| seal_output_v7(v, b, &account7.pk_enc_hex(), "").ok().map(|c| c.0)),
+                    )
+                } else {
+                    (
+                        hex::encode(to_wire(account.blinding(this_index))),
+                        hex::encode(to_wire(account.public_key())),
+                        u64::try_from(value).ok().and_then(|v| {
+                            seal_note(&NotePlaintext::new(v, account.blinding(this_index)), &account.address(&seed))
+                                .ok()
+                                .map(|c| c.0)
+                        }),
+                    )
+                };
             let payload = serde_json::json!({
                 "from": from,
                 "amount": value.to_string(),
                 "cm": cm_hex,
+                "blinding": blinding_hex,
+                "pk_shield": pk_shield_hex,
                 "fee": fee.to_string(),
                 "sig": sig,
                 "req_nonce": req_nonce,
@@ -556,7 +647,7 @@ mod shield_ops {
                             .unwrap_or("")
                             .to_string();
                         landed.push(
-                            serde_json::json!({"txid": txid, "value": value, "index": this_index}),
+                            serde_json::json!({"txid": txid, "value": value, "index": this_index, "generation": generation}),
                         );
                     } else {
                         let reason = parsed
@@ -641,6 +732,9 @@ mod shield_ops {
         struct CandidateNote {
             index: u64,
             value: String,
+            /// `"v7"` for a 256-bit note (the page books deposits with `gen:'v7'`); absent = v1.
+            #[serde(default)]
+            gen: Option<String>,
         }
         #[derive(serde::Deserialize)]
         struct Req {
@@ -671,10 +765,6 @@ mod shield_ops {
         let Some(recipient_pk_bytes) = hex_decode32(&req.recipient_pk_shield) else {
             return bad_request("recipient_pk_shield must be 64 hex chars".into());
         };
-        let recipient_pk: BaseElement = match from_wire(&recipient_pk_bytes) {
-            Ok(v) => v,
-            Err(e) => return bad_request(format!("bad recipient_pk_shield: {e}")),
-        };
 
         let account = ShieldedAccount::from_seed(seed);
         let my_pk = account.public_key();
@@ -689,9 +779,55 @@ mod shield_ops {
             Err(e) => return bad_request(format!("http client init failed: {e}")),
         };
 
+        // 2026-10-13 v7: the node declares the generation. A spend proves against THAT epoch's
+        // leaves and can only mint notes of the same generation, so the recipient's published
+        // key must have that shape too — there is no cross-generation payment to build.
+        let v7_epoch = match pool_v7_epoch(&client, &node) {
+            Ok(e) => e,
+            Err(e) => return bad_request(e),
+        };
+        let generation = if v7_epoch.is_some() { "v7" } else { "v1" };
+        let account7 = AccountV7::from_seed(seed);
+        let recipient_is_v1 = is_v1_shaped(&recipient_pk_bytes);
+        if v7_epoch.is_some() && recipient_is_v1 {
+            return bad_request(
+                "the recipient's published receiving key is the OLD note format while this pool \
+                 issues 256-bit notes — a payment to it could not be spent. Ask them to open \
+                 their wallet once (it republishes the new key by itself), then try again"
+                    .into(),
+            );
+        }
+        if v7_epoch.is_none() && !recipient_is_v1 {
+            return bad_request(
+                "the recipient's receiving key is the NEW (256-bit) note format but this pool \
+                 has not switched yet — it cannot be paid from here"
+                    .into(),
+            );
+        }
+        let recipient_pk: BaseElement = if v7_epoch.is_none() {
+            match from_wire(&recipient_pk_bytes) {
+                Ok(v) => v,
+                Err(e) => return bad_request(format!("bad recipient_pk_shield: {e}")),
+            }
+        } else {
+            BaseElement::new(0) // unused: the v7 build takes the digest below
+        };
+        let recipient_pk7: Option<Digest4> = if v7_epoch.is_some() {
+            match Digest4::from_wire(&recipient_pk_bytes) {
+                Ok(d) => Some(d),
+                Err(e) => return bad_request(format!("bad recipient_pk_shield (v7): {e}")),
+            }
+        } else {
+            None
+        };
+
         // Fetch the pool's real (unpadded) leaves FRESH — proving against a stale anchor
-        // produces a proof the node will correctly reject.
-        let leaves_url = format!("{}/v1/shielded/leaves", node.trim_end_matches('/'));
+        // produces a proof the node will correctly reject. In the v7 generation that is the
+        // v7 epoch's page (`?epoch=`), never the v1 live one.
+        let leaves_url = match v7_epoch {
+            Some(e) => format!("{}/v1/shielded/leaves?epoch={e}", node.trim_end_matches('/')),
+            None => format!("{}/v1/shielded/leaves", node.trim_end_matches('/')),
+        };
         let leaves_json: serde_json::Value = match client
             .get(&leaves_url)
             .send()
@@ -718,6 +854,15 @@ mod shield_ops {
             .get("capacity")
             .and_then(|v| v.as_u64())
             .unwrap_or(sigil_state::shielded::POOL_CAPACITY as u64) as usize;
+        // 2026-10-13: the chain keys its spent set PER EPOCH (`scoped_nullifier`; epoch 0 is the
+        // identity) and these notes live in the epoch this page reports. Every spent check below
+        // uses the scoped form — a raw nullifier stopped matching at the pool's first rotation.
+        let leaf_epoch: u32 = leaves_json
+            .get("epoch")
+            .and_then(|v| v.as_u64())
+            .map(|e| e as u32)
+            .unwrap_or_else(|| v7_epoch.unwrap_or(0));
+        let scope = |nf: [u8; 32]| -> String { hex::encode(scoped_nullifier_v7(leaf_epoch, nf)) };
 
         // The set of nullifiers the chain has ALREADY seen. A note whose nullifier is in
         // here has been spent — often by another copy of this same seed in an earlier
@@ -754,21 +899,33 @@ mod shield_ops {
         let mut best: Option<(u64, u64, usize)> = None; // (index, value, position)
         let mut skipped_spent = 0usize;
         for cand in &req.notes {
+            // One generation per send: a v7 note is useless against the v1 tree and vice versa.
+            if (cand.gen.as_deref() == Some("v7")) != v7_epoch.is_some() {
+                continue;
+            }
             let Ok(value) = cand.value.trim().parse::<u64>() else {
                 continue;
             };
             if value < amount.saturating_add(fee) {
                 continue;
             }
-            let Ok(note) = account.note(cand.index, value) else {
-                continue;
+            let cm_hex = if v7_epoch.is_some() {
+                let Ok(note) = account7.note(cand.index, value) else { continue };
+                hex::encode(note.commitment().to_wire())
+            } else {
+                let Ok(note) = account.note(cand.index, value) else { continue };
+                hex::encode(to_wire(note.commitment()))
             };
-            let cm_hex = hex::encode(to_wire(note.commitment()));
             let Some(pos) = leaves_hex.iter().position(|c| c.eq_ignore_ascii_case(&cm_hex)) else {
                 continue;
             };
-            // nf = compress2(spend_key, position) — the exact value the chain checks.
-            let nf_hex = hex::encode(to_wire(account.nullifier_at(pos as u64)));
+            // The nullifier at that position, scoped the way the chain stores it.
+            let nf_raw: [u8; 32] = if v7_epoch.is_some() {
+                account7.nullifier_at(pos as u64).to_wire()
+            } else {
+                to_wire(account.nullifier_at(pos as u64))
+            };
+            let nf_hex = scope(nf_raw);
             if spent_nullifiers.contains(&nf_hex) {
                 skipped_spent += 1;
                 continue;
@@ -800,75 +957,149 @@ mod shield_ops {
             ));
         };
 
-        let mut pool_commitments: Vec<[u8; 32]> = Vec::with_capacity(capacity);
+        let mut real_leaves: Vec<[u8; 32]> = Vec::with_capacity(leaves_hex.len());
         for h in &leaves_hex {
             match hex_decode32(h) {
-                Some(b) => pool_commitments.push(b),
+                Some(b) => real_leaves.push(b),
                 None => return bad_request("bad leaf hex from node".into()),
             }
         }
-        for i in pool_commitments.len() as u64..capacity as u64 {
-            pool_commitments.push(padding_leaf_wire(i));
+
+        /// What either generation's builder hands the submit step below.
+        struct Built {
+            anchor: [u8; 32],
+            nullifier: [u8; 32],
+            cm_outs: [[u8; 32]; 2],
+            proof: Vec<u8>,
+            ct0: String,
+            change_ct: serde_json::Value,
+            change_index: Option<u64>,
+            change_value: u64,
         }
 
-        // A single-note local store, exactly `wasm_api.rs::build_private_send`'s own
-        // approach: everything `build_spend` needs to know about the note being spent,
-        // addressed by store position 0.
-        let blinding = account.blinding(note_index);
-        let mut store = NoteStore::new();
-        store.notes.push(OwnedNote {
-            index: Some(note_index),
-            value: note_value,
-            blinding,
-            position: Some(position as u64),
-            spent: false,
-            memo: None,
-        });
+        let built: Built = if v7_epoch.is_some() {
+            // ── v7 (2026-10-13): ONE 256-bit note by its re-derived blinding against the v7
+            // epoch's unpadded leaves; the builder derives the change blinding from (anchor,
+            // position) — consumed exactly once, so it cannot repeat — and the change is sealed
+            // to our own delivery key so every client of this seed finds it by trial decryption.
+            let blinding7 = account7.blinding(note_index);
+            let mut store7 = NoteStoreV7::new();
+            store7.notes.push(OwnedNoteV7 {
+                index: Some(note_index),
+                value: note_value,
+                blinding: blinding7,
+                position: Some(position as u64),
+                spent: false,
+                memo: None,
+            });
+            let Some(rpk7) = recipient_pk7 else {
+                return bad_request("internal: v7 recipient key missing".into());
+            };
+            let outs7 = [(amount, rpk7), (change, account7.owner_pk())];
+            let b = match build_spend_v7(&account7, &mut store7, &real_leaves, capacity, 0, fee, &outs7) {
+                Ok(b) => b,
+                Err(e) => return bad_request(format!("could not build the v7 private spend: {e}")),
+            };
+            let (o0v, o0b) = b.out_preimages[0];
+            let ct0 = match seal_output_v7(o0v, o0b, &req.recipient_pk_encrypt, &req.memo) {
+                Ok(c) => c.0,
+                Err(e) => return bad_request(format!("could not seal the note to the recipient: {e}")),
+            };
+            let (cv, cb) = b.out_preimages[1];
+            let change_ct = seal_output_v7(cv, cb, &account7.pk_enc_hex(), "")
+                .map(|c| serde_json::Value::String(c.0))
+                .unwrap_or(serde_json::Value::Null);
+            Built {
+                anchor: b.anchor,
+                nullifier: b.nullifier,
+                cm_outs: [b.cm_outs[0], b.cm_outs[1]],
+                proof: b.proof,
+                ct0,
+                change_ct,
+                change_index: b.out_indices.first().copied(),
+                change_value: cv,
+            }
+        } else {
+            let mut pool_commitments: Vec<[u8; 32]> = real_leaves.clone();
+            for i in pool_commitments.len() as u64..capacity as u64 {
+                pool_commitments.push(padding_leaf_wire(i));
+            }
 
-        let outs_spec = [(amount, recipient_pk), (change, my_pk)];
-        let bundle = match build_spend(
-            &account,
-            &mut store,
-            &pool_commitments,
-            0,
-            fee,
-            &outs_spec,
-        ) {
-            Ok(b) => b,
-            Err(e) => return bad_request(format!("could not build the private spend: {e}")),
-        };
+            // A single-note local store, exactly `wasm_api.rs::build_private_send`'s own
+            // approach: everything `build_spend` needs to know about the note being spent,
+            // addressed by store position 0.
+            let blinding = account.blinding(note_index);
+            let mut store = NoteStore::new();
+            store.notes.push(OwnedNote {
+                index: Some(note_index),
+                value: note_value,
+                blinding,
+                position: Some(position as u64),
+                spent: false,
+                memo: None,
+            });
 
-        let recipient_addr = ShieldedAddress::new(recipient_pk, &req.recipient_pk_encrypt);
-        let (out0_value, out0_blinding) = bundle.out_preimages[0];
-        let pt = match NotePlaintext::new(out0_value, out0_blinding).with_memo(&req.memo) {
-            Ok(p) => p,
-            Err(e) => return bad_request(format!("memo rejected: {e}")),
+            let outs_spec = [(amount, recipient_pk), (change, my_pk)];
+            let bundle = match build_spend(
+                &account,
+                &mut store,
+                &pool_commitments,
+                0,
+                fee,
+                &outs_spec,
+            ) {
+                Ok(b) => b,
+                Err(e) => return bad_request(format!("could not build the private spend: {e}")),
+            };
+
+            let recipient_addr = ShieldedAddress::new(recipient_pk, &req.recipient_pk_encrypt);
+            let (out0_value, out0_blinding) = bundle.out_preimages[0];
+            let pt = match NotePlaintext::new(out0_value, out0_blinding).with_memo(&req.memo) {
+                Ok(p) => p,
+                Err(e) => return bad_request(format!("memo rejected: {e}")),
+            };
+            let ct = match seal_note(&pt, &recipient_addr) {
+                Ok(c) => c,
+                Err(e) => return bad_request(format!("could not seal the note to the recipient: {e}")),
+            };
+            let change_index = bundle.out_indices.first().copied();
+            let (change_value, change_blinding) = bundle.out_preimages[1];
+            // 2026-09-09: seal the change to OURSELVES. Output 1 shipped with no ciphertext, so
+            // only this rig's own bookkeeping ever knew the change existed — every other client
+            // of the seed (phone, browser, MCP) saw it vanish. The sealed plaintext IS the change
+            // preimage the proof committed to, so any scanner opens it like a received payment.
+            // Additive: a sealing failure leaves the change index-only, as before.
+            let change_ct = seal_note(&NotePlaintext::new(change_value, change_blinding), &account.address(&seed))
+                .map(|c| serde_json::Value::String(c.0))
+                .unwrap_or(serde_json::Value::Null);
+            Built {
+                anchor: bundle.anchor,
+                nullifier: bundle.nullifier,
+                cm_outs: [bundle.cm_outs[0], bundle.cm_outs[1]],
+                proof: bundle.proof,
+                ct0: ct.0,
+                change_ct,
+                change_index,
+                change_value,
+            }
         };
-        let ct = match seal_note(&pt, &recipient_addr) {
-            Ok(c) => c,
-            Err(e) => return bad_request(format!("could not seal the note to the recipient: {e}")),
-        };
-        let change_index = bundle.out_indices.first().copied();
-        let (change_value, change_blinding) = bundle.out_preimages[1];
-        // 2026-09-09: seal the change to OURSELVES. Output 1 shipped with no ciphertext, so
-        // only this rig's own bookkeeping ever knew the change existed — every other client
-        // of the seed (phone, browser, MCP) saw it vanish. The sealed plaintext IS the change
-        // preimage the proof committed to, so any scanner opens it like a received payment.
-        // Additive: a sealing failure leaves the change index-only, as before.
-        let change_ct = seal_note(&NotePlaintext::new(change_value, change_blinding), &account.address(&seed))
-            .map(|c| serde_json::Value::String(c.0))
-            .unwrap_or(serde_json::Value::Null);
+        let change_index = built.change_index;
+        let change_value = built.change_value;
 
         let payload = serde_json::json!({
-            "anchor": hex::encode(bundle.anchor),
-            "nullifier": hex::encode(bundle.nullifier),
-            "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
+            "anchor": hex::encode(built.anchor),
+            "nullifier": hex::encode(built.nullifier),
+            "extra_nullifiers": Vec::<String>::new(),
+            "cm_outs": [hex::encode(built.cm_outs[0]), hex::encode(built.cm_outs[1])],
             "fee": fee.to_string(),
-            "proof": hex::encode(bundle.proof),
-            "note_ciphertexts": [ct.0, change_ct],
+            "proof": hex::encode(built.proof),
+            "note_ciphertexts": [built.ct0, built.change_ct],
         });
         let send_url = format!("{}/v1/shielded_send", node.trim_end_matches('/'));
-        let sent_nf = hex::encode(bundle.nullifier);
+        // The key the chain's spent set will hold for this input (epoch-scoped) — what every
+        // settlement check below, and the caller's watch, must look for.
+        let sent_nf = scope(built.nullifier);
+        let sent_nf_raw = hex::encode(built.nullifier);
         let resp = match client.post(&send_url).json(&payload).send() {
             Ok(r) => r,
             Err(e) => return outcome_unknown(format!("network error submitting the private send: {e}"), &sent_nf),
@@ -910,7 +1141,7 @@ mod shield_ops {
         // is delivered — regardless of which txid carried it or what our own txid's status
         // says. Only a rejection for some OTHER reason (unknown anchor, bad proof) with our
         // nullifier still absent is a real failure.
-        let our_nf_hex = hex::encode(bundle.nullifier).to_ascii_lowercase();
+        let our_nf_hex = sent_nf.to_ascii_lowercase();
         let status_url = format!("{}/v1/transactions/{}", node.trim_end_matches('/'), txid);
         let nulls_url = format!("{}/v1/shielded/nullifiers", node.trim_end_matches('/'));
         // `None` = the chain could not be ASKED (unreachable / unreadable / no list). It used to fold into
@@ -1040,6 +1271,8 @@ mod shield_ops {
                 "spent_index": note_index,
                 "change_index": change_index,
                 "change_value": change_value.to_string(),
+                "generation": generation,
+                "nullifier_raw": sent_nf_raw,
             }))
         } else if let Some(reason) = hard_fail {
             ok_json(serde_json::json!({
@@ -1061,6 +1294,8 @@ mod shield_ops {
                 "spent_index": note_index,
                 "change_index": change_index,
                 "change_value": change_value.to_string(),
+                "generation": generation,
+                "nullifier_raw": sent_nf_raw,
                 "note": "submitted; awaiting the block that carries this nullifier. Watch \
                          /v1/shielded/nullifiers for it — do NOT resubmit.",
             }))
@@ -1222,6 +1457,9 @@ mod shield_ops {
                                             "epoch": 0u64,
                                         })
                                         .to_string()
+                                    } else if path.starts_with("/v1/shielded/anchor") {
+                                        // 2026-10-13: the handler reads the generation first; this stub is a v1-only pool.
+                                        serde_json::json!({ "ok": true, "epoch": 0u64, "notes": leaves.len(), "capacity": 32768u64 }).to_string()
                                     } else if path.contains("leaves") {
                                         serde_json::json!({
                                             "leaves": leaves, "capacity": 32768u64

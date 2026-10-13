@@ -2208,14 +2208,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var V7D=!!(_pgD&&_pgD.v7);
     var fastShieldBtn=document.getElementById('sendGo');
     try{
-      if(V7D) throw new Error('256-bit pool: the local endpoint predates it');
       if(fastShieldBtn)fastShieldBtn.disabled=true;
       sendStatus('Shielding locally…', '#6df3ff');
       var ffr=await fetch('/api/v1/mine-shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount:base.toString()})});
       if(ffr.ok){
         var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
         if(ffj && ffj.ok && Array.isArray(ffj.landed) && ffj.landed.length){
-          var fastLanded=ffj.landed.map(function(p){ noteRecord(from,p.index,p.value); return {txid:p.txid, value:p.value}; });
+          var fastLanded=ffj.landed.map(function(p){ noteRecord(from,p.index,p.value,(p.generation==='v7')?'v7':undefined); return {txid:p.txid, value:p.value}; });   // 2026-10-13: sigil-top says which generation it minted
           showReceipt(fastLanded, amtStr, from, ffj.warning);
           setTimeout(function(){ if(window.refresh)refresh(); }, 600);
           if(fastShieldBtn)fastShieldBtn.disabled=false;
@@ -3304,18 +3303,20 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     // send — ~1.3 s and a console error before the real path ran (sibling lane measured it today).
     var localFast = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) || location.port==='9800';
     try{
-      if(!localFast || V7) throw new Error('no local node endpoint on this origin');
+      if(!localFast) throw new Error('no local node endpoint on this origin');
       if(fastPrivBtn)fastPrivBtn.disabled=true;
       privMsg('Building the private spend locally…', '#6df3ff');
-      var candNotes=myNotes(from).filter(function(n){ return !n.spent; }).map(function(n){ return {index:n.index, value:String(n.value)}; });
+      // 2026-10-13: one generation per send; a note's `gen` rides along so sigil-top spends it in the right tree.
+      var candNotes=myNotes(from).filter(function(n){ return !n.spent && (V7 ? n.gen==='v7' : !n.gen); }).map(function(n){ var c={index:n.index, value:String(n.value)}; if(n.gen) c.gen=n.gen; return c; });
       var ffr=await fetch('/api/v1/mine-send-private',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({recipient_pk_shield:recipient.pk_shield, recipient_pk_encrypt:recipient.pk_encrypt, amount:amountRaw.toString(), notes:candNotes, memo:sigilPrivMemo()})});
       if(ffr.ok){
         var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
         if(ffj && ffj.ok && ffj.txid!==undefined){
-          var fastUpdated=myNotes(from);
-          for(var fk=0;fk<fastUpdated.length;fk++){ if(fastUpdated[fk].index===ffj.spent_index){ fastUpdated[fk].spent=true; } }
-          if(ffj.change_index!==null && ffj.change_index!==undefined){
+          var fastUpdated=myNotes(from), fastV7=(ffj.generation==='v7');
+          for(var fk=0;fk<fastUpdated.length;fk++){ if(fastUpdated[fk].index===ffj.spent_index && ((fastUpdated[fk].gen==='v7')===fastV7)){ fastUpdated[fk].spent=true; } }
+          // 2026-10-13: a v7 change note is sealed to ourselves by the builder (its index is a 64-bit tag) — the scanner finds it.
+          if(!fastV7 && ffj.change_index!==null && ffj.change_index!==undefined){
             fastUpdated.push({index:ffj.change_index, value:Number(ffj.change_value), ts:Date.now()});
           }
           saveMyNotes(from, fastUpdated);

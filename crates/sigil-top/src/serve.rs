@@ -124,18 +124,24 @@ fn request_header(req: &str, name: &str) -> Option<String> {
 /// a DNS-rebound hostname — its Origin would also fail, but the signer should not depend on
 /// a single check.
 fn refuse_local_signing(req: &str) -> Option<&'static str> {
-    if let Some(origin) = request_header(req, "origin") {
-        if !LOCAL_SIGNING_ORIGINS.contains(&origin.as_str()) {
-            return Some("origin not allowed to use the local signer");
-        }
-    }
     let host = request_header(req, "host").unwrap_or_default().to_ascii_lowercase();
     let hostname = if let Some(rest) = host.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")
     } else {
         host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host)
     };
-    if !matches!(hostname, "127.0.0.1" | "localhost" | "::1") {
+    let loopback_host = matches!(hostname, "127.0.0.1" | "localhost" | "::1");
+    if let Some(origin) = request_header(req, "origin") {
+        // 2026-10-13: the page THIS process serves is always allowed to use its own signer —
+        // `Origin` equal to the (loopback) `Host` it was fetched from is the same-origin case,
+        // whatever port `sigil-top serve --port` was given. The static list stays for the
+        // hosted wallets. Before this, a serve on any port but 9800 refused its own page.
+        let same_origin = loopback_host && origin.eq_ignore_ascii_case(&format!("http://{host}"));
+        if !same_origin && !LOCAL_SIGNING_ORIGINS.contains(&origin.as_str()) {
+            return Some("origin not allowed to use the local signer");
+        }
+    }
+    if !loopback_host {
         return Some("host is not the loopback");
     }
     None
@@ -895,6 +901,10 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
 fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
         .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+    proxy_api_to(&node, method, path_and_query, req_body)
+}
+
+fn proxy_api_to(node: &str, method: &str, path_and_query: &str, req_body: &str) -> (String, Vec<u8>, &'static str) {
     let hostport = node
         .trim_start_matches("http://")
         .trim_start_matches("https://");
@@ -952,10 +962,31 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec
             .unwrap_or_else(|| "502 Bad Gateway".to_string())
     };
     let declared = header_end.and_then(|i| declared_content_length(&raw[..i]));
+    let chunked = header_end.map_or(false, |i| is_chunked(&raw[..i]));
     // split off the HTTP headers; relay the body (sigil-rpcd sends Content-Length + close)
     let body = match header_end {
         Some(i) => raw[i + 4..].to_vec(),
         None => raw,
+    };
+    // 2026-10-09: sigil-api answers HTTP/1.1 with `transfer-encoding: chunked` since its
+    // CompressionLayer (2026-09-14). This proxy relayed the body WITH its chunk framing, so the
+    // browser got `1E1\r\n{"ok":true,…}\r\n0\r\n\r\n` — not JSON. Every data call of the [W]
+    // wallet failed: "0 H/s", no height, no data (Viktor, Windows, v10.4.19). The sigilgraph.org
+    // gate had the same fault and was fixed on 09-15; this copy of it never was. De-chunk here;
+    // a frame we cannot decode is an error, never a body.
+    let body = if chunked {
+        match dechunk_body(&body) {
+            Some(b) => b,
+            None => {
+                return (
+                    "502 Bad Gateway".to_string(),
+                    b"{\"error\":\"node reply had broken chunked framing\"}".to_vec(),
+                    "application/json",
+                )
+            }
+        }
+    } else {
+        body
     };
     // A read that died mid-body (the 6 s timeout, a reset) used to be relayed under the upstream's
     // "200 OK" with a body cut off at an arbitrary byte — the wallet then parsed half a JSON document.
@@ -970,6 +1001,35 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec
         }
     }
     (status, body, "application/json")
+}
+
+/// Does this raw HTTP head declare `transfer-encoding: chunked`?
+fn is_chunked(head: &[u8]) -> bool {
+    String::from_utf8_lossy(head).lines().any(|l| {
+        l.split_once(':').map_or(false, |(k, v)| {
+            k.trim().eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
+        })
+    })
+}
+
+/// Decode a chunked body. `None` if the framing is malformed or incomplete.
+fn dechunk_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0usize;
+    loop {
+        let line_end = body.get(i..)?.windows(2).position(|w| w == b"\r\n")? + i;
+        let size_str = std::str::from_utf8(&body[i..line_end]).ok()?;
+        let size = usize::from_str_radix(size_str.split(';').next()?.trim(), 16).ok()?;
+        i = line_end + 2;
+        if size == 0 {
+            return Some(out); // trailers, if any, are dropped
+        }
+        if i + size + 2 > body.len() || &body[i + size..i + size + 2] != b"\r\n" {
+            return None;
+        }
+        out.extend_from_slice(&body[i..i + size]);
+        i += size + 2;
+    }
 }
 
 /// `Content-Length` from a raw HTTP head, if present and numeric.
@@ -1172,6 +1232,10 @@ pub mod pay {
         pub index: u64,
         /// Raw base units (glyphs) as a decimal string — the wallet's own localStorage shape.
         pub value: String,
+        /// 2026-10-13: `"v7"` for a 256-bit note; absent = v1. Passed through to the local
+        /// send, which spends one generation per payment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub gen: Option<String>,
     }
 
     #[derive(serde::Deserialize)]
@@ -1782,6 +1846,7 @@ pub mod pay {
                 ctx.notes.push(CandidateNote {
                     index,
                     value: shield_value.clone(),
+                    gen: first.get("generation").and_then(|x| x.as_str()).filter(|g| *g == "v7").map(String::from),
                 });
             }
         }
@@ -1812,6 +1877,41 @@ pub mod pay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dechunk_decodes_and_refuses_broken_frames() {
+        assert_eq!(dechunk_body(b"1E1\r\n").is_none(), true);
+        assert_eq!(dechunk_body(b"b\r\n{\"ok\":true}\r\n0\r\n\r\n").unwrap(), b"{\"ok\":true}");
+        assert_eq!(dechunk_body(b"3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n").unwrap(), b"abcde");
+        assert!(dechunk_body(b"{\"ok\":true}").is_none());
+        assert!(dechunk_body(b"5\r\nab").is_none());
+        assert!(is_chunked(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked"));
+        assert!(!is_chunked(b"HTTP/1.1 200 OK\r\ncontent-length: 3"));
+    }
+
+    /// The [W] wallet's data path end to end: a node that answers chunked (sigil-api since
+    /// 2026-09-14) must reach the browser as plain JSON with the node's status.
+    #[test]
+    fn proxy_relays_a_chunked_node_reply_as_plain_json() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = c.read(&mut buf);
+            let json = br#"{"ok":true,"data":{"height":7,"net_hps":35079262.0}}"#;
+            let mut resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n", json.len()).into_bytes();
+            resp.extend_from_slice(json);
+            resp.extend_from_slice(b"\r\n0\r\n\r\n");
+            c.write_all(&resp).unwrap();
+        });
+        let (status, body, _) = proxy_api_to(&format!("http://127.0.0.1:{port}"), "GET", "/v1/mining/miners", "");
+        t.join().unwrap();
+        assert_eq!(status, "200 OK");
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("plain JSON, no chunk framing");
+        assert_eq!(v["data"]["height"], 7);
+    }
+
     #[test]
     fn declared_content_length_reads_the_header_case_insensitively() {
         assert_eq!(declared_content_length(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\ncontent-length: 42"), Some(42));
@@ -1896,6 +1996,23 @@ mod tests {
         assert!(!pay::is_local_path("/api/v1/payload"));
         assert!(!pay::is_local_path("/api/v1/pay?x=1"));
         assert!(!pay::is_local_path("/v1/send"));
+    }
+
+    #[test]
+    fn the_served_page_may_use_its_own_signer_on_any_loopback_port() {
+        // 2026-10-13: same-origin (Origin == http://Host, loopback) is allowed on any port …
+        let req = "POST /api/v1/mine-sign HTTP/1.1\r\nHost: 127.0.0.1:9811\r\nOrigin: http://127.0.0.1:9811\r\n\r\n";
+        assert_eq!(refuse_local_signing(req), None);
+        let req = "POST /api/v1/mine-sign HTTP/1.1\r\nHost: localhost:4242\r\nOrigin: http://localhost:4242\r\n\r\n";
+        assert_eq!(refuse_local_signing(req), None);
+        // … a foreign origin on that port is still refused, and so is a non-loopback host.
+        let req = "POST /api/v1/mine-sign HTTP/1.1\r\nHost: 127.0.0.1:9811\r\nOrigin: http://evil.example:9811\r\n\r\n";
+        assert_eq!(refuse_local_signing(req), Some("origin not allowed to use the local signer"));
+        let req = "POST /api/v1/mine-sign HTTP/1.1\r\nHost: 10.0.0.5:9811\r\nOrigin: http://10.0.0.5:9811\r\n\r\n";
+        assert!(refuse_local_signing(req).is_some());
+        // the hosted wallet stays allowed on the canonical port
+        let req = "POST /api/v1/mine-sign HTTP/1.1\r\nHost: 127.0.0.1:9800\r\nOrigin: https://sigilgraph.org\r\n\r\n";
+        assert_eq!(refuse_local_signing(req), None);
         // Must not collide with the three signing endpoints it rides alongside.
         for p in ["/api/v1/mine-sign", "/api/v1/mine-shield", "/api/v1/mine-send-private"] {
             assert!(crate::mine_local_api::is_local_path(p));

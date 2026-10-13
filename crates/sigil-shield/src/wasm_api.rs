@@ -683,9 +683,86 @@ pub fn build_private_send_v7(
     .to_string())
 }
 
+/// Build and PROVE a v7 MERGE of TWO notes (self-made or received: pass each one's 32-byte
+/// blinding) against the v7 epoch's leaves — `spend_full_v7_2`. Pays `amount` to a v7 owner
+/// key + delivery key, change back to us. Same JSON as `buildPrivateSend2` plus `generation`.
+#[wasm_bindgen(js_name = buildPrivateSend2V7)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_send_2_v7(
+    seed_hex: &str,
+    a_value_str: &str,
+    a_blinding_hex: &str,
+    a_position: u32,
+    b_value_str: &str,
+    b_blinding_hex: &str,
+    b_position: u32,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+    memo: &str,
+) -> Result<String, JsValue> {
+    use crate::note_v7::Digest4;
+    use crate::wallet_v7::{build_spend_2_v7, seal_output_v7, AccountV7, NoteStoreV7, OwnedNoteV7};
+    if a_position == b_position {
+        return Err(JsValue::from_str("both inputs name the same on-chain note"));
+    }
+    let account = AccountV7::from_seed(hex32(seed_hex)?);
+    let amount = parse_u64(amount_str, "amount")?;
+    let recipient_pk = Digest4::from_wire(&hex32(recipient_pk_shield_hex)?).map_err(|e| JsValue::from_str(&format!("bad recipient_pk_shield_hex: {e}")))?;
+    let leaves_hex: Vec<String> = serde_json::from_str(unpadded_leaves_json).map_err(|e| JsValue::from_str(&format!("bad unpadded_leaves_json: {e}")))?;
+    if leaves_hex.len() as u32 > capacity {
+        return Err(JsValue::from_str("more real leaves than the given capacity"));
+    }
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(leaves_hex.len());
+    for h in &leaves_hex {
+        leaves.push(hex32(h)?);
+    }
+    let mut store = NoteStoreV7::new();
+    let mut in_sum: u64 = 0;
+    for (v, bh, pos) in [(a_value_str, a_blinding_hex, a_position), (b_value_str, b_blinding_hex, b_position)] {
+        let value = parse_u64(v, "note_value")?;
+        in_sum = in_sum.checked_add(value).ok_or_else(|| JsValue::from_str("note values overflow"))?;
+        let blinding = Digest4::from_wire(&hex32(bh)?).map_err(|e| JsValue::from_str(&format!("bad note_blinding_hex: {e}")))?;
+        store.notes.push(OwnedNoteV7 { index: None, value, blinding: blinding.0, position: Some(pos as u64), spent: false, memo: None });
+    }
+    let change = in_sum
+        .checked_sub(SHIELDED_FEE)
+        .and_then(|v| v.checked_sub(amount))
+        .ok_or_else(|| JsValue::from_str(&format!("two notes worth {in_sum} cannot cover amount {amount} + fee {SHIELDED_FEE}")))?;
+    let outs_spec = [(amount, recipient_pk), (change, account.owner_pk())];
+    let bundle = build_spend_2_v7(&account, &mut store, &leaves, capacity as usize, [0, 1], SHIELDED_FEE, &outs_spec)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let (out0_value, out0_blinding) = bundle.out_preimages[0];
+    let ct = seal_output_v7(out0_value, out0_blinding, recipient_pk_enc_hex, memo)
+        .map_err(|e| JsValue::from_str(&format!("could not seal note to recipient: {e}")))?;
+    let (change_value, change_blinding) = bundle.out_preimages[1];
+    let change_ct = seal_output_v7(change_value, change_blinding, &account.pk_enc_hex(), "")
+        .map(|c| serde_json::Value::String(c.0))
+        .unwrap_or(serde_json::Value::Null);
+    let extra: Vec<String> = bundle.extra_nullifiers.iter().map(hex::encode).collect();
+    Ok(serde_json::json!({
+        "anchor": hex::encode(bundle.anchor),
+        "nullifier": hex::encode(bundle.nullifier),
+        "extra_nullifiers": extra,
+        "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
+        "fee": SHIELDED_FEE.to_string(),
+        "proof": hex::encode(bundle.proof),
+        "note_ciphertexts": [ct.0, change_ct],
+        "change_index": bundle.out_indices.first().copied(),
+        "change_value": change_value.to_string(),
+        "change_blinding_hex": hex::encode(Digest4(change_blinding).to_wire()),
+        "out0_value": out0_value.to_string(),
+        "out0_blinding_hex": hex::encode(Digest4(out0_blinding).to_wire()),
+        "generation": "v7",
+    })
+    .to_string())
+}
+
 /// Sanity/self-test entry point for the standalone WASM-loading smoke-test page: no
 /// secrets, no proving, just confirms the module loaded and its exports are callable.
 #[wasm_bindgen(js_name = wasmApiVersion)]
 pub fn wasm_api_version() -> String {
-    "sigil-shield-wasm-api/2-v7".to_string()
+    "sigil-shield-wasm-api/3-v7m".to_string()
 }

@@ -134,6 +134,64 @@ export function buildPrivateSend2(seed_hex, a_value_str, a_blinding_hex, a_posit
 }
 
 /**
+ * Build and PROVE a v7 MERGE of TWO notes (self-made or received: pass each one's 32-byte
+ * blinding) against the v7 epoch's leaves — `spend_full_v7_2`. Pays `amount` to a v7 owner
+ * key + delivery key, change back to us. Same JSON as `buildPrivateSend2` plus `generation`.
+ * @param {string} seed_hex
+ * @param {string} a_value_str
+ * @param {string} a_blinding_hex
+ * @param {number} a_position
+ * @param {string} b_value_str
+ * @param {string} b_blinding_hex
+ * @param {number} b_position
+ * @param {string} unpadded_leaves_json
+ * @param {number} capacity
+ * @param {string} recipient_pk_shield_hex
+ * @param {string} recipient_pk_enc_hex
+ * @param {string} amount_str
+ * @param {string} memo
+ * @returns {string}
+ */
+export function buildPrivateSend2V7(seed_hex, a_value_str, a_blinding_hex, a_position, b_value_str, b_blinding_hex, b_position, unpadded_leaves_json, capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo) {
+    let deferred12_0;
+    let deferred12_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(a_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(a_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(b_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(b_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(unpadded_leaves_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(recipient_pk_shield_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(recipient_pk_enc_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passStringToWasm0(amount_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len8 = WASM_VECTOR_LEN;
+        const ptr9 = passStringToWasm0(memo, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len9 = WASM_VECTOR_LEN;
+        const ret = wasm.buildPrivateSend2V7(ptr0, len0, ptr1, len1, ptr2, len2, a_position, ptr3, len3, ptr4, len4, b_position, ptr5, len5, capacity, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9);
+        var ptr11 = ret[0];
+        var len11 = ret[1];
+        if (ret[3]) {
+            ptr11 = 0; len11 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred12_0 = ptr11;
+        deferred12_1 = len11;
+        return getStringFromWasm0(ptr11, len11);
+    } finally {
+        wasm.__wbindgen_free(deferred12_0, deferred12_1, 1);
+    }
+}
+
+/**
  * [`buildPrivateSendReceivedWithMemo`] without a memo.
  * @param {string} seed_hex
  * @param {string} note_blinding_hex

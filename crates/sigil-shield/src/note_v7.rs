@@ -469,9 +469,9 @@ impl TryFrom<u8> for PoolGeneration {
 /// checked against this circuit's (a mismatch is a refusal, never a re-route, and would
 /// otherwise be a process abort inside `Air::new`), and only then does any cryptography run.
 ///
-/// v7 has one input form. A two-input (merge) spend is not a v7 circuit yet, so a
-/// two-nullifier declaration is `UnsupportedInputCount`; the duplicate-nullifier hazard of
-/// `spend_full_v6` therefore cannot arise here.
+/// v7 has two input forms: one nullifier is the single spend, two is the merge
+/// (`spend_full_v7_2`), whose circuit refuses one note fed in twice; a repeated nullifier is
+/// still refused here before any proof is parsed.
 pub fn verify_spend_wire_v7(
     anchor: &[u8; 32],
     nullifiers: &[[u8; 32]],
@@ -480,18 +480,29 @@ pub fn verify_spend_wire_v7(
     proof: &[u8],
 ) -> Result<(), WireVerifyError> {
     use crate::spend_full_v7::{verify_spend_full_v7, SpendFullV7PublicInputs, N_OUTS, TRACE_LEN, WIDTH};
+    use crate::spend_full_v7_2::{verify_spend_full_v7x2, SpendFullV7x2PublicInputs, N_INS, WIDTH as WIDTH_2};
 
     if cm_outs.len() != N_OUTS {
         return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
     }
-    if nullifiers.len() != 1 {
+    // 2026-10-13: ONE input is `spend_full_v7`, TWO is `spend_full_v7_2` (the merge). The
+    // ARITY decides which circuit's shape the proof must have — nothing is read off the proof.
+    if nullifiers.is_empty() || nullifiers.len() > N_INS {
         return Err(WireVerifyError::UnsupportedInputCount { got: nullifiers.len() });
+    }
+    // Distinct inputs. The v7 merge circuit cannot be satisfied with one note twice (the
+    // position-gap inverse), and consensus checks the set again — this is defence in depth.
+    if nullifiers.len() == 2 && nullifiers[0] == nullifiers[1] {
+        return Err(WireVerifyError::DuplicateNullifier);
     }
     if public_value >= (1u128 << RANGE_BITS) {
         return Err(WireVerifyError::PublicValueOutOfRange(public_value));
     }
     let root = Digest4::from_wire(anchor)?;
-    let nf = Digest4::from_wire(&nullifiers[0])?;
+    let mut nfs = Vec::with_capacity(nullifiers.len());
+    for n in nullifiers {
+        nfs.push(Digest4::from_wire(n)?);
+    }
     let mut outs = [[BaseElement::ZERO; 4]; N_OUTS];
     for (slot, cm) in outs.iter_mut().zip(cm_outs.iter()) {
         *slot = Digest4::from_wire(cm)?.0;
@@ -500,24 +511,36 @@ pub fn verify_spend_wire_v7(
     let p = winterfell::Proof::from_bytes(proof).map_err(|_| WireVerifyError::MalformedProof)?;
 
     // SHAPE GUARDS — both attacker-chosen numbers a `Proof` carries, checked before any
-    // AIR is constructed (see `note_v1::verify_spend_wire_multi` for the history). v7 has
-    // exactly one shape, so the length check is an equality, not a range.
+    // AIR is constructed (see `note_v1::verify_spend_wire_multi` for the history). Each
+    // arity has exactly one shape, so the checks are equalities, not ranges.
+    let want_width = if nfs.len() == 1 { WIDTH } else { WIDTH_2 };
     let got_width = p.trace_info().main_trace_width();
-    if got_width != WIDTH {
-        return Err(WireVerifyError::WrongTraceWidth { expected: WIDTH, got: got_width });
+    if got_width != want_width {
+        return Err(WireVerifyError::WrongTraceWidth { expected: want_width, got: got_width });
     }
     let got_len = p.trace_info().length();
     if got_len != TRACE_LEN {
         return Err(WireVerifyError::WrongTraceLength { got: got_len, min: TRACE_LEN, max: TRACE_LEN });
     }
 
-    let pi = SpendFullV7PublicInputs {
-        root: root.0,
-        nf: nf.0,
-        public_value: BaseElement::new(public_value as u64),
-        cm_outs: outs,
-    };
-    verify_spend_full_v7(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+    if nfs.len() == 1 {
+        let pi = SpendFullV7PublicInputs {
+            root: root.0,
+            nf: nfs[0].0,
+            public_value: BaseElement::new(public_value as u64),
+            cm_outs: outs,
+        };
+        verify_spend_full_v7(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+    } else {
+        let pi = SpendFullV7x2PublicInputs {
+            root: root.0,
+            nf: nfs[0].0,
+            nf2: nfs[1].0,
+            public_value: BaseElement::new(public_value as u64),
+            cm_outs: outs,
+        };
+        verify_spend_full_v7x2(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+    }
 }
 
 /// The dual-accept chokepoint for the migration window: the node names the generation the

@@ -45,6 +45,13 @@ export function buildPrivateSend(seed_hex: string, note_index: number, note_valu
 export function buildPrivateSend2(seed_hex: string, a_value_str: string, a_blinding_hex: string, a_position: number, b_value_str: string, b_blinding_hex: string, b_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
 
 /**
+ * Build and PROVE a v7 MERGE of TWO notes (self-made or received: pass each one's 32-byte
+ * blinding) against the v7 epoch's leaves — `spend_full_v7_2`. Pays `amount` to a v7 owner
+ * key + delivery key, change back to us. Same JSON as `buildPrivateSend2` plus `generation`.
+ */
+export function buildPrivateSend2V7(seed_hex: string, a_value_str: string, a_blinding_hex: string, a_position: number, b_value_str: string, b_blinding_hex: string, b_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
  * [`buildPrivateSendReceivedWithMemo`] without a memo.
  */
 export function buildPrivateSendReceived(seed_hex: string, note_blinding_hex: string, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string): string;
@@ -211,6 +218,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly buildPrivateSend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly buildPrivateSend2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number) => [number, number, number, number];
+    readonly buildPrivateSend2V7: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number) => [number, number, number, number];
     readonly buildPrivateSendReceived: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number) => [number, number, number, number];
     readonly buildPrivateSendReceivedWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => [number, number, number, number];
     readonly buildPrivateSendV7: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => [number, number, number, number];

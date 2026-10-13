@@ -2763,7 +2763,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js?v=911');
+      var mod = await import('./wasm/sigil_shield.js?v=912');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
@@ -3482,13 +3482,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // Prefer the SMALLEST covering note — leaves bigger notes free for bigger sends
       // later. Two notes can fund one payment; more than two are combined first (below).
       candidates.sort(function(a,b){ return Number(a.value-b.value); });
-      if(!V7 && !candidates.length && small.length>=2 && wasm.buildPrivateSend2){   // 2026-10-13: the v7 circuit is 1-in/2-out so far
+      if(!candidates.length && small.length>=2 && (V7 ? wasm.buildPrivateSend2V7 : wasm.buildPrivateSend2)){   // 2026-10-13: v7 merges with spend_full_v7_2
         small.sort(function(a,b){ return Number(b.value-a.value); });
         var x=small[0], y=small[1];
         if(x.value+y.value >= amountRaw+FEE){
           var xb=null, yb=null;
-          try{ xb = x.kind==='recv' ? x.recv.blinding : String(wasm.noteBlinding(seedHex, x.note.index)); }catch(_){ xb=null; }
-          try{ yb = y.kind==='recv' ? y.recv.blinding : String(wasm.noteBlinding(seedHex, y.note.index)); }catch(_){ yb=null; }
+          try{ xb = x.kind==='recv' ? x.recv.blinding : String((V7?wasm.noteBlindingV7:wasm.noteBlinding)(seedHex, x.note.index)); }catch(_){ xb=null; }
+          try{ yb = y.kind==='recv' ? y.recv.blinding : String((V7?wasm.noteBlindingV7:wasm.noteBlinding)(seedHex, y.note.index)); }catch(_){ yb=null; }
           if(xb && yb) candidates.push({kind:'multi', notes:[x,y], blindings:[xb,yb], position:x.position, value:x.value+y.value});
         }
       }
@@ -3508,20 +3508,20 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var reachable = landedTotal - FEE*mergesToOne;
         var transparent=0n; try{ transparent=BigInt(window.SIGIL_RAW||'0'); }catch(_){}
         var need=amountRaw+FEE;
-        if(!V7 && small.length>=2 && reachable>=need && wasm.buildPrivateSend2){
+        if(small.length>=2 && reachable>=need && (V7 ? wasm.buildPrivateSend2V7 : wasm.buildPrivateSend2)){
           small.sort(function(a,b){ return Number(b.value-a.value); });
           var mx=small[0], my=small[1];
           var mxb=null, myb=null;
-          try{ mxb = mx.kind==='recv' ? mx.recv.blinding : String(wasm.noteBlinding(seedHex, mx.note.index)); }catch(_){}
-          try{ myb = my.kind==='recv' ? my.recv.blinding : String(wasm.noteBlinding(seedHex, my.note.index)); }catch(_){}
+          try{ mxb = mx.kind==='recv' ? mx.recv.blinding : String((V7?wasm.noteBlindingV7:wasm.noteBlinding)(seedHex, mx.note.index)); }catch(_){}
+          try{ myb = my.kind==='recv' ? my.recv.blinding : String((V7?wasm.noteBlindingV7:wasm.noteBlinding)(seedHex, my.note.index)); }catch(_){}
           if(!mxb||!myb){ privMsg('✗ could not read two of your notes to combine them — reload the page and try again.', '#ff8a8a'); return; }
           var merged = mx.value+my.value-FEE;
           privMsg('Preparing your coins — combining notes ('+small.length+' → '+(small.length-1)+')… this takes a few seconds per step.', '#6df3ff');
-          var mePkS, mePkE; try{ mePkS=String(wasm.shieldPublicKey(seedHex)).toLowerCase(); mePkE=String(wasm.shieldEncryptPublicKey(seedHex)).toLowerCase(); }
+          var mePkS, mePkE; try{ mePkS=String((V7?wasm.shieldPublicKeyV7:wasm.shieldPublicKey)(seedHex)).toLowerCase(); mePkE=String(wasm.shieldEncryptPublicKey(seedHex)).toLowerCase(); }
           catch(e){ privMsg('✗ could not derive this wallet\'s own keys: '+(e&&e.message||e), '#ff8a8a'); return; }
           var mreq;
           try{
-            mreq=JSON.parse(wasm.buildPrivateSend2(
+            mreq=JSON.parse((V7?wasm.buildPrivateSend2V7:wasm.buildPrivateSend2)(
                   seedHex, mx.value.toString(), mxb, mx.position,
                   my.value.toString(), myb, my.position,
                   JSON.stringify(leaves), capacity, mePkS, mePkE, merged.toString(), ''));
@@ -3549,14 +3549,6 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           var shielded=false; try{ shielded=await window.sigilAutoShield(); }catch(_){}
           return 'retry';
         }
-        if(V7 && small.length>=1 && landedTotal>=need){
-          // 2026-10-13: the money is there but split across notes, and the 256-bit circuit cannot
-          // combine two notes yet. Say exactly that, with the largest single payment possible.
-          small.sort(function(a,b){ return Number(b.value-a.value); });
-          var _max7 = small[0].value>FEE ? (small[0].value-FEE) : 0n;
-          privMsg('✗ no single 256-bit note covers '+glyphStr(need.toString())+' SIGIL (fee included) — the new pool cannot combine two notes yet. The largest payment possible right now is '+glyphStr(_max7.toString())+' SIGIL; or deposit the full amount first so one note holds it.', '#fbbf24');
-          return;
-        }
         var avail = landedTotal+transparent;
         privMsg('✗ this wallet holds '+glyphStr(avail.toString())+' SIGIL spendable'+(unlanded>0?' (+ '+unlanded+' note'+(unlanded===1?'':'s')+' still settling)':'')+' and this payment needs '+glyphStr(need.toString())+' including the fee. Send a smaller amount, or wait for more to arrive.', '#fbbf24');
         return;
@@ -3573,7 +3565,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var memo=sigilPrivMemo();
         if(new TextEncoder().encode(memo).length>512){ privMsg('✗ memo is over 512 bytes — shorten it.', '#ff8a8a'); return; }
         if(memo && !wasm.buildPrivateSendWithMemo){ privMsg('✗ this wallet build cannot seal memos yet — reload the page.', '#ff8a8a'); return; }
-        if(V7){
+        if(V7 && pick.kind!=='multi'){
           // 2026-10-13: ONE note (self-made: blinding re-derived from its index; received: the
           // blinding from its envelope) against the v7 epoch's leaves. The builder seals the change
           // to this wallet's delivery key itself, so the scanner finds it like any received note.
@@ -3583,7 +3575,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
                 recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString(), memo||'');
         } else if(pick.kind==='multi'){
           var xn=pick.notes[0], yn=pick.notes[1];
-          reqJson = wasm.buildPrivateSend2(
+          reqJson = (V7?wasm.buildPrivateSend2V7:wasm.buildPrivateSend2)(
                 seedHex, xn.value.toString(), pick.blindings[0], xn.position,
                 yn.value.toString(), pick.blindings[1], yn.position,
                 JSON.stringify(leaves), capacity,

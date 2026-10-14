@@ -2474,8 +2474,29 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     el.style.borderColor = ok===null ? 'rgba(33,212,253,.26)' : (ok ? 'rgba(0,224,198,.55)' : 'rgba(255,138,138,.55)');
     el.style.boxShadow   = ok===null ? 'none' : (ok ? '0 0 0 3px rgba(0,224,198,.10)' : '0 0 0 3px rgba(255,138,138,.10)');
   }
-  window.uniMax=function(){
-    try{ document.getElementById('uniAmt').value=glyphStr(window.SIGIL_RAW||'0'); }catch(e){}
+  // 2026-10-14: is the deposit door paused? Same 5-min cache as sigilAutoShield.
+  window.__sigilDoorPaused=async function(){
+    try{
+      var dr=window.__sigilDoorCache;
+      if(!dr||Date.now()-dr.ts>300000){
+        var rr=await fetch('/v1/shielded/door',{cache:'no-store'}); var jj=null;
+        if(rr.ok){ try{ jj=await rr.json(); }catch(_){} }
+        dr=window.__sigilDoorCache={ts:Date.now(), paused:!!(jj&&jj.door&&jj.door.deposits_paused)};
+      }
+      return !!dr.paused;
+    }catch(_){ return false; }
+  };
+  // 2026-10-14 (Viktor: "send virker ikke fra web ui"): MAX is what can actually be sent —
+  // private notes plus, only while deposits are open, the transparent balance — minus the fee.
+  // It used to be the transparent figure alone; with deposits paused, sending it always failed.
+  window.uniMax=async function(){
+    try{
+      var rawT=0n, rawP=0n; try{ rawT=BigInt(window.SIGIL_RAW||'0'); }catch(_){} try{ rawP=BigInt(window.__sigilShieldRaw||0); }catch(_){}
+      var paused=await window.__sigilDoorPaused();
+      var m=rawP + (paused?0n:rawT) - 100000n; if(m<0n) m=0n;
+      document.getElementById('uniAmt').value=glyphStr(m.toString());
+      if(paused && rawT>0n) uniMsg('Deposits into the private pool are paused right now, so your '+glyphStr(rawT.toString())+' mined (transparent) SIGIL cannot be sent yet. MAX is your private balance.', '#ffd27a');
+    }catch(e){}
   };
   window.uniToggleAdvanced=function(){
     var a=document.getElementById('sendAdvanced'), u=document.getElementById('sendUnified'), l=document.getElementById('uniAdvLink');
@@ -2581,6 +2602,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var FEE_RAW=100000n; // sigil_state::shielded::SHIELDED_FEE
       if(have < amountRaw + FEE_RAW){
         var shortfall = amountRaw + FEE_RAW - have;
+        // 2026-10-14: with deposits paused, step 1 can only fail — say so before trying.
+        if(await window.__sigilDoorPaused()){
+          var canSend = have > FEE_RAW ? have - FEE_RAW : 0n;
+          uniStep(1,'fail');
+          uniMsg('Deposits into the private pool are paused right now, so mined (transparent) SIGIL cannot be made private yet. You can send up to '+glyphStr(canSend.toString())+' SIGIL privately — tap MAX.', '#ffd27a');
+          finish(false); return;
+        }
         uniStep(1,'busy');
         uniMsg('Step 1 of 2 — moving '+glyphStr(shortfall)+' SIGIL into your private balance…', '#6df3ff');
         var sa=document.getElementById('sendAmt'); if(sa) sa.value=glyphStr(shortfall);

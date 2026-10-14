@@ -237,6 +237,33 @@ pub(crate) fn adopt_windows_home() {
 
 // ── the `sigil-top wallet` command and the first-run choice ────────────────────────────
 
+/// What to tell the user about a phrase BEFORE installing it (empty = nothing to say).
+///
+/// 2026-10-14 (Viktor: every new wallet is 12 words, keep it secure). A phrase with words outside
+/// the list is not refused any more: the sigilgraph.org front page made 6-word phrases from its own
+/// 50-word list, and those wallets are real. The owner sees the address and decides. A phrase of
+/// fewer than 12 words is a weak wallet whoever made it, so that is said plainly.
+pub(crate) fn phrase_warnings(phrase: &str) -> Vec<String> {
+    let t = phrase.trim();
+    let mut out = Vec::new();
+    if let Some(bad) = unknown_words(t) {
+        if !bad.is_empty() {
+            out.push(format!(
+                "Not in the SIGIL word list: {}. Phrases from the old sigilgraph.org front page look like this; a typo would open a different, empty wallet. Check that the address below is the one you know.",
+                bad.join(", ")
+            ));
+        }
+    }
+    let (v2, material) = scheme_for(t);
+    let words = material.split_whitespace().count();
+    if !is_hex64(t) && !v2 && !t.to_ascii_lowercase().starts_with("mm2:") && words < 12 {
+        out.push(format!(
+            "Short phrase ({words} words): anyone can guess it. Move your coins to a new 12-word wallet (`sigil-top wallet new --replace`, then send from the old one)."
+        ));
+    }
+    out
+}
+
 fn ask(prompt: &str) -> String {
     use std::io::Write;
     print!("{prompt}");
@@ -266,13 +293,15 @@ fn import_interactive(home: &str) -> Result<Installed, String> {
     if phrase.is_empty() {
         return Err("no phrase entered — nothing changed".into());
     }
-    if let Some(bad) = unknown_words(&phrase) {
-        if !bad.is_empty() {
-            return Err(format!("not in the SIGIL word list: {} — check the spelling (nothing changed)", bad.join(", ")));
-        }
+    let warnings = phrase_warnings(&phrase);
+    for w in &warnings {
+        println!("  ⚠ {w}");
     }
     let address = address_of(&derive_secret(&phrase)?);
     println!("  This phrase opens wallet {address}");
+    if !warnings.is_empty() && ask("  Type yes to use this wallet anyway: ") != "yes" {
+        return Err("not installed — nothing changed".into());
+    }
     if let Ok(old) = std::fs::read_to_string(seed_path_in(home)) {
         let mut s = [0u8; 32];
         if hex::decode_to_slice(old.trim(), &mut s).is_ok() && address_of(&s) != address {
@@ -411,6 +440,35 @@ mod tests {
         // a forced scheme prefix: v2: on the 12 words is the same wallet
         assert_eq!(address_of(&derive_secret("v2:abandon ability able about above absent absorb abstract absurd abuse access accident").unwrap()),
                    "f31437fff073dd8c2355d45050b038723e0babf273be0b5691bc6512f1139be9");
+    }
+
+    /// The old front page's 6-word phrases are real wallets: warned about, never refused, and
+    /// they open the same address the site's own crypto gives (vector measured 2026-10-14).
+    #[test]
+    fn front_page_six_word_phrase_warns_and_opens_its_address() {
+        let p = "ash birch cedar delta ember fern";
+        let w = phrase_warnings(p);
+        assert!(w.iter().any(|m| m.starts_with("Short phrase (6 words)")), "{w:?}");
+        assert_eq!(
+            address_of(&derive_secret(p).unwrap()),
+            "dfc5ba9349367a88c6d243f033ef42f05cc6d6ebd8bf7d1fc416c73ec69d865f"
+        );
+    }
+
+    #[test]
+    fn twelve_listed_words_and_hex_keys_get_no_warning() {
+        assert!(phrase_warnings(&generate_phrase()).is_empty());
+        assert!(phrase_warnings(&"ab".repeat(32)).is_empty());
+    }
+
+    #[test]
+    fn unknown_word_is_a_warning_not_a_refusal() {
+        let mut words: Vec<String> = generate_phrase().split(' ').map(str::to_string).collect();
+        words[3] = "zzzqqq".into();
+        let w = phrase_warnings(&words.join(" "));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("zzzqqq"));
+        assert!(derive_secret(&words.join(" ")).is_ok());
     }
 
     #[test]

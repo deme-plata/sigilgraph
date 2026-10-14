@@ -237,21 +237,8 @@ body.view-desktop .desktop{display:flex}
   </div>
   <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
-  <div class="sect" style="margin:18px 16px 8px"><span>🌉 Polygon Bridge</span></div>
-  <div style="margin:0 16px 16px;background:rgba(4,8,12,.55);border:1px solid rgba(33,212,253,.16);border-radius:14px;padding:12px">
-    <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 0 8px;line-height:1.5">Wrapped SIGIL on Polygon mainnet — real bridge, real contract.</div>
-    <div id="polyMktPhone" style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 0 10px;line-height:1.6">reading Polygon…</div>
-    <div style="display:flex;gap:8px;margin-bottom:8px">
-      <input id="polyAddrPhone" placeholder="0x… your Polygon address" style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:8px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:9px 10px;outline:none">
-      <button onclick="window.polyBridgeUseMetaMask('polyAddrPhone')" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:8px;padding:0 12px;cursor:pointer;font-size:15px">🦊</button>
-    </div>
-    <button onclick="window.polyBridgeCheck('polyAddrPhone')" style="width:100%;border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px;border-radius:8px;cursor:pointer;margin-bottom:10px">CHECK BALANCE</button>
-    <div style="display:flex;align-items:baseline;gap:8px"><span id="polyAddrPhone_out" style="font-family:'Orbitron';font-weight:900;font-size:20px;color:#00e0c6">—</span><span style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim)">SIGIL (wrapped)</span></div>
-    <div id="polyAddrPhone_status" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;margin-top:6px;line-height:1.5"></div>
-    <button onclick="window.openBridgeFrom('polyAddrPhone')" style="width:100%;margin-top:10px;border:1px solid rgba(0,224,198,.4);background:rgba(0,224,198,.08);color:#00e0c6;font-family:'Orbitron';font-weight:700;font-size:10.5px;letter-spacing:1px;padding:9px;border-radius:8px;cursor:pointer">🌉 BRIDGE MINED SIGIL HERE</button>
   </div>
-  </div>
-  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.showExplorer&&showExplorer()" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
+  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.openActivity?openActivity():(window.showExplorer&&showExplorer())" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
 </div>
 
 <div class="desktop">
@@ -360,19 +347,6 @@ body.view-desktop .desktop{display:flex}
           <div class="card">
             <div class="sect" style="margin-bottom:8px"><span>Activity</span><a id="cardExplorer" onclick="showExplorer();return false" style="cursor:pointer;color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">🔍 open explorer</a></div>
             <div style="font-family:'JetBrains Mono';font-size:11px;color:var(--dim);padding:14px 2px">no activity on this wallet yet — mine or receive SIGIL, or open the explorer for chain history</div>
-          </div>
-          <div class="card" id="polyBridgeCard">
-            <div class="sect" style="margin-bottom:8px"><span>🌉 Polygon Bridge</span><a href="https://polygonscan.com/token/0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7" target="_blank" rel="noreferrer" style="cursor:pointer;color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">↗ contract</a></div>
-            <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 2px 8px;line-height:1.5">Wrapped SIGIL (ERC-20), 1:1 bridged from sigil-g0. Real bridge, real contract, live on Polygon mainnet.</div>
-            <div id="polyMktDesk" style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 2px 10px;line-height:1.6">reading Polygon…</div>
-            <div style="display:flex;gap:8px;margin-bottom:8px">
-              <input id="polyAddrDesk" placeholder="0x… your Polygon address" style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:8px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:9px 10px;outline:none">
-              <button onclick="window.polyBridgeUseMetaMask('polyAddrDesk')" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:8px;padding:0 12px;cursor:pointer;font-size:15px">🦊</button>
-            </div>
-            <button onclick="window.polyBridgeCheck('polyAddrDesk')" style="width:100%;border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px;border-radius:8px;cursor:pointer;margin-bottom:10px">CHECK BALANCE</button>
-            <div style="display:flex;align-items:baseline;gap:8px"><span id="polyAddrDesk_out" style="font-family:'Orbitron';font-weight:900;font-size:20px;color:#00e0c6">—</span><span style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim)">SIGIL (wrapped, Polygon)</span></div>
-            <div id="polyAddrDesk_status" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;margin-top:6px;line-height:1.5"></div>
-            <button onclick="window.openBridgeFrom('polyAddrDesk')" style="width:100%;margin-top:10px;border:1px solid rgba(0,224,198,.4);background:rgba(0,224,198,.08);color:#00e0c6;font-family:'Orbitron';font-weight:700;font-size:10.5px;letter-spacing:1px;padding:9px;border-radius:8px;cursor:pointer">🌉 BRIDGE MINED SIGIL HERE</button>
           </div>
         </div>
       </div>
@@ -8124,6 +8098,70 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
      fluxapp.xyz's q-flux vhost still proxies /api + /v1 to the dead :8099 and
      502s, while sigilgraph.org proxies to the live sigil-api :18181.
      ═══════════════════════════════════════════════════════════════════════ -->
+<style id="ac-hist">
+/* History v2 (2026-10-14) — controls, summary, expandable rows, dashboard mini-feed. ah-v2 */
+#acCtl{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 18px 0}
+#acCtl .ah-sp{flex:1}
+#activity-modal .ah-seg{display:inline-flex;border:1px solid rgba(33,212,253,.22);border-radius:9px;overflow:hidden}
+#activity-modal .ah-seg button{background:rgba(4,8,12,.6);border:0;border-right:1px solid rgba(33,212,253,.16);color:#7fa8b8;font-family:'JetBrains Mono';font-size:12px;padding:7px 10px;cursor:pointer}
+#activity-modal .ah-seg button:last-child{border-right:0}
+#activity-modal .ah-seg button.on{background:rgba(33,212,253,.16);color:#6df3ff}
+#activity-modal .ah-chk{font-family:'JetBrains Mono';font-size:12px;color:#7fa8b8;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+#activity-modal .ah-btn{background:rgba(33,212,253,.06);border:1px solid rgba(33,212,253,.25);color:#6df3ff;border-radius:8px;font-family:'JetBrains Mono';font-size:12px;padding:7px 10px;cursor:pointer}
+#acSum{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px 18px 12px;border-bottom:1px solid rgba(33,212,253,.12)}
+#acSum>div{background:rgba(8,16,24,.55);border:1px solid rgba(33,212,253,.12);border-radius:10px;padding:8px 10px;min-width:0}
+#acSum small{display:block;font-family:'JetBrains Mono';font-size:10.5px;color:#63758a;letter-spacing:.04em;text-transform:uppercase}
+#acSum b{display:block;font-family:Inter,system-ui,sans-serif;font-feature-settings:"tnum" 1;font-size:15px;font-weight:700;color:#eaf0f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#acSum b.pos,.ah-card-sum b.pos{color:#37d99a}
+#acList .ah-item{border-bottom:1px solid rgba(33,212,253,.09)}
+#acList .ac-grp .ah-item:last-child{border-bottom:none}
+#acList .ah-item .ac-row{border-bottom:none;cursor:pointer}
+#acList .ah-item.open .ac-row{background:rgba(33,212,253,.06)}
+#acList .ah-chev{flex:none;color:#4d6a7a;font-size:13px;width:12px;text-align:center}
+#acList .ah-det{padding:2px 18px 16px 79px;display:grid;gap:7px;background:rgba(33,212,253,.03)}
+#acList .ah-kv{display:grid;grid-template-columns:118px 1fr;gap:10px;font-size:14px;color:#c9d6e2;line-height:1.45}
+#acList .ah-kv>span:first-child{color:#63758a}
+#acList .ah-kv code{font-family:'JetBrains Mono';font-size:12.5px;word-break:break-all;color:#9fd8ea}
+#acList .ah-copy{margin-left:8px;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:6px;font-size:11px;padding:1px 8px;cursor:pointer;vertical-align:1px}
+#acList .ah-more{display:block;width:100%;margin:12px 0 6px;padding:12px;border-radius:10px;border:1px solid rgba(33,212,253,.3);background:rgba(33,212,253,.06);color:#6df3ff;font-family:'JetBrains Mono';font-size:12.5px;cursor:pointer}
+#acList .ah-none{padding:26px 4px;font-size:16px;line-height:1.6;color:#93a3b5}
+#acList .ah-none b{color:#eaf0f6}
+#activity-modal{z-index:2147483000 !important}
+@media (max-width:560px){
+  #activity-modal{padding:0 !important}
+  #activity-modal>div{width:100% !important;height:100dvh;max-height:100dvh !important;border-radius:0 !important;border:0 !important}
+  #acCats{flex-wrap:nowrap !important;overflow-x:auto;padding:10px 14px 2px !important;scrollbar-width:none}
+  #acCats button{flex:none}
+  #acCtl{flex-wrap:nowrap;overflow-x:auto;padding:8px 14px 0;scrollbar-width:none}
+  #acCtl>*{flex:none}
+  #acCtl .ah-sp{display:none}
+  #acSearch{flex:1 1 0 !important}
+  #acSort{max-width:46%}
+  #acSum{grid-template-columns:repeat(3,1fr);gap:6px;padding:8px 14px 10px}
+  #acSum>div:first-child{display:none}
+  #acSum>div{padding:6px 7px}
+  #acSum small{font-size:9px}
+  #acSum b{font-size:12.5px}
+  #acList{padding:2px 14px 4px !important}
+  #acList .ac-row{padding:13px 12px;gap:11px;min-height:64px}
+  #acList .ac-ic{width:38px;height:38px;font-size:17px}
+  #acList .ac-t1{font-size:16px}
+  #acList .ac-t2{font-size:13.5px}
+  #acList .ac-amt{font-size:16.5px}
+  #acList .ah-det{padding:2px 12px 14px 12px}
+  #acList .ah-kv{grid-template-columns:92px 1fr;font-size:13px}
+  #activity-modal>div>div:last-child{display:none}
+}
+.ah-card-sum{display:flex;gap:10px;align-items:baseline;font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:2px 2px 6px}
+.ah-card-sum b{font-weight:600;color:#eaf0f6}
+.ah-mini{display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid rgba(33,212,253,.07);cursor:pointer;border-radius:6px}
+.ah-mini:hover{background:rgba(33,212,253,.05)}
+.ah-mini .i{flex:none;width:26px;height:26px;border-radius:8px;display:grid;place-items:center;font-size:12px}
+.ah-mini .m{flex:1;min-width:0;display:flex;flex-direction:column}
+.ah-mini .t{font-size:12.5px;color:#d7e3ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ah-mini .s{font-family:'JetBrains Mono';font-size:10px;color:#63758a}
+.ah-mini .a{flex:none;font-family:'JetBrains Mono';font-size:11.5px}
+</style>
 <div id="activity-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
   <div style="width:min(820px,100%);max-height:88vh;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,rgba(9,18,27,.99),rgba(4,8,12,.99));box-shadow:0 24px 70px rgba(0,0,0,.6)">
 
@@ -8132,12 +8170,14 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
         <div style="font-family:'Orbitron';font-weight:800;font-size:15px;letter-spacing:1px;color:#6df3ff">RECENT ACTIVITY</div>
         <div id="acSub" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;margin-top:3px">—</div>
       </div>
+      <button onclick="window.closeActivity();window.showExplorer&&showExplorer()" title="chain-wide explorer (every wallet, not just this one)" style="flex:none;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;height:30px;padding:0 11px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⌕ explorer</button>
       <button id="acRefresh" title="re-check balance + verify pending txids" style="flex:none;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;height:30px;padding:0 11px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">↻ sync</button>
       <button onclick="window.closeActivity()" style="flex:none;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
     </div>
 
     <!-- CATEGORY chips -->
     <div id="acCats" style="display:flex;flex-wrap:wrap;gap:6px;padding:12px 18px 0"></div>
+    <div id="acCtl"></div>
 
     <!-- FILTER + SORT -->
     <div style="display:flex;flex-wrap:wrap;gap:8px;padding:11px 18px 12px;border-bottom:1px solid rgba(33,212,253,.12)">
@@ -8153,12 +8193,13 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       </select>
     </div>
 
+    <div id="acSum"></div>
     <div id="acList" style="flex:1;overflow-y:auto;padding:6px 18px 4px;min-height:120px"></div>
 
     <div style="padding:11px 18px 15px;border-top:1px solid rgba(33,212,253,.12);font-family:'JetBrains Mono';font-size:9.5px;color:#4d7a8a;line-height:1.6">
       <span style="color:#00e0c6">signed</span> = this wallet submitted it (real txid from the node's response).
       <span style="color:#fbbf24">observed</span> = a real balance change read from <span style="color:#7fb6c6">/v1/balance</span>; the amount is chain truth, the attribution is inferred.
-      sigil-g0 serves no per-address history (search index is disabled), so there is no backfill — this ledger starts the first time you open it.
+      The chain serves no per-address history, so there is no backfill — this ledger starts the first time you open it.
     </div>
   </div>
 </div>
@@ -8547,22 +8588,76 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   }
 
   /* ── UI ─────────────────────────────────────────────────────────────────── */
-  var active = 'all', q = '', sort = 'new';
-
+  /* History v2 (2026-10-14, Viktor: "a much better recent history component with filters
+     and sort"). SAME ledger, SAME honesty rules as above — this only changes how rows are
+     found and read: type chips (counts follow the other filters), period, status, hide
+     tiny, search, five sorts, an in/out/net summary of exactly what is shown (failed and
+     Polygon rows are not counted), 50 rows a page, a row opens into its details (exact
+     amount, txid, counterparty, where the row came from, copy buttons), CSV export of the
+     filtered rows. The choices are remembered in this browser only (best effort). ah-v2 */
   function isOpen(){
     var m = document.getElementById('activity-modal');
     return !!m && m.style.display === 'flex';
   }
-  function counts(){
-    var l = load(), c = {all:l.length};
-    CATS.forEach(function(x){ if(x.k!=='all') c[x.k] = 0; });
-    l.forEach(function(e){
-      if(c[e.cat] != null) c[e.cat]++;
-      // A shielded RECEIVE is an incoming payment too, so it counts under In as well as
-      // Shield — otherwise someone looking at the ↙ In tab for a payment they received
-      // privately sees nothing (reported 2026-09-11).
-      if(e.cat === 'shield' && e.dir === 'in' && c.in != null) c.in++;
+  var PAGE = 50;
+  var active = 'all', q = '', sort = 'new', status = 'any', period = 'all', hideTiny = false;
+  var shown = PAGE, openId = null;
+  var PREFS = 'sigil-history-prefs';
+  (function(){
+    try{
+      var p = JSON.parse(localStorage.getItem(PREFS) || '{}') || {};
+      if(p.active) active = p.active; if(p.sort) sort = p.sort; if(p.status) status = p.status;
+      if(p.period) period = p.period; hideTiny = !!p.hideTiny;
+    }catch(e){}
+  })();
+  function savePrefs(){
+    try{ localStorage.setItem(PREFS, JSON.stringify({active:active, sort:sort, status:status, period:period, hideTiny:hideTiny})); }catch(e){}
+  }
+  var LABEL = {all:'All', 'in':'Received', out:'Sent', miner:'Mining', swap:'Swaps', shield:'Private'};
+  var STATUSES = [{k:'any',label:'Any status'},{k:'settled',label:'Settled'},{k:'pending',label:'Pending'},{k:'failed',label:'Failed'}];
+  var PERIODS  = [{k:'d1',label:'24h',ms:86400000},{k:'d7',label:'7 days',ms:604800000},
+                  {k:'d30',label:'30 days',ms:2592000000},{k:'all',label:'All time',ms:0}];
+  var SRC = {
+    signed:   'Signed — this wallet submitted it; the txid is the node’s own reply',
+    observed: 'Observed — a real balance change read from the chain; who caused it is inferred',
+    polygon:  'Polygon — an ERC-20 Transfer log read from a public Polygon RPC'
+  };
+  function isPoly(e){ return e.chain === 'polygon' || e.src === 'polygon'; }
+  function stOf(e){ return e.status === 'failed' ? 'failed' : (e.status === 'confirmed' ? 'settled' : 'pending'); }
+  function inCat(e, k){ return k === 'all' || e.cat === k || (k === 'in' && e.cat === 'shield' && e.dir === 'in'); }
+  function filtersOn(){ return active !== 'all' || status !== 'any' || period !== 'all' || hideTiny || !!q.trim(); }
+  function amtExact(raw){
+    try{
+      var v = BigInt(String(raw || '0')), neg = v < 0n; if(neg) v = -v;
+      return (neg ? '-' : '') + (v / 10000000000n).toLocaleString('en-US') + '.' + (v % 10000000000n).toString().padStart(10, '0');
+    }catch(e){ return '—'; }
+  }
+  function fmtFull(ts){
+    try{ return new Date(ts).toLocaleString('en-GB', {weekday:'short', day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit'}); }
+    catch(_){ return String(ts); }
+  }
+  function shortDate(ts){
+    try{ return new Date(ts).toLocaleString('en-GB', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}); }
+    catch(_){ return ago(ts); }
+  }
+  // Every filter except the type chip, so a chip's count says what clicking it would show.
+  function base(){
+    var s = q.trim().toLowerCase(), cut = 0;
+    PERIODS.forEach(function(p){ if(p.k === period && p.ms) cut = Date.now() - p.ms; });
+    return load().filter(function(e){
+      if(!e) return false;
+      if(status !== 'any' && stOf(e) !== status) return false;
+      if(cut && (e.ts || 0) < cut) return false;
+      if(hideTiny && !isPoly(e) && amtNum(e.amount) < 0.01) return false;
+      if(s && [e.label, e.peer, e.txid, LABEL[e.cat] || e.cat, e.src, e.note, e.amountText || amt(e.amount)]
+                .join(' ').toLowerCase().indexOf(s) < 0) return false;
+      return true;
     });
+  }
+  function counts(){
+    var c = {};
+    CATS.forEach(function(x){ c[x.k] = 0; });
+    base().forEach(function(e){ CATS.forEach(function(x){ if(inCat(e, x.k)) c[x.k]++; }); });
     return c;
   }
   function renderCats(){
@@ -8570,73 +8665,110 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     var c = counts();
     host.innerHTML = CATS.map(function(x){
       var on = x.k === active, n = c[x.k] || 0;
-      return '<button data-cat="'+x.k+'" style="cursor:pointer;border-radius:999px;padding:5px 11px;'
-        + 'font-family:\'JetBrains Mono\';font-size:11px;transition:.15s;'
+      return '<button data-cat="'+x.k+'" style="cursor:pointer;border-radius:999px;padding:6px 12px;'
+        + 'font-family:\'JetBrains Mono\';font-size:12px;transition:.15s;'
         + 'border:1px solid '+(on ? x.col : 'rgba(33,212,253,.2)')+';'
         + 'background:'+(on ? 'rgba(33,212,253,.14)' : 'rgba(33,212,253,.04)')+';'
         + 'color:'+(on ? x.col : '#7fa8b8')+'">'
-        + x.ico+' '+x.label+' <span style="opacity:.6">'+n+'</span></button>';
+        + x.ico+' '+(LABEL[x.k] || x.label)+' <span style="opacity:.6">'+n+'</span></button>';
     }).join('');
     Array.prototype.forEach.call(host.querySelectorAll('button'), function(b){
-      b.onclick = function(){ active = b.getAttribute('data-cat'); renderCats(); render(); };
+      b.onclick = function(){ active = b.getAttribute('data-cat'); shown = PAGE; openId = null; savePrefs(); renderCats(); render(); };
     });
   }
+  function seg(name, opts, cur){
+    return '<div class="ah-seg" data-seg="'+name+'">' + opts.map(function(o){
+      return '<button type="button" data-v="'+o.k+'"'+(o.k === cur ? ' class="on"' : '')+'>'+esc(o.label)+'</button>';
+    }).join('') + '</div>';
+  }
+  function renderCtl(){
+    var host = document.getElementById('acCtl'); if(!host) return;
+    host.innerHTML = seg('period', PERIODS, period) + seg('status', STATUSES, status)
+      + '<label class="ah-chk"><input type="checkbox" data-tiny'+(hideTiny ? ' checked' : '')+'> hide tiny (&lt; 0.01)</label>'
+      + '<span class="ah-sp"></span>'
+      + (filtersOn() ? '<button type="button" class="ah-btn" data-clear>✕ clear filters</button>' : '')
+      + '<button type="button" class="ah-btn" data-csv title="download exactly the rows shown, as a spreadsheet file">⤓ CSV</button>';
+  }
+  function renderSum(l){
+    var host = document.getElementById('acSum'); if(!host) return;
+    var i = 0n, o = 0n, ni = 0, no = 0;
+    l.forEach(function(e){
+      if(isPoly(e) || e.status === 'failed') return;
+      var v; try{ v = BigInt(String(e.amount || '0')); }catch(_){ return; }
+      if(e.dir === 'in'){ i += v; ni++; } else { o += v; no++; }
+    });
+    var net = i - o, neg = net < 0n;
+    function f2(x){ try{ return (Number(x) / 1e10).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }catch(_){ return '—'; } }
+    host.innerHTML = '<div><small>Shown</small><b>'+l.length.toLocaleString('en-US')+'</b></div>'
+      + '<div><small>In · '+ni+'</small><b class="pos">+'+f2(i)+'</b></div>'
+      + '<div><small>Out · '+no+'</small><b>−'+f2(o)+'</b></div>'
+      + '<div title="failed and Polygon rows are not counted"><small>Net SIGIL</small><b class="'+(neg ? '' : 'pos')+'">'
+      +   (neg ? '−' : '+')+f2(neg ? -net : net)+'</b></div>';
+  }
   function apply(){
-    var l = load().slice();
-    if(active !== 'all') l = l.filter(function(e){
-      return e.cat === active || (active === 'in' && e.cat === 'shield' && e.dir === 'in');
-    });
-    var s = q.trim().toLowerCase();
-    if(s) l = l.filter(function(e){
-      return [e.label, e.peer, e.txid, e.cat, e.src, e.amountText || amt(e.amount)]
-        .join(' ').toLowerCase().indexOf(s) >= 0;
-    });
+    var l = base().filter(function(e){ return inCat(e, active); });
     l.sort(function(a,b){
       if(sort === 'new')    return b.ts - a.ts;
       if(sort === 'old')    return a.ts - b.ts;
       if(sort === 'amt_hi') return amtNum(b.amount) - amtNum(a.amount);
       if(sort === 'amt_lo') return amtNum(a.amount) - amtNum(b.amount);
       if(sort === 'cat'){
-        var d = String(a.cat).localeCompare(String(b.cat));
+        var d = String(LABEL[a.cat] || a.cat).localeCompare(String(LABEL[b.cat] || b.cat));
         return d !== 0 ? d : (b.ts - a.ts);
       }
       return 0;
     });
     return l;
   }
-  // Bank-statement row. Sizes are deliberate: 17px title / 15px subline /
-  // 19px amount, 76px row height, 46px icon. Signed amounts use '+' green for
-  // inbound and a NEUTRAL colour for outbound — an ordinary payment is not an
-  // error and should not be painted red.
-  function row(e){
-    var c = cat(e.cat), inbound = e.dir === 'in';
-    var sign = inbound ? '+' : '\u2212';
-    var col  = inbound ? '#37d99a' : '#eaf0f6';
-    var bits = [];
-    bits.push(clockOf(e.ts));
-    if(e.peer) bits.push(esc(shortHex(e.peer)));
+  function details(e){
+    var c = cat(e.cat), st = stOf(e);
+    function kv(k, v, copy){
+      return '<div class="ah-kv"><span>'+k+'</span><span>'+v
+        + (copy ? '<button type="button" class="ah-copy" data-copy="'+esc(copy)+'">copy</button>' : '') + '</span></div>';
+    }
+    var h = '<div class="ah-det">';
+    h += kv('When', esc(fmtFull(e.ts)));
+    h += kv('Type', esc(LABEL[e.cat] || c.label) + (e.shielded ? ' · private' : ''));
+    h += kv('Amount', isPoly(e) ? esc(e.amountText || '—') : esc(amtExact(e.amount)) + ' SIGIL');
+    h += kv('Status', st === 'settled' ? 'Settled on chain'
+                    : st === 'failed' ? 'Refused' + (e.note ? ' — ' + esc(e.note) : '')
+                    : 'Waiting for the chain' + (e.txid ? '' : ' (no txid returned yet)'));
+    h += kv('Source', esc(SRC[e.src] || e.src || '—'));
+    if(e.txid) h += kv('Transaction', '<code>'+esc(e.txid)+'</code>', e.txid);
+    if(e.peer) h += kv(e.dir === 'in' ? 'From' : 'To', '<code>'+esc(e.peer)+'</code>', e.peer);
+    if(e.note && st !== 'failed') h += kv('Note', esc(e.note));
+    return h + '</div>';
+  }
+  // Bank-statement row (sizes from the 2026-08-27 brief: 17px title / 15px subline / 19px
+  // amount). Inbound '+' green, outbound NEUTRAL — an ordinary payment is not an error.
+  // A failed row is struck through and greyed: it moved nothing.
+  function row(e, withDate){
+    var c = cat(e.cat), inbound = e.dir === 'in', st = stOf(e);
+    var sign = inbound ? '+' : '−';
+    var col  = st === 'failed' ? '#8193a6' : (inbound ? '#37d99a' : '#eaf0f6');
+    var bits = [withDate ? shortDate(e.ts) : clockOf(e.ts)];
+    if(e.peer){ var pp = String(e.peer); bits.push(esc(pp.length > 14 ? pp.slice(0, 6) + '…' + pp.slice(-4) : pp)); }
     var tags = '';
-    if(e.status && e.status !== 'confirmed' && e.status !== 'failed')
-      tags += '<span class="ac-tag pend">Pending</span>';
-    if(e.status === 'failed')
+    if(st === 'pending') tags += '<span class="ac-tag pend">Pending</span>';
+    if(st === 'failed')
       tags += '<span class="ac-tag pend" style="color:#ff8a8a;border-color:rgba(255,138,138,.4);background:rgba(255,138,138,.09)">Failed</span>';
-    if(e.shielded) tags += '<span class="ac-tag shield">\u25c8 Shielded</span>';
-    // A Polygon row is a DIFFERENT chain and a different token — 18dp wSIGIL3 or 6dp
-    // USDC, never 10dp native SIGIL. Printing it through amt() would divide by 10^10
-    // and stamp "SIGIL" on it, which is the same class of error as the 8-vs-10 decimal
-    // bug: a number that looks right and means something else. It carries its own
-    // pre-formatted text and its own chain badge instead.
-    if(e.chain === 'polygon')
-      tags += '<span class="ac-tag" style="color:#a78bfa;border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.09)">\u2b1f Polygon</span>';
-    return '<div class="ac-row">'
+    if(e.shielded) tags += '<span class="ac-tag shield">◈ Private</span>';
+    // A Polygon row is a DIFFERENT chain and token (18dp wSIGIL / 6dp USDC): it carries its
+    // own pre-formatted text, never amt() + "SIGIL".
+    if(isPoly(e))
+      tags += '<span class="ac-tag" style="color:#a78bfa;border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.09)">⬟ Polygon</span>';
+    var money = sign + (e.amountText ? esc(e.amountText) : (amt(e.amount)+'<small>SIGIL</small>'));
+    if(st === 'failed') money = '<s>' + money + '</s>';
+    var open = openId === e.id;
+    return '<div class="ah-item'+(open ? ' open' : '')+'" data-id="'+esc(e.id)+'"><div class="ac-row">'
       + '<div class="ac-ic" style="background:'+c.col+'1f;color:'+c.col+'">'+c.ico+'</div>'
       + '<div class="ac-mid">'
-      +   '<div class="ac-t1">'+esc(e.label||c.label)+'</div>'
-      +   '<div class="ac-t2">'+bits.join(' <span style="opacity:.5">\u00b7</span> ')+tags+'</div>'
+      +   '<div class="ac-t1">'+esc(e.label || LABEL[e.cat] || c.label)+'</div>'
+      +   '<div class="ac-t2">'+bits.join(' <span style="opacity:.5">·</span> ')+tags+'</div>'
       + '</div>'
-      + '<div class="ac-amt" style="color:'+col+'">'+sign
-      +   (e.amountText ? esc(e.amountText) : (amt(e.amount)+'<small>SIGIL</small>'))+'</div>'
-      + '</div>';
+      + '<div class="ac-amt" style="color:'+col+'">'+money+'</div>'
+      + '<div class="ah-chev">'+(open ? '▴' : '▾')+'</div>'
+      + '</div>' + (open ? details(e) : '') + '</div>';
   }
   function clockOf(ts){
     try{ return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}); }
@@ -8653,19 +8785,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       return a.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
     }catch(_){ return ''; }
   }
-  function render(){
-    var host = document.getElementById('acList'); if(!host) return;
-    var l = apply(), total = load().length;
-
-    var sub = document.getElementById('acSub');
-    if(sub){
-      var a = addr();
-      sub.textContent = (a ? shortHex(a) : 'no wallet')
-        + ' · ' + total + ' event' + (total===1?'':'s') + ' recorded'
-        + (mining ? ' · ⚒ mining' : '');
-    }
-    if(!l.length){
-      host.innerHTML = '<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#5a93a8;line-height:1.75;padding:22px 2px">'
+  function emptyHtml(total){
+    return '<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#5a93a8;line-height:1.75;padding:22px 2px">'
         + (total
             ? 'No activity matches this filter. Try <span style="color:#6df3ff">All</span>, or clear the search box.'
             : 'Nothing recorded yet for this wallet.<br><br>'
@@ -8679,28 +8800,116 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
                   : '')
               + '<div class="ac-why"><b>Mining and see nothing?</b> A shielded miner\'s rewards land in the shielded pool, so the transparent balance never changes. Unlock the wallet so the shielded scanner can run \u2014 it reads those notes by trial-decryption.</div>')
         + '</div>';
+  }
+  function render(){
+    var host = document.getElementById('acList'); if(!host) return;
+    var total = load().length, l = apply();
+    var sub = document.getElementById('acSub');
+    if(sub){
+      var a = addr();
+      sub.textContent = (a ? shortHex(a) : 'no wallet')
+        + ' · ' + total + ' event' + (total===1?'':'s') + ' recorded'
+        + (mining ? ' · ⚒ mining' : '');
+    }
+    renderCtl(); renderSum(l);
+    if(!l.length){
+      host.innerHTML = (total && filtersOn())
+        ? '<div class="ah-none"><b>Nothing matches these filters.</b> '
+          + total + ' event' + (total===1?' is':'s are') + ' recorded for this wallet.'
+          + '<br><button type="button" class="ah-btn" data-clear style="margin-top:12px">✕ clear filters</button></div>'
+        : emptyHtml(total);
       return;
     }
-    // Group into day sections. `l` is already in display order.
-    var html='', lastDay=null;
-    for(var i=0;i<l.length;i++){
-      var dl = dayLabelOf(l[i].ts);
-      if(dl !== lastDay){
-        if(lastDay !== null) html += '</div>';
-        html += '<div class="ac-day">'+esc(dl)+'</div><div class="ac-grp">';
-        lastDay = dl;
+    var page = l.slice(0, shown), byDay = (sort === 'new' || sort === 'old');
+    var html = '', lastDay = null;
+    if(!byDay) html += '<div class="ac-grp" style="margin-top:12px">';
+    for(var i=0;i<page.length;i++){
+      if(byDay){
+        var dl = dayLabelOf(page[i].ts);
+        if(dl !== lastDay){
+          if(lastDay !== null) html += '</div>';
+          html += '<div class="ac-day">'+esc(dl)+'</div><div class="ac-grp">';
+          lastDay = dl;
+        }
       }
-      html += row(l[i]);
+      html += row(page[i], !byDay);
     }
-    if(lastDay !== null) html += '</div>';
+    if(byDay ? lastDay !== null : true) html += '</div>';
+    if(l.length > shown)
+      html += '<button type="button" class="ah-more" data-more>Show '+Math.min(PAGE, l.length - shown)
+        + ' more · ' + (l.length - shown).toLocaleString('en-US') + ' not shown yet</button>';
     host.innerHTML = html;
+  }
+  function csv(){
+    var l = apply();
+    function cell(v){
+      v = String(v == null ? '' : v);
+      if(/^[=+\-@\t\r]/.test(v)) v = "'" + v;                 // never a spreadsheet formula
+      return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+    }
+    var out = [['time_utc','type','direction','label','amount','unit','status','source','txid','counterparty','private'].join(',')];
+    l.forEach(function(e){
+      out.push([new Date(e.ts).toISOString(), LABEL[e.cat] || e.cat, e.dir, e.label,
+        isPoly(e) ? (e.amountText || '') : amtExact(e.amount), isPoly(e) ? '' : 'SIGIL',
+        stOf(e), e.src, e.txid, e.peer, e.shielded ? 'yes' : 'no'].map(cell).join(','));
+    });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([out.join('\n') + '\n'], {type:'text/csv'}));
+    a.download = 'sigil-history-' + (addr().slice(0, 8) || 'wallet') + '-' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ try{ URL.revokeObjectURL(a.href); a.remove(); }catch(_){} }, 1500);
+  }
+  function clearFilters(){
+    active = 'all'; status = 'any'; period = 'all'; hideTiny = false; q = '';
+    var s = document.getElementById('acSearch'); if(s) s.value = '';
+  }
+  function bind(){
+    var m = document.getElementById('activity-modal'); if(!m || m.__ahBound) return; m.__ahBound = true;
+    m.addEventListener('click', function(ev){
+      var t = ev.target, b; if(!t || !t.closest) return;
+      if((b = t.closest('[data-seg] button'))){
+        var g = b.parentNode.getAttribute('data-seg'), v = b.getAttribute('data-v');
+        if(g === 'period') period = v; else status = v;
+        shown = PAGE; openId = null; savePrefs(); renderCats(); render(); return;
+      }
+      if(t.closest('[data-clear]')){ clearFilters(); shown = PAGE; openId = null; savePrefs(); renderCats(); render(); return; }
+      if(t.closest('[data-csv]')){ csv(); return; }
+      if(t.closest('[data-more]')){ shown += PAGE; render(); return; }
+      if((b = t.closest('[data-copy]'))){
+        var txt = b.getAttribute('data-copy');
+        try{ navigator.clipboard.writeText(txt).then(function(){ b.textContent = 'copied'; setTimeout(function(){ b.textContent = 'copy'; }, 1200); }); }catch(_){}
+        return;
+      }
+      if(t.closest('.ah-det')) return;            // selecting text in the details keeps them open
+      if((b = t.closest('[data-id]'))){
+        var id = b.getAttribute('data-id'); openId = (openId === id) ? null : id; render(); return;
+      }
+    });
+    m.addEventListener('change', function(ev){
+      if(ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-tiny')){
+        hideTiny = ev.target.checked; shown = PAGE; openId = null; savePrefs(); renderCats(); render();
+      }
+    });
+  }
+  // Open the full history on one row (from the dashboard card): make sure it is visible.
+  function focusRow(id){
+    if(!apply().some(function(e){ return e.id === id; })) clearFilters();
+    var l = apply(), k = -1;
+    for(var i=0;i<l.length;i++) if(l[i].id === id){ k = i; break; }
+    if(k >= 0){ shown = Math.max(PAGE, Math.ceil((k + 1) / PAGE) * PAGE); openId = id; }
   }
 
   /* ── open / close ───────────────────────────────────────────────────────── */
-  window.openActivity = function(){
+  window.openActivity = function(focusId){
     var m = document.getElementById('activity-modal'); if(!m) return;
+    bind();
+    var so = document.getElementById('acSort'); if(so) so.value = sort;
+    if(typeof focusId === 'string') focusRow(focusId);
     m.style.display = 'flex';
     renderCats(); render();
+    if(typeof focusId === 'string'){
+      try{ var el = document.querySelector('#acList [data-id="' + focusId.replace(/"/g, '') + '"]'); if(el) el.scrollIntoView({block:'center'}); }catch(_){}
+    }
     pollBalance().then(verifyPending).then(function(){ if(isOpen()){ renderCats(); render(); } });
     // The Polygon half — Uniswap trades and token transfers, which never pass
     // through this origin's fetch and so were invisible until now.
@@ -8711,6 +8920,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   };
 
   /* ── dashboard Activity card → live mini-feed + entry point ─────────────── */
+  // History v2: a 7-day in/out line, the six newest rows (each opens the full history ON
+  // that row), and the entry button with the total.
   function updateCard(){
     var link = document.getElementById('cardExplorer');
     var card = link && link.closest ? link.closest('.card') : null;
@@ -8722,24 +8933,35 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       var old = card.querySelector('.sect') ? card.querySelector('.sect').nextElementSibling : null;
       if(old) old.remove();
       card.appendChild(body);
+      body.addEventListener('click', function(ev){
+        var r = ev.target && ev.target.closest ? ev.target.closest('[data-open]') : null;
+        if(r) window.openActivity(r.getAttribute('data-open'));
+      });
     }
-    var l = load().slice().sort(function(a,b){ return b.ts - a.ts; }).slice(0,3);
+    var all = load(), l = all.slice().sort(function(a,b){ return b.ts - a.ts; }).slice(0,6);
     var btn = '<button onclick="window.openActivity()" style="width:100%;margin-top:10px;cursor:pointer;'
       + 'border:1px solid rgba(33,212,253,.4);background:rgba(33,212,253,.08);color:#6df3ff;border-radius:9px;'
       + 'padding:9px;font-family:\'Orbitron\';font-weight:700;font-size:10.5px;letter-spacing:1px">'
-      + '⬡ RECENT ACTIVITY' + (l.length ? ' · '+load().length : '') + '</button>';
+      + '⬡ FULL HISTORY' + (all.length ? ' · '+all.length : '') + ' · FILTER + SORT</button>';
     if(!l.length){
       body.innerHTML = '<div style="font-family:\'JetBrains Mono\';font-size:11px;color:var(--dim);padding:10px 2px;line-height:1.6">'
         + 'no activity recorded yet — send, swap or mine and it lands here</div>' + btn;
       return;
     }
-    body.innerHTML = l.map(function(e){
-      var c = cat(e.cat), inbound = e.dir === 'in';
-      return '<div style="display:flex;align-items:center;gap:9px;padding:7px 2px;border-bottom:1px solid rgba(33,212,253,.07)">'
-        + '<span style="flex:none;color:'+c.col+';font-size:12px">'+c.ico+'</span>'
-        + '<span style="flex:1;min-width:0;font-family:\'JetBrains Mono\';font-size:10.5px;color:#9fc4d2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.label||c.label)+'</span>'
-        + '<span style="flex:none;font-family:\'JetBrains Mono\';font-size:10.5px;color:'+(inbound?'#00e0c6':'#ff9a6c')+'">'
-        +   (inbound?'+':'−')+amt(e.amount)+'</span>'
+    var cut = Date.now() - 604800000, i = 0n, o = 0n;
+    all.forEach(function(e){
+      if(!e || isPoly(e) || e.status === 'failed' || (e.ts || 0) < cut) return;
+      try{ var v = BigInt(String(e.amount || '0')); if(e.dir === 'in') i += v; else o += v; }catch(_){}
+    });
+    var head = '<div class="ah-card-sum"><span>last 7 days</span><b class="pos">+'+amt(i.toString())+'</b><b>−'+amt(o.toString())+'</b><span>SIGIL</span></div>';
+    body.innerHTML = head + l.map(function(e){
+      var c = cat(e.cat), inbound = e.dir === 'in', st = stOf(e);
+      var sub = ago(e.ts) + (st === 'pending' ? ' · pending' : st === 'failed' ? ' · failed' : '') + (e.shielded ? ' · private' : '');
+      return '<div class="ah-mini" data-open="'+esc(e.id)+'">'
+        + '<span class="i" style="background:'+c.col+'1f;color:'+c.col+'">'+c.ico+'</span>'
+        + '<span class="m"><span class="t">'+esc(e.label || LABEL[e.cat] || c.label)+'</span><span class="s">'+esc(sub)+'</span></span>'
+        + '<span class="a" style="color:'+(st === 'failed' ? '#8193a6' : inbound ? '#37d99a' : '#eaf0f6')+'">'
+        +   (inbound ? '+' : '−') + (e.amountText ? esc(e.amountText) : amt(e.amount)) + '</span>'
         + '</div>';
     }).join('') + btn;
   }
@@ -8747,9 +8969,9 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   /* ── wiring ─────────────────────────────────────────────────────────────── */
   function wire(){
     var s = document.getElementById('acSearch');
-    if(s) s.oninput = function(){ q = s.value; render(); };
+    if(s) s.oninput = function(){ q = s.value; shown = PAGE; openId = null; renderCats(); render(); };
     var so = document.getElementById('acSort');
-    if(so) so.onchange = function(){ sort = so.value; render(); };
+    if(so){ so.value = sort; so.onchange = function(){ sort = so.value; shown = PAGE; savePrefs(); render(); }; }
     var rf = document.getElementById('acRefresh');
     if(rf) rf.onclick = function(){
       rf.disabled = true; rf.textContent = '↻ syncing…';

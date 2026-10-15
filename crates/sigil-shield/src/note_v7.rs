@@ -822,9 +822,15 @@ mod wire_tests {
             verify_spend_wire_v7(&d, &[d], 1, &[d], junk),
             Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: 1 })
         ));
+        // Since M7 two inputs are legal (the merge form): the same note twice is refused as a
+        // duplicate before parsing, and three inputs are the unsupported arity.
         assert!(matches!(
             verify_spend_wire_v7(&d, &[d, d], 1, &[d, d], junk),
-            Err(WireVerifyError::UnsupportedInputCount { got: 2 })
+            Err(WireVerifyError::DuplicateNullifier)
+        ));
+        assert!(matches!(
+            verify_spend_wire_v7(&d, &[d, d, d], 1, &[d, d], junk),
+            Err(WireVerifyError::UnsupportedInputCount { got: 3 })
         ));
         assert!(matches!(
             verify_spend_wire_v7(&d, &[d], 1u128 << RANGE_BITS, &[d, d], junk),

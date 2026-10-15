@@ -215,6 +215,22 @@ pub mod status {
     /// Mid-run tail resyncs performed (each one is a logged `[producer] RESYNC` line).
     static RESYNCS: AtomicU64 = AtomicU64::new(0);
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    /// Settled blocks whose header names THIS node's mining wallet as producer — blocks the
+    /// operator's rig WON, whoever minted them (on g2 the network's producer mints the block
+    /// that carries a winning solve and writes the solver's wallet into `header.producer`;
+    /// measured 2026-10-15: g2 block 42,491,273 → Viktor's wallet c4dfe8f9…).
+    static WON: AtomicU64 = AtomicU64::new(0);
+    static LAST_WON_HEIGHT: AtomicU64 = AtomicU64::new(0);
+    pub fn note_won(height: u64) {
+        WON.fetch_add(1, Ordering::Relaxed);
+        LAST_WON_HEIGHT.fetch_max(height, Ordering::Relaxed);
+    }
+    pub fn won() -> u64 { WON.load(Ordering::Relaxed) }
+    pub fn last_won_height() -> u64 { LAST_WON_HEIGHT.load(Ordering::Relaxed) }
+    /// Does this node forge blocks of its own? (`SIGIL_TOP_MINT_POLICY`, default off.)
+    static MINTING: AtomicBool = AtomicBool::new(false);
+    pub fn set_minting(on: bool) { MINTING.store(on, Ordering::Relaxed); }
+    pub fn minting() -> bool { MINTING.load(Ordering::Relaxed) }
     /// Unix seconds when a refused bootstrap will be tried again (0 = no retry pending).
     static RETRY_AT: AtomicU64 = AtomicU64::new(0);
     pub fn set_retry_at(unix: u64) { RETRY_AT.store(unix, Ordering::Relaxed); }
@@ -307,8 +323,9 @@ pub mod status {
                 };
                 Some(if minted() == 0 {
                     format!(
-                        "full node: LIVE — settled h={} · net h={} · gossip in {} · peers {}{behind} · mints when a rig solves or a tx is pending",
-                        settled(), gossip_tip(), ingested(), peers()
+                        "full node: LIVE — settled h={} · net h={} · gossip in {} · peers {}{behind} · your rig's wins: {}{}",
+                        settled(), gossip_tip(), ingested(), peers(), won(),
+                        if minting() { " · forges its own on a rig solve" } else { "" }
                     )
                 } else {
                     format!(

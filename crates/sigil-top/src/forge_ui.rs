@@ -231,19 +231,23 @@ fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
     let settled = ps::settled();
     let net = ps::gossip_tip();
     let minted = ps::minted();
-    let last_h = ps::last_minted_height();
+    let won = ps::won();
+    // "Ours" = blocks this node forged + blocks the rig WON (minted by the network's producer
+    // with this wallet as producer). Either one rides the belt in gold.
+    let ours = minted + won;
+    let last_h = ps::last_minted_height().max(ps::last_won_height());
     let lag = ps::lag();
-    let beat = observe(settled, minted, last_h);
+    let beat = observe(settled, ours, last_h);
 
     let mood = match phase {
-        ps::PRODUCING if lag > 2048 => Mood::CatchingUp,
-        ps::PRODUCING if minted > 0 => Mood::Forging,
+        ps::PRODUCING if lag > 768 => Mood::CatchingUp,
+        ps::PRODUCING if ours > 0 => Mood::Forging,
         ps::PRODUCING => Mood::Armed,
         ps::SYNCING => Mood::Booting,
         _ => Mood::Refused,
     };
     let (title, col) = match mood {
-        Mood::Forging => (" ⛏ PRODUCER · FORGING BLOCKS", C_NEON_GOLD),
+        Mood::Forging => (if minted > 0 { " ⛏ PRODUCER · FORGING BLOCKS" } else { " ⛏ PRODUCER · YOUR RIG WINS BLOCKS" }, C_NEON_GOLD),
         Mood::Armed => (" ◆ PRODUCER · FULL NODE LIVE", C_NEON_GREEN),
         Mood::CatchingUp => (" ◆ PRODUCER · CATCHING UP", C_GOLD),
         Mood::Booting => (" ◆ PRODUCER · BOOTSTRAPPING", C_NEON_CYAN),
@@ -274,12 +278,12 @@ fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
         Mood::Armed | Mood::Forging | Mood::CatchingUp => {
             let headline = match mood {
                 Mood::Forging => vec![
-                    sp("⛏ FORGING", bold(C_NEON_GOLD)),
-                    sp(" — this node mints blocks of its own and seals every block of the network", st(C_DIM)),
+                    sp(if minted > 0 { "⛏ FORGING" } else { "⛏ WINNING" }, bold(C_NEON_GOLD)),
+                    sp(" — blocks with your wallet as producer are in the chain, and this node seals every block", st(C_DIM)),
                 ],
                 Mood::CatchingUp => vec![
                     sp("◆ CATCHING UP", bold(C_GOLD)),
-                    sp(format!(" — {} blocks behind the network, the resync lane is replaying them", group(lag)), st(C_DIM)),
+                    sp(format!(" — {} blocks behind the network — the resync lane catches up after 20 s without progress", group(lag)), st(C_DIM)),
                 ],
                 _ => vec![
                     sp("◆ ARMED", bold(C_NEON_GREEN)),
@@ -287,24 +291,34 @@ fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
                 ],
             };
             let secs = if beat.rate > 0.5 { format!(" ≈{:.0} s", lag as f64 / beat.rate) } else { String::new() };
-            let mine = if minted == 0 {
+            let how = if ps::minting() {
+                "  · this node also forges its own when your rig solves against it"
+            } else {
+                "  · your rig [M] mines through the network's producer; a block it wins carries your wallet"
+            };
+            let mine = if ours == 0 {
                 vec![
                     sp("your blocks ", st(C_DIM)), sp("0 yet", bold(C_GOLD)),
-                    sp("  · mint policy WORK: a solve from your rig [M] or a payment sent to this node → it forges a block", st(C_DIM)),
+                    sp(how, st(C_DIM)),
                 ]
             } else {
-                vec![
-                    sp("your blocks ", st(C_DIM)), sp(group(minted), bold(C_NEON_GOLD)),
+                let mut v = vec![
+                    sp("your blocks ", st(C_DIM)), sp(group(ours), bold(C_NEON_GOLD)),
                     sp("  last ", st(C_DIM)), sp(format!("h={}", group(last_h)), bold(C_NEON_GOLD)),
-                    sp("  · each one gossiped to the network the moment it was forged", st(C_DIM)),
-                ]
+                ];
+                if minted > 0 {
+                    v.push(sp(format!("  ({} won by your rig, {} forged here)", group(won), group(minted)), st(C_DIM)));
+                } else {
+                    v.push(sp("  · won by your rig, settled and checked here", st(C_DIM)));
+                }
+                v
             };
             vec![
                 Line::from(headline),
                 Line::from(vec![
                     sp("sealed ", st(C_DIM)), sp(rate, bold(C_NEON_GREEN)),
                     sp("   net tip ", st(C_DIM)), sp(group(net), bold(C_VBRIGHT)),
-                    sp("   finality lag ", st(C_DIM)), sp(format!("{}{secs}", group(lag)), bold(if lag > 2048 { C_GOLD } else { C_NEON_CYAN })),
+                    sp("   finality lag ", st(C_DIM)), sp(format!("{}{secs}", group(lag)), bold(if lag > 768 { C_GOLD } else { C_NEON_CYAN })),
                     sp(" (the 512-deep rule)", st(C_DIM)),
                 ]),
                 Line::from(mine),
@@ -320,7 +334,7 @@ fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
             vec![
                 Line::from(vec![sp("◆ BOOTSTRAPPING", bold(C_NEON_CYAN)), sp(format!(" — {what}"), st(C_DIM))]),
                 Line::from(vec![
-                    sp("then this node seals every block itself and forges its own when your rig [M] solves against it", st(C_DIM)),
+                    sp("then this node seals every block itself and counts every block your rig [M] wins", st(C_DIM)),
                 ]),
                 Line::from(match progress {
                     Some(p) => vec![

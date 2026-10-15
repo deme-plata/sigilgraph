@@ -446,9 +446,10 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
     let [tele, art] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG network-power bar ────────────────────────────────────────────
-    let label = format!(" {:.2} {}  {}", hv, hu, ptext);
+    // Fixed slot, same as the SYNC bar (10.4.28): the hashrate's digit count must not resize the bar.
+    let label = crate::sync_ui::pad_to_slot(format!(" {:>7.2} {}  {}", hv, hu, ptext), 32);
     let total = bar_row.width as usize;
-    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let barw = total.saturating_sub(display_width(&label) + 1).max(4);
     let fill = (rig_frac * barw as f64).round() as usize;
     let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
     f.render_widget(Paragraph::new(Line::from(vec![

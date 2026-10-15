@@ -116,10 +116,17 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG progress bar ─────────────────────────────────────────────────
-    let label = format!(" {:>5.1}%  {}  BW:{:.0}%{}", frac * 100.0, vtext, cont,
-        if s.commit_rate > 1.0 { format!("  ⚡{}/s commit", group(s.commit_rate.round() as u64)) } else { String::new() });
+    // 10.4.28 (Viktor 2026-10-15: the bar and the text beside it "bouncing left and right all the
+    // time"): the bar used to be "row width minus this label", and the label changes length every
+    // frame — the commit rate appears and vanishes, digit counts change, and ⚡ is TWO columns wide
+    // but was counted as one. The label now lives in a fixed slot measured in display columns, so
+    // the bar keeps its width and only the text inside the slot changes.
+    const LABEL_SLOT: usize = 60;
+    let commit = if s.commit_rate > 1.0 { format!("⚡{}/s commit", group(s.commit_rate.round() as u64)) } else { String::new() };
+    let core = format!(" {:>5.1}%  {}  BW:{:>3.0}%  {}", frac * 100.0, vtext, cont, commit);
+    let label = pad_to_slot(core, LABEL_SLOT);
     let total = bar_row.width as usize;
-    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let barw = total.saturating_sub(display_width(&label) + 1).max(4);
     let fill = (frac * barw as f64).round() as usize;
     let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
     f.render_widget(Paragraph::new(Line::from(vec![
@@ -341,6 +348,13 @@ fn integrity_verified_text(snap_mode: bool, spine: &str) -> String {
     } else {
         format!("⛓ INTEGRITY VERIFIED — genesis→{spine} spine · fold ✓ · tip-fp ✓ (verified here, no trusted peer)")
     }
+}
+
+/// Right-pad `s` with spaces to `slot` display columns (wide glyphs counted as they render).
+/// Longer text is left as is — the bar then shrinks, but only for that rare state.
+pub(crate) fn pad_to_slot(s: String, slot: usize) -> String {
+    let w = display_width(&s);
+    if w >= slot { s } else { format!("{s}{}", " ".repeat(slot - w)) }
 }
 
 fn is_synced(caught: bool, settled_gap: u64, fold_ok: bool, broken: bool) -> bool {
@@ -1153,5 +1167,25 @@ mod existing_blocks_tests {
         assert_eq!(existing_blocks(1_000, 11_000, 50_000), 10_000);
         assert_eq!(existing_blocks(1_000, 11_000, 0), 10_000);
         assert_eq!(existing_blocks(60_000, 70_000, 50_000), 0, "entirely above the tip: nothing existed");
+    }
+}
+
+#[cfg(test)]
+mod bar_slot_tests {
+    use super::{display_width, pad_to_slot};
+    /// The bar keeps one width while the label's numbers tick (Viktor 10-15, "bouncing").
+    #[test]
+    fn label_slot_is_constant_as_the_numbers_change() {
+        let labels = [
+            " 100.0%  ◆ SYNCED  BW: 60%  ".to_string(),
+            " 100.0%  ◆ SYNCED  BW: 60%  ⚡12/s commit".to_string(),
+            "  95.8%  ✓ SYNCING  BW: 49%  ⚡1,413/s commit".to_string(),
+            "   9.1%  ◇ LIGHT MONITOR  BW:  9%  ".to_string(),
+        ];
+        for l in labels {
+            assert_eq!(display_width(&pad_to_slot(l.clone(), 60)), 60, "{l:?}");
+        }
+        // ⚡ renders two columns wide; counting chars would have made this 1 column short.
+        assert_eq!(display_width("⚡"), 2);
     }
 }

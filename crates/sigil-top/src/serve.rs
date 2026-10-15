@@ -818,6 +818,10 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     if names(safe, "sigil-metamask.js") {
         return Some((include_str!("../../../gui/sigil-metamask.js").as_bytes().to_vec(), JS));
     }
+    // Exchange UI 2026-10-15 r2: reviewed minimum + submission latches.
+    if names(safe, "sigil-exchange.js") {
+        return Some((include_str!("../../../gui/sigil-exchange.js").as_bytes().to_vec(), JS));
+    }
     if names(safe, "wsigil-market.js") {        // the wSIGIL/USDC ribbon; absent = ribbon shows nothing
         return Some((include_str!("../../../gui/wsigil-market.js").as_bytes().to_vec(), JS));
     }

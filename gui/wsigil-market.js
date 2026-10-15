@@ -27,8 +27,8 @@
 (function () {
   'use strict';
 
-  var PAIR   = '0x06895e77a192ce525c7bb5f25c52d2ce19c052d1';
-  var WSIG   = '0xc224602c32f5c7f68d3ef002ae4c99e4c7df25b7';
+  var PAIR   = '0x7e9c5d73104ed2fc2bc55139ac0999036eaf41d7';
+  var WSIG   = '0x3fced760b0de6d57f96835c6110b1227941ec2e9';
   var USDC   = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
   var ROUTER = '0xedf6066a2b290c185783862c7f4776a2c8077ad1';   // canonical Uniswap V2 on Polygon
   var CHAIN  = '0x89';
@@ -60,7 +60,7 @@
   async function rawCall(to, data) {
     // try the injected wallet first (no CORS, no rate limit), then public RPCs
     var p = window.ethereum;
-    if (p) { try { return await p.request({ method: 'eth_call', params: [{ to: to, data: data }, 'latest'] }); } catch (e) {} }
+    if (p) { try { if (await p.request({method:'eth_chainId'}) === CHAIN) return await p.request({ method: 'eth_call', params: [{ to: to, data: data }, 'latest'] }); } catch (e) {} }
     var last;
     for (var i = 0; i < RPCS.length; i++) {
       try {
@@ -92,10 +92,10 @@
     try {
       var r = await rawCall(PAIR, SEL_RESERVES);
       var b = r.replace(/^0x/, '');
-      // token0 is USDC, token1 is wSIGIL — Uniswap sorts by ADDRESS, not by
-      // name. Verified on chain; do not "fix" this ordering by intuition.
-      S.rU = BigInt('0x' + b.slice(0, 64));
-      S.rW = BigInt('0x' + b.slice(64, 128));
+      var token0 = '0x' + (await rawCall(PAIR, '0x0dfe1681')).slice(-40).toLowerCase();
+      if (token0 !== USDC && token0 !== WSIG) throw new Error('Unexpected market token');
+      S.rU = BigInt('0x' + b.slice(token0 === USDC ? 0 : 64, token0 === USDC ? 64 : 128));
+      S.rW = BigInt('0x' + b.slice(token0 === USDC ? 64 : 0, token0 === USDC ? 128 : 64));
       S.price = num(S.rU, D_USDC) / num(S.rW, D_WSIG);
       S.ok = S.rW > 0n && S.rU > 0n; S.err = '';
     } catch (e) { S.ok = false; S.err = (e && e.message) || 'pool read failed'; }
@@ -120,7 +120,7 @@
   // wSIGIL/USDC genuinely IS a listed Uniswap V2 market, so "listed" before
   // the reserves come back and "live" after are both true statements.
   window.SigilMarket = {
-    tickerPairs: function () { return [{ pair: 'wSIGIL/USDC', fee: 30, live: S.ok }]; },
+    tickerPairs: function () { return [{ pair: 'WSIGIL3/USDC', fee: 30, live: S.ok }]; },
     refresh: refresh,
     state: function () { return { price: S.price, ok: S.ok, err: S.err,
                                   wsigil: S.rW.toString(), usdc: S.rU.toString(),
@@ -346,27 +346,8 @@
   }
 
   async function go() {
-    if (!S.acct) { return connect(); }
-    var buying = S.v > 0, amt = amountOfSlider();
-    var tokenIn  = buying ? USDC : WSIG;
-    var tokenOut = buying ? WSIG : USDC;
-    var units = toUnits(amt, buying ? D_USDC : D_WSIG);
-    if (units === 0n) { msg('amount rounds to zero', '#fbbf24'); return; }
-    S.busy = true; paint();
-    try {
-      msg('approving ' + (buying ? 'USDC' : 'wSIGIL') + ' to the router…', '#6df3ff');
-      await sendTx(tokenIn, SEL_APPROVE + pad32(ROUTER) + pad32(units));
-      var dl = BigInt(Math.floor(Date.now() / 1000) + 900);
-      msg(buying ? 'buying wSIGIL…' : 'selling wSIGIL…', '#6df3ff');
-      await sendTx(ROUTER, SEL_SWAP + pad32(units) + pad32(0n) + pad32(160n) + pad32(S.acct) +
-                           pad32(dl) + pad32(2n) + pad32(tokenIn) + pad32(tokenOut));
-      msg('swap complete — re-reading the pool', '#00e0c6');
-      S.v = 0; var rg = document.getElementById('wmRange'); if (rg) rg.value = 0;
-    } catch (e) {
-      msg('✗ ' + ((e && e.message) || String(e)), '#ff6b6b');
-    }
-    S.busy = false;
-    await refresh();
+    if (window.openSwap) { window.openSwap(); return; }
+    throw new Error('Exchange interface is not loaded. Reload the wallet.');
   }
 
   /* ── dashboard bridge card ────────────────────────────────────────────── */
@@ -392,7 +373,7 @@
     }
     var out = [];
     if (S.supply !== null) {
-      out.push('<b style="color:#00e0c6">' + fmtAmt(S.supply, D_WSIG, 4) + '</b> wSIGIL minted');
+      out.push('<b style="color:#00e0c6">' + fmtAmt(S.supply, D_WSIG, 4) + '</b> WSIGIL3 supply (market token)');
     }
     if (S.ok) {
       out.push('pool <b style="color:#6df3ff">' + fmtAmt(S.rW, D_WSIG, 4) + '</b> wSIGIL / <b style="color:#6df3ff">' +

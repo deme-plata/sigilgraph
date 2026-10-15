@@ -361,7 +361,7 @@
       token transfers) that never passes through this origin. */
   async function getLogs(filter) {
     var body = { jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [filter] };
-    if (state.provider) {
+    if (state.provider && await req('eth_chainId').catch(function () { return null; }) === POLYGON_PARAMS.chainId) {
       try { return await req('eth_getLogs', [filter]); } catch (e) { /* fall through */ }
     }
     var lastErr = null;
@@ -427,7 +427,7 @@
    *
    * SPENDS REAL TOKENS. The caller confirms first.
    */
-  async function uniSwap(amountIn, path, slippageBps, onStep) {
+  async function uniSwap(amountIn, path, slippageBps, onStep, reviewed) {
     if (!state.account) await connect();
     if (!(await ensurePolygon())) throw new Error('MetaMask must be on Polygon mainnet.');
     var amt = BigInt(amountIn);
@@ -436,7 +436,13 @@
     var outs = await uniQuote(amt, path);
     var expected = outs[outs.length - 1];
     if (expected <= 0n) throw new Error('The pool cannot fill that trade.');
-    var minOut = expected * BigInt(10000 - (slippageBps || 100)) / 10000n;
+    var bps = slippageBps == null ? 100 : Number(slippageBps);
+    if (!Number.isInteger(bps) || bps < 0 || bps > 500) throw new Error('Slippage must be between 0 and 5%.');
+    var account = state.account;
+    if (reviewed && reviewed.account !== account) throw new Error('Wallet changed. Review a fresh quote.');
+    if (reviewed && Date.now() - reviewed.quotedAt > 30000) throw new Error('Quote expired. Review a fresh quote.');
+    var minOut = reviewed ? BigInt(reviewed.minOut) : expected * BigInt(10000 - bps) / 10000n;
+    if (minOut <= 0n || expected < minOut) throw new Error('Quote moved below the reviewed minimum. Refresh and review again.');
 
     var approveTx = null;
     var cur = BigInt(await rawCall(path[0], SEL_ALLOWANCE + a32(state.account) + a32(UNI_V2_ROUTER)));
@@ -455,6 +461,11 @@
       await waitMined(approveTx);
     }
 
+    // Approval may take minutes. Keep the reviewed floor and recheck wallet + route
+    // before requesting the second signature; never silently lower minimum output.
+    if (state.account !== account || !(await ensurePolygon())) throw new Error('Wallet or network changed. Review the swap again.');
+    var latest = await uniQuote(amt, path);
+    if (latest[latest.length - 1] < minOut) throw new Error('Price moved below your minimum after approval. Refresh the quote; the approval may already be confirmed.');
     if (onStep) onStep('swap');
     var deadline = Math.floor(Date.now() / 1000) + 900;
     var data = SEL_SWAP_EXACT + n32(amt) + n32(minOut) + n32(160) +
@@ -485,7 +496,7 @@
 
   async function rawCall(to, data) {
     var body = { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: to, data: data }, 'latest'] };
-    if (state.provider) {
+    if (state.provider && await req('eth_chainId').catch(function () { return null; }) === POLYGON_PARAMS.chainId) {
       try { return await req('eth_call', [{ to: to, data: data }, 'latest']); } catch (e) { /* fall through to public RPC */ }
     }
     var lastErr = null;

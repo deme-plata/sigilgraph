@@ -79,7 +79,7 @@ body:not(.view-desktop){display:grid;place-items:center}
 .coinpop{position:absolute;left:14px;top:-4px;font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;color:#22e07a;text-shadow:0 0 14px rgba(34,224,122,.6);pointer-events:none;animation:coinPop 2.6s ease-out forwards;white-space:nowrap;z-index:50}
 .balance{position:relative}.dhero{position:relative}
 .balance .sub{margin-top:6px;font-family:'JetBrains Mono';font-size:12px;color:var(--teal)}.balance .sub b{color:var(--cyan)}
-.actions{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 8px 4px}.actions .act{padding:14px 4px;gap:8px}.actions .act .lic{width:42px;height:42px}
+.actions{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:18px 8px 4px}.actions .act{padding:14px 4px;gap:8px}.actions .act .lic{width:42px;height:42px}
 .list{margin:0 8px;display:flex;flex-direction:column;gap:8px;overflow:auto}
 .expand{margin-left:auto;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.4);color:var(--gold);height:30px;border-radius:9px;cursor:pointer;font-size:12px;font-weight:700;font-family:'Rajdhani';display:flex;align-items:center;gap:6px;padding:0 11px}.expand:hover{background:rgba(251,191,36,.2)}
 .nav{margin-top:auto;display:grid;grid-template-columns:repeat(4,1fr);padding:12px 6px 4px;border-top:1px solid var(--line)}
@@ -233,7 +233,6 @@ body.view-desktop .desktop{display:flex}
     <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
     <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
     <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
-    <div class="act" onclick="makeAllPrivate()" title="Turn the whole transparent balance into spendable private coin"><i class="lic" data-lucide="shield-check"></i><span class="t">Private</span></div>
   </div>
   <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
@@ -334,7 +333,6 @@ body.view-desktop .desktop{display:flex}
           <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
           <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
           <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
-    <div class="act" onclick="makeAllPrivate()" title="Turn the whole transparent balance into spendable private coin"><i class="lic" data-lucide="shield-check"></i><span class="t">Private</span></div>
         </div>
       </div>
       <div class="bh-wrap" id="bhWrapDesk" data-bh="1"></div>

@@ -594,8 +594,10 @@ const ONE_ACTION_SEND_JS: &str = r##"
     var addr = (el('uniAddr').value||'').trim().toLowerCase();
     var amtS = (el('uniAmt').value||'').trim();
     msg('');
+    // Payment codes carry receiving keys; preserve the browser's keyed-payment path.
+    if(!/^[0-9a-f]{64}$/.test(addr) && window.sigilParsePayee && window.sigilParsePayee(addr) && typeof legacy === 'function') return legacy.apply(this, arguments);
     if(!/^[0-9a-f]{64}$/.test(addr)){ msg("Enter the recipient's 64-character SIGIL address first.", '#ff8a8a'); return; }
-    if(!/^\d+(\.\d{1,8})?$/.test(amtS) || Number(amtS) <= 0){ msg('Enter an amount greater than 0 (up to 8 decimals).', '#ff8a8a'); return; }
+    if(!(new RegExp('^\\d+(\\.\\d{1,'+DP+'})?$')).test(amtS) || Number(amtS) <= 0){ msg('Enter an amount greater than 0 (up to '+DP+' decimals).', '#ff8a8a'); return; }
 
     var from = (window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ msg('No wallet address loaded.', '#ff8a8a'); return; }
@@ -821,6 +823,9 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     // Exchange UI 2026-10-15 r2: reviewed minimum + submission latches.
     if names(safe, "sigil-address-book.js") {
         return Some((include_str!("../../../gui/sigil-address-book.js").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-send.js") {
+        return Some((include_str!("../../../gui/sigil-send.js").as_bytes().to_vec(), JS));
     }
     if names(safe, "sigil-exchange.js") {
         return Some((include_str!("../../../gui/sigil-exchange.js").as_bytes().to_vec(), JS));

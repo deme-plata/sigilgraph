@@ -230,8 +230,11 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
                 } else {
                     Span::styled(format!("rate {} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
                 },
+                // 10.4.35: the second rate is the DOWNLOAD rate in a full sync and the chain HEAD
+                // rate in light-monitor/snap mode (blocks_synced tracks the tip there) — 10.4.34
+                // called it "chain" in both, which read as the network's rate during a full sync.
                 if catching_up {
-                    dim(&format!("  · chain {} blk/s   eta ", group(kf_rate.round() as u64)))
+                    dim(&format!("  · {} {} blk/s   eta ", if s.light_mode { "head" } else { "download" }, group(kf_rate.round() as u64)))
                 } else { dim(" ~kalman   eta ") },
                 Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),

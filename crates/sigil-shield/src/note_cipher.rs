@@ -363,9 +363,7 @@ pub fn seal_note(
 ) -> Result<NoteCiphertext, CipherError> {
     let pk = flux_swarm_secret::parse_pubkey_hex(&recipient.pk_enc)
         .map_err(|e| CipherError::BadEncKey(e.to_string()))?;
-    let env = flux_swarm_secret::seal(&plaintext.encode(), &pk);
-    let json = serde_json::to_string(&env).map_err(|_| CipherError::MalformedPlaintext)?;
-    Ok(NoteCiphertext(json))
+    seal_tagged(&plaintext.encode(), &pk)
 }
 
 /// Seal a note in the legacy 24-byte layout — for outputs that are NOT messages.
@@ -384,9 +382,71 @@ pub fn seal_note_compact(
     }
     let pk = flux_swarm_secret::parse_pubkey_hex(&recipient.pk_enc)
         .map_err(|e| CipherError::BadEncKey(e.to_string()))?;
-    let env = flux_swarm_secret::seal(&plaintext.encode_v1(), &pk);
+    seal_tagged(&plaintext.encode_v1(), &pk)
+}
+
+/// Seal, and carry a one-byte VIEW TAG as `"vt"` beside the envelope's own fields.
+///
+/// 1M-users step 2 (2026-10-16). Finding your payments used to mean downloading every
+/// ciphertext (~1.2 KB each) and trial-decrypting it. With the tag a wallet downloads
+/// only `(eph_pk, vt)` per note — 33 bytes, [`tag_view`] — and fetches a full ciphertext
+/// only when the tag matches, which a stranger's note does 1 time in 256. The tag is a
+/// separate KDF output of the same X25519 secret (`flux_swarm_secret::seal_with_view_tag`),
+/// so it says nothing about the AEAD key, and to anyone without the recipient's key it is
+/// a uniform byte. An older reader ignores the unknown field and opens the note as before;
+/// the ciphertext is opaque to consensus (any string the door admits is stored as is).
+fn seal_tagged(pt: &[u8], pk: &flux_swarm_secret::X25519PublicKey) -> Result<NoteCiphertext, CipherError> {
+    let (env, tag) = flux_swarm_secret::seal_with_view_tag(pt, pk);
     let json = serde_json::to_string(&env).map_err(|_| CipherError::MalformedPlaintext)?;
-    Ok(NoteCiphertext(json))
+    // `{"v":1,…,"ct":"…"}` → `{"v":1,…,"ct":"…","vt":"ab"}`: the envelope's own bytes and
+    // field order untouched, one field appended.
+    let body = json.strip_suffix('}').ok_or(CipherError::MalformedPlaintext)?;
+    Ok(NoteCiphertext(format!("{body},\"vt\":\"{tag:02x}\"}}")))
+}
+
+/// What a scanner needs from one published ciphertext: its one-time key and, when the
+/// sender attached one, its view tag. 33 bytes instead of the whole envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TagView {
+    pub eph_pk: [u8; 32],
+    pub vt: Option<u8>,
+}
+
+#[derive(Deserialize)]
+struct TagFields {
+    eph_pk: String,
+    #[serde(default)]
+    vt: Option<String>,
+}
+
+/// Read `(eph_pk, vt)` out of a published ciphertext. `None` for anything that is not an
+/// X25519 sealed envelope (junk, or a future suite) — a scanner then falls back to a full
+/// trial-decrypt, exactly as it does for an untagged note.
+pub fn tag_view(ct: &str) -> Option<TagView> {
+    let f: TagFields = serde_json::from_str(ct).ok()?;
+    let k = hex::decode(f.eph_pk).ok()?;
+    let eph_pk: [u8; 32] = k.as_slice().try_into().ok()?;
+    let vt = match f.vt {
+        None => None,
+        Some(h) => {
+            let b = hex::decode(h).ok()?;
+            if b.len() != 1 {
+                return None;
+            }
+            Some(b[0])
+        }
+    };
+    Some(TagView { eph_pk, vt })
+}
+
+/// Could this note be ours? `false` only for a TAGGED note whose tag is not the one our
+/// key derives — then it is certainly not ours. Untagged notes (sealed before view tags)
+/// always answer `true`: only the full trial-decrypt can tell.
+pub fn may_be_ours(view: &TagView, id: &flux_swarm_secret::SecretIdentity) -> bool {
+    match view.vt {
+        None => true,
+        Some(t) => flux_swarm_secret::view_tag(id, &flux_swarm_secret::X25519PublicKey::from(view.eph_pk)) == t,
+    }
 }
 
 /// Try to open a ciphertext with our encryption identity.
@@ -399,6 +459,12 @@ pub fn try_open_note(
     ct: &NoteCiphertext,
     id: &flux_swarm_secret::SecretIdentity,
 ) -> Result<NotePlaintext, CipherError> {
+    // A tagged note that is not ours is ruled out before the AEAD (one X25519 either way).
+    if let Some(view) = tag_view(&ct.0) {
+        if !may_be_ours(&view, id) {
+            return Err(CipherError::NotForUs);
+        }
+    }
     let env: flux_swarm_secret::SealedEnvelope =
         serde_json::from_str(&ct.0).map_err(|_| CipherError::NotForUs)?;
     let pt = flux_swarm_secret::open(&env, id).map_err(|_| CipherError::NotForUs)?;
@@ -618,5 +684,49 @@ mod tests {
         let mut b = NotePlaintext::new(1, BaseElement::new(1)).encode();
         b[24..26].copy_from_slice(&((MEMO_LEN as u16) + 1).to_le_bytes());
         assert_eq!(NotePlaintext::decode(&b).unwrap_err(), CipherError::MalformedPlaintext);
+    }
+
+    #[test]
+    fn a_sealed_note_carries_a_view_tag_its_recipient_matches() {
+        let alice = enc_identity_from_seed(&[1; 32]);
+        let bob = enc_identity_from_seed(&[2; 32]);
+        let ct = seal_note(&NotePlaintext::new(42, BaseElement::new(7)), &addr(&alice, 1)).unwrap();
+        let v = tag_view(&ct.0).expect("tagged envelope");
+        assert!(v.vt.is_some());
+        assert!(may_be_ours(&v, &alice));
+        assert_eq!(try_open_note(&ct, &alice).unwrap().value, 42);
+        // Bob: either the tag rules it out or the AEAD does — never opened.
+        assert_eq!(try_open_note(&ct, &bob), Err(CipherError::NotForUs));
+    }
+
+    #[test]
+    fn an_old_reader_opens_a_tagged_note_and_a_new_reader_opens_an_untagged_one() {
+        let alice = enc_identity_from_seed(&[3; 32]);
+        let pt = NotePlaintext::new(9, BaseElement::new(11));
+        // tagged → the envelope parser every released wallet uses (unknown field ignored)
+        let tagged = seal_note(&pt, &addr(&alice, 1)).unwrap();
+        let env: flux_swarm_secret::SealedEnvelope = serde_json::from_str(&tagged.0).unwrap();
+        assert!(flux_swarm_secret::open(&env, &alice).is_ok());
+        // untagged (sealed before 2026-10-16) → still opens, and the scanner must fetch it
+        let pk = flux_swarm_secret::parse_pubkey_hex(&alice.public_hex()).unwrap();
+        let old = NoteCiphertext(serde_json::to_string(&flux_swarm_secret::seal(&pt.encode(), &pk)).unwrap());
+        let v = tag_view(&old.0).unwrap();
+        assert_eq!(v.vt, None);
+        assert!(may_be_ours(&v, &enc_identity_from_seed(&[4; 32])), "untagged = cannot rule out");
+        assert_eq!(try_open_note(&old, &alice).unwrap().value, 9);
+    }
+
+    #[test]
+    fn the_tag_adds_ten_bytes_to_the_envelope() {
+        let alice = enc_identity_from_seed(&[5; 32]);
+        let pt = NotePlaintext::new(1, BaseElement::new(1));
+        let pk = flux_swarm_secret::parse_pubkey_hex(&alice.public_hex()).unwrap();
+        let untagged = serde_json::to_string(&flux_swarm_secret::seal(&pt.encode(), &pk)).unwrap();
+        let tagged = seal_note(&pt, &addr(&alice, 1)).unwrap().0;
+        assert_eq!(tagged.len(), untagged.len() + 10, r#"exactly ,"vt":"xx""#);
+        assert!(tagged.len() <= MAX_NOTE_CIPHERTEXT_LEN);
+        assert!(tag_view("not json").is_none());
+        assert!(tag_view(r#"{"eph_pk":"00","ct":""}"#).is_none(), "short key refused");
+        assert!(tag_view(&format!(r#"{{"eph_pk":"{}","vt":"abcd"}}"#, "00".repeat(32))).is_none(), "2-byte tag refused");
     }
 }

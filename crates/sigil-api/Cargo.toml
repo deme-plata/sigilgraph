@@ -109,3 +109,6 @@ flux-search = { path = "../../../flux/crates/flux-search" }
 [dev-dependencies]
 rand = { workspace = true }
 flate2 = "1"   # decode the gzip the compression layer emits, in the test that pins it
+# tests/view_tags.rs builds notes the way wallets do (same versions sigil-shield uses: no new compile)
+winterfell = "0.9"
+flux-swarm-secret = { path = "../../../flux/crates/flux-swarm-secret" }

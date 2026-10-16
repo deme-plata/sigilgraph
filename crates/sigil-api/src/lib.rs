@@ -1017,12 +1017,13 @@ pub async fn shielded_leaves_handler(
     // without a second request.
     let total = leaves_all.len() as u64;
     let from = q.from.unwrap_or(0).min(total);
-    let leaves = &leaves_all[from as usize..];
+    let to = q.count.map_or(total, |c| from.saturating_add(c).min(total));
+    let leaves = &leaves_all[from as usize..to as usize];
     let want_cts = q.ciphertexts.map(|v| v != 0).unwrap_or(true);
     let ciphertexts: &[Option<String>] = if !want_cts {
         &[]
     } else if (from as usize) < cts_all.len() {
-        &cts_all[from as usize..]
+        &cts_all[from as usize..(to as usize).min(cts_all.len())]
     } else {
         &[]
     };
@@ -1043,6 +1044,96 @@ pub async fn shielded_leaves_handler(
         "capacity": sigil_state::shielded::POOL_CAPACITY,
         "ts_ms": now_ms(),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShieldedTagsQuery {
+    pub epoch: Option<u32>,
+    pub from: Option<u64>,
+    pub count: Option<u64>,
+}
+
+/// Magic of a `/v1/shielded/tags` reply: "SGT1" = SIGIL view tags, framing v1.
+pub const SHIELDED_TAGS_MAGIC: [u8; 4] = *b"SGT1";
+
+/// Bytes per note in a `/v1/shielded/tags` reply.
+pub const SHIELDED_TAG_RECORD_LEN: usize = 34;
+
+/// The scan view of the pool: per note only what decides "could this be mine?".
+///
+/// 1M-users step 2 (2026-10-16). `/v1/shielded/leaves` serves every delivery ciphertext
+/// (~1.2 KB of JSON each) because finding your payments meant trial-decrypting them all.
+/// With view tags a wallet needs 34 bytes per note — 35× less — runs one X25519 per note
+/// (`sigil_shield::note_cipher::may_be_ours`) and then fetches full ciphertexts only for the
+/// ~1 in 256 that match, with `/v1/shielded/leaves?from=&count=`.
+///
+/// Binary, little-endian, `application/octet-stream`:
+///
+/// ```text
+///   "SGT1" ‖ epoch u32 ‖ from u64 ‖ total u64 ‖ n u32 ‖ n × { kind u8 ‖ vt u8 ‖ eph_pk [32] }
+///   kind 0 = no ciphertext at that position (nothing to find)
+///        1 = ciphertext without a view tag (sealed before tags): fetch and trial-decrypt it
+///        2 = tagged: fetch it only if may_be_ours() says so
+///        3 = not a readable X25519 envelope: fetch and let the wallet decide
+/// ```
+#[flux_api_macros::api(GET, "/v1/shielded/tags", summary = "Per-note one-time key + view tag (34 B/note): scan the pool without downloading ciphertexts")]
+pub async fn shielded_tags_handler(
+    State(st): State<AppState>,
+    Query(q): Query<ShieldedTagsQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let guard = match st.state.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let pool = guard.shielded();
+    let live = pool.epoch();
+    let want = q.epoch.unwrap_or(live);
+    let (total, cts_all): (usize, &[Option<String>]) = if want == live {
+        (pool.notes().len(), pool.ciphertexts())
+    } else {
+        match pool.archive().get(want as usize) {
+            Some(a) => (a.notes.len(), &a.ciphertexts[..]),
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("no such epoch {want}; live epoch is {live}"),
+                    "epoch": live,
+                }))
+                .into_response();
+            }
+        }
+    };
+    let total = total as u64;
+    let from = q.from.unwrap_or(0).min(total);
+    let to = q.count.map_or(total, |c| from.saturating_add(c).min(total));
+    let n = (to - from) as usize;
+    let mut out = Vec::with_capacity(28 + n * SHIELDED_TAG_RECORD_LEN);
+    out.extend_from_slice(&SHIELDED_TAGS_MAGIC);
+    out.extend_from_slice(&want.to_le_bytes());
+    out.extend_from_slice(&from.to_le_bytes());
+    out.extend_from_slice(&total.to_le_bytes());
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    for i in from as usize..to as usize {
+        let rec = match cts_all.get(i).and_then(|c| c.as_deref()) {
+            None => [0u8; SHIELDED_TAG_RECORD_LEN],
+            Some(ct) => {
+                let mut r = [0u8; SHIELDED_TAG_RECORD_LEN];
+                match sigil_shield::note_cipher::tag_view(ct) {
+                    Some(v) => {
+                        r[0] = if v.vt.is_some() { 2 } else { 1 };
+                        r[1] = v.vt.unwrap_or(0);
+                        r[2..].copy_from_slice(&v.eph_pk);
+                    }
+                    None => r[0] = 3,
+                }
+                r
+            }
+        };
+        out.extend_from_slice(&rec);
+    }
+    drop(guard);
+    ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], out).into_response()
 }
 
 /// Every spent nullifier — what a wallet needs to net spends out of its balance.
@@ -1099,6 +1190,11 @@ pub struct ShieldedLeavesQuery {
     /// the displayed balance simply stopped moving. Since positions are append-only and
     /// stable, a client that has already scanned up to N only needs `[N, len)`.
     pub from: Option<u64>,
+    /// Serve at most this many leaves from `from` (2026-10-16, view tags). A wallet whose
+    /// `/v1/shielded/tags` scan matched a note fetches just that block — e.g. the 64-note
+    /// bucket around it, so the node sees a block, not a single position — instead of the
+    /// whole tail. Omitted = to the end, as before.
+    pub count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2473,6 +2569,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/anchor", get(shielded_anchor_handler))
         .route("/v1/shielded/nullifiers", get(shielded_nullifiers_handler))
         .route("/v1/shielded/leaves", get(shielded_leaves_handler))
+        .route("/v1/shielded/tags", get(shielded_tags_handler))
         .route("/v1/shielded/has", get(shielded_has_commitment_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))

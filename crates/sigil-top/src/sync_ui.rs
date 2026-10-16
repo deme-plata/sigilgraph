@@ -61,7 +61,13 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     // commit rate (s.commit_rate = the shown ⚡/s commit) is live -> fall back to it so the
     // panel never shows a false rate 0 blk/s during an ACTIVE sync (it looked dead).
     let kf_rate = if kf_rate >= 1.0 { kf_rate } else { s.commit_rate.max(0.0) };
-    let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
+    // 10.4.34: while the verified spine is catching up, the ETA is the gap ÷ how fast the SPINE
+    // climbs. The head rate (kf_rate) follows the network tip — ~8 blk/s on g2 — and divided
+    // a 470k gap by it: "8 blk/s · eta 16 h" for a spine really climbing ~650 blk/s (~12 min).
+    let verify_rate = spine_rate(&app.spine_samples).unwrap_or(0.0);
+    let catching_up = !caught && verify_rate >= 1.0;
+    let eta_rate = if catching_up { verify_rate } else { kf_rate };
+    let eta = if synced || eta_rate < 1.0 { f64::INFINITY } else { gap as f64 / eta_rate };
     // Turbo continuity score (invented for continuous high download bandwidth)
     let cont = s.turbo_continuity.continuity_score * 100.0;
 
@@ -219,8 +225,15 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             ])
         } else {
             Line::from(vec![
-                dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-                dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                if catching_up {
+                    Span::styled(format!("verifying {} blk/s", group(verify_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled(format!("rate {} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
+                },
+                if catching_up {
+                    dim(&format!("  · chain {} blk/s   eta ", group(kf_rate.round() as u64)))
+                } else { dim(" ~kalman   eta ") },
+                Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
             ])
         },
@@ -1187,5 +1200,74 @@ mod bar_slot_tests {
         }
         // ⚡ renders two columns wide; counting chars would have made this 1 column short.
         assert_eq!(display_width("⚡"), 2);
+    }
+}
+
+/// 10.4.34: keep a 30 s trail of the verified spine height. A one-sample leap of more than
+/// 50,000 heights is a snap (checkpoint / re-anchor), not a rate — the trail restarts there,
+/// the same rule the head rate uses for its catch-up jumps.
+pub(crate) fn record_spine_sample(
+    trail: &mut std::collections::VecDeque<(std::time::Instant, u64)>,
+    now: std::time::Instant,
+    spine: u64,
+) {
+    if let Some(&(_, last)) = trail.back() {
+        if spine < last || spine - last > 50_000 {
+            trail.clear();
+        }
+    }
+    trail.push_back((now, spine));
+    while trail.len() > 1 && now.duration_since(trail[0].0).as_secs_f64() > 30.0 {
+        trail.pop_front();
+    }
+}
+
+/// Blocks per second the verified spine climbed over its trail; `None` until it spans 3 s.
+pub(crate) fn spine_rate(trail: &std::collections::VecDeque<(std::time::Instant, u64)>) -> Option<f64> {
+    let (&(t0, b0), &(t1, b1)) = (trail.front()?, trail.back()?);
+    let dt = t1.duration_since(t0).as_secs_f64();
+    (dt >= 3.0).then(|| b1.saturating_sub(b0) as f64 / dt)
+}
+
+#[cfg(test)]
+mod spine_rate_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_rate_is_how_fast_the_verified_height_climbs() {
+        // Viktor's two screenshots: 42,888,193 → 42,908,193 in 31 s ≈ 645 blk/s.
+        let mut t = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        record_spine_sample(&mut t, t0, 42_888_193);
+        assert_eq!(spine_rate(&t), None, "one sample is not a rate");
+        record_spine_sample(&mut t, t0 + Duration::from_secs(31), 42_908_193);
+        let r = spine_rate(&t).unwrap();
+        assert!((r - 645.2).abs() < 1.0, "{r}");
+        // ETA for the remaining 470,288 blocks: ~12 min, not 16 h.
+        assert!(((470_288.0 / r) / 60.0 - 12.1).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_snap_or_a_reset_restarts_the_trail() {
+        let mut t = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        record_spine_sample(&mut t, t0, 100);
+        record_spine_sample(&mut t, t0 + Duration::from_secs(5), 2_000_000); // checkpoint snap
+        assert_eq!(t.len(), 1);
+        record_spine_sample(&mut t, t0 + Duration::from_secs(10), 1_000); // re-anchor lower
+        assert_eq!(t.len(), 1);
+        assert_eq!(spine_rate(&t), None);
+    }
+
+    #[test]
+    fn the_trail_keeps_thirty_seconds() {
+        let mut t = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        for i in 0..100u64 {
+            record_spine_sample(&mut t, t0 + Duration::from_secs(i), i * 650);
+        }
+        assert!(t.len() <= 32);
+        assert!((spine_rate(&t).unwrap() - 650.0).abs() < 1e-9);
     }
 }

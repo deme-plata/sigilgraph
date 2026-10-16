@@ -377,8 +377,8 @@ pub fn build_spend_2_v7(
     })
 }
 
-/// The WIDE merge (2026-10-16): K = 3..=`spend_full_v7_k::MAX_INS` notes of this wallet in one
-/// proof (`spend_full_v7_k`). Two inputs stay on [`build_spend_2_v7`] — the node routes arity 2 to
+/// The WIDE merge (2026-10-16): K notes of this wallet in one proof (`spend_full_v7_k`), K in
+/// `ACCEPTED_WIDE` (4) — the only wide size the node accepts. Two inputs stay on [`build_spend_2_v7`] — the node routes arity 2 to
 /// the deployed `spend_full_v7_2`, whose constraint order differs, so a K = 2 wide proof would
 /// not verify there. Same output rules as the two-input form.
 pub fn build_spend_k_v7(
@@ -390,11 +390,11 @@ pub fn build_spend_k_v7(
     public_value: u64,
     outs_spec: &[(u64, Digest4)],
 ) -> Result<SpendBundleV7, SpendBuildErrorV7> {
-    use crate::spend_full_v7_k::{build_spend_full_v7k_trace, SpendFullV7kProver, MAX_INS};
+    use crate::spend_full_v7_k::{build_spend_full_v7k_trace, SpendFullV7kProver, ACCEPTED_WIDE};
     if slots.len() == 2 {
         return build_spend_2_v7(account, store, leaves, capacity, [slots[0], slots[1]], public_value, outs_spec);
     }
-    if slots.len() < 3 || slots.len() > MAX_INS {
+    if !ACCEPTED_WIDE.contains(&slots.len()) {
         return Err(SpendBuildErrorV7::NoSuitableNote);
     }
     if outs_spec.len() != N_OUTS {
@@ -573,34 +573,36 @@ mod tests {
         assert_eq!(store.balance(), change as u128);
     }
 
-    /// WIDE MERGE: five landed notes → one payment + change in ONE proof (`spend_full_v7_k`),
-    /// accepted at the wire by arity; all five end up spent; a repeated slot is refused.
+    /// WIDE MERGE: four landed notes → one payment + change in ONE proof (`spend_full_v7_k`),
+    /// accepted at the wire by arity; all four end up spent; a repeated slot / a 3-note set refused.
     #[test]
     #[cfg_attr(debug_assertions, ignore)]
-    fn five_notes_merge_in_one_proof_and_verify_at_the_wire() {
+    fn four_notes_merge_in_one_proof_and_verify_at_the_wire() {
         let alice = AccountV7::from_seed([0xA7; 32]);
         let bob = AccountV7::from_seed([0xB7; 32]);
         let mut store = NoteStoreV7::new();
         let mut leaves: Vec<[u8; 32]> = vec![[1u8; 32]];
-        for v in [1_000_000u64, 2_000_000, 3_000_000, 4_000_000, 5_000_000] {
+        for v in [1_000_000u64, 2_000_000, 3_000_000, 4_000_000] {
             leaves.push(shield_note_v7(&alice, &mut store, v).unwrap().cm);
             leaves.push([2u8; 32]);
         }
-        assert_eq!(store.scan_owned(&alice, &leaves), 5);
-        let change = 15_000_000 - 14_000_000 - FEE;
-        let bundle = build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 2, 3, 4], FEE,
-            &[(14_000_000, bob.owner_pk()), (change, alice.owner_pk())]).unwrap();
-        assert_eq!(bundle.extra_nullifiers.len(), 4);
+        assert_eq!(store.scan_owned(&alice, &leaves), 4);
+        let change = 10_000_000 - 9_000_000 - FEE;
+        let bundle = build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 2, 3], FEE,
+            &[(9_000_000, bob.owner_pk()), (change, alice.owner_pk())]).unwrap();
+        assert_eq!(bundle.extra_nullifiers.len(), 3);
         let mut nfs = vec![bundle.nullifier];
         nfs.extend_from_slice(&bundle.extra_nullifiers);
-        verify_spend_wire_v7(&bundle.anchor, &nfs, FEE as u128, &bundle.cm_outs, &bundle.proof).expect("a 5-note merge verifies at the wire");
-        assert!(verify_spend_wire_v7(&bundle.anchor, &nfs[..4], FEE as u128, &bundle.cm_outs, &bundle.proof).is_err(), "fewer nullifiers = another shape");
-        assert!(matches!(build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 1], FEE,
+        verify_spend_wire_v7(&bundle.anchor, &nfs, FEE as u128, &bundle.cm_outs, &bundle.proof).expect("a 4-note merge verifies at the wire");
+        assert!(verify_spend_wire_v7(&bundle.anchor, &nfs[..2], FEE as u128, &bundle.cm_outs, &bundle.proof).is_err(), "fewer nullifiers = another shape");
+        assert!(matches!(build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 1, 2], FEE,
             &[(1, bob.owner_pk()), (1, alice.owner_pk())]), Err(SpendBuildErrorV7::SameNoteTwice)));
+        assert!(matches!(build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 2], FEE,
+            &[(1, bob.owner_pk()), (1, alice.owner_pk())]), Err(SpendBuildErrorV7::NoSuitableNote)), "3 is not an accepted size");
         leaves.extend_from_slice(&bundle.cm_outs);
         assert_eq!(store.scan_owned(&alice, &leaves), 1);
         let spent: BTreeSet<[u8; 32]> = nfs.iter().map(|n| scoped_nullifier_v7(1, *n)).collect();
-        assert_eq!(store.mark_spent(&alice, &spent, 1), 5);
+        assert_eq!(store.mark_spent(&alice, &spent, 1), 4);
         assert_eq!(store.balance(), change as u128);
     }
 

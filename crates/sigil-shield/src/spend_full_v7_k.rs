@@ -47,8 +47,14 @@ pub use crate::spend_full_v7::OutputV7;
 use crate::spend_full_v7::{DEPTH, N_OUTS, RANGE_BITS, REAL_LEN, TRACE_LEN};
 use crate::zk_mask::{exemptions_for, fill_random_row, padded_len, zk_rows_for, HidingProver, Secret};
 
-/// The widest merge this module proves. The node accepts only the arities it is configured for.
-pub const MAX_INS: usize = 16;
+/// The widest merge this layout can prove: winterfell 0.9 caps a trace at 255 columns, and
+/// width(7) = 232 while width(8) = 263 (measured 2026-10-16 — the bench panicked at K = 8). Wider
+/// needs inputs laid out down the rows instead of across the columns.
+pub const MAX_INS: usize = 7;
+
+/// The wide-merge arities the NODE accepts (Viktor 2026-10-16: "go ahead with k=4 on r1"). One
+/// size, not 3..=7: every accepted input count is visible on chain and splits the anonymity set.
+pub const ACCEPTED_WIDE: &[usize] = &[4];
 
 const STATE: usize = 12;
 const SEG: usize = 8;
@@ -1013,7 +1019,8 @@ mod tests {
         assert_eq!(lane(1), 67);
         assert_eq!(col_inv(2, 0, 1), 91);
         assert_eq!(n_constraints(2), 98 + 86 + 76);
-        assert_eq!((width(4), width(8), width(16)), (145, 263, 547));
+        assert_eq!((width(4), width(7), width(8)), (145, 232, 263));
+        assert!(width(MAX_INS) <= 255 && width(MAX_INS + 1) > 255, "MAX_INS is the 255-column cap");
     }
 
     #[test]
@@ -1136,9 +1143,13 @@ mod tests {
         let nfs: Vec<[u8; 32]> = ns.iter().zip(&ps).map(|(n, &p)| n.nullifier(p as u64).to_wire()).collect();
         let cms = [o[0].commitment().to_wire(), o[1].commitment().to_wire()];
         verify_spend_wire_v7(&tree.root().to_wire(), &nfs, pv as u128, &cms, &bytes).expect("a 4-input merge through the wire");
-        match verify_spend_wire_v7(&tree.root().to_wire(), &nfs[..3], pv as u128, &cms, &bytes) {
-            Err(WireVerifyError::WrongTraceWidth { expected, got }) => { assert_eq!(expected, width(3)); assert_eq!(got, width(4)); }
+        // claimed as a 2-input merge: the arity is accepted, the shape is not
+        match verify_spend_wire_v7(&tree.root().to_wire(), &nfs[..2], pv as u128, &cms, &bytes) {
+            Err(WireVerifyError::WrongTraceWidth { expected, got }) => { assert_eq!(expected, width(2)); assert_eq!(got, width(4)); }
             other => panic!("expected a width refusal, got {other:?}"),
         }
+        // claimed as 3 inputs: not an accepted arity at all
+        assert!(matches!(verify_spend_wire_v7(&tree.root().to_wire(), &nfs[..3], pv as u128, &cms, &bytes),
+            Err(WireVerifyError::UnsupportedInputCount { got: 3 })));
     }
 }

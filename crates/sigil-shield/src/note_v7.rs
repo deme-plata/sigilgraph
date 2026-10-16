@@ -470,7 +470,7 @@ impl TryFrom<u8> for PoolGeneration {
 /// otherwise be a process abort inside `Air::new`), and only then does any cryptography run.
 ///
 /// v7 input forms: one nullifier is the single spend, two is the merge (`spend_full_v7_2`),
-/// 3..=`spend_full_v7_k::MAX_INS` is the wide merge (`spend_full_v7_k`, 2026-10-16). The merge
+/// the sizes in `spend_full_v7_k::ACCEPTED_WIDE` (4) are the wide merge (`spend_full_v7_k`, 2026-10-16). The merge
 /// circuits refuse one note fed in twice; a repeated nullifier is still refused here before
 /// any proof is parsed.
 pub fn verify_spend_wire_v7(
@@ -482,15 +482,18 @@ pub fn verify_spend_wire_v7(
 ) -> Result<(), WireVerifyError> {
     use crate::spend_full_v7::{verify_spend_full_v7, SpendFullV7PublicInputs, N_OUTS, TRACE_LEN, WIDTH};
     use crate::spend_full_v7_2::{verify_spend_full_v7x2, SpendFullV7x2PublicInputs, WIDTH as WIDTH_2};
-    use crate::spend_full_v7_k::{verify_spend_full_v7k, width as width_k, SpendFullV7kPublicInputs, MAX_INS};
+    use crate::spend_full_v7_k::{verify_spend_full_v7k, width as width_k, SpendFullV7kPublicInputs, ACCEPTED_WIDE};
 
     if cm_outs.len() != N_OUTS {
         return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
     }
     // 2026-10-13: ONE input is `spend_full_v7`, TWO is `spend_full_v7_2` (the merge). The
     // ARITY decides which circuit's shape the proof must have — nothing is read off the proof.
-    if nullifiers.is_empty() || nullifiers.len() > MAX_INS {
-        return Err(WireVerifyError::UnsupportedInputCount { got: nullifiers.len() });
+    // 1 = spend, 2 = merge, and the wide-merge sizes in ACCEPTED_WIDE (4 since 2026-10-16) —
+    // nothing in between: every accepted arity is visible on chain.
+    let n_in = nullifiers.len();
+    if !(n_in == 1 || n_in == 2 || ACCEPTED_WIDE.contains(&n_in)) {
+        return Err(WireVerifyError::UnsupportedInputCount { got: n_in });
     }
     // Distinct inputs. The v7 merge circuits cannot be satisfied with one note twice (the
     // position-gap inverses), and consensus checks the set again — this is defence in depth.
@@ -841,17 +844,22 @@ mod wire_tests {
             verify_spend_wire_v7(&d, &[d, d], 1, &[d, d], junk),
             Err(WireVerifyError::DuplicateNullifier)
         ));
-        let mut other = d;
-        other[0] ^= 1;
+        let (mut o1, mut o2) = (d, d);
+        o1[0] ^= 1;
+        o2[0] ^= 2;
         assert!(matches!(
-            verify_spend_wire_v7(&d, &[d, other, d], 1, &[d, d], junk),
+            verify_spend_wire_v7(&d, &[d, o1, o2, d], 1, &[d, d], junk),
             Err(WireVerifyError::DuplicateNullifier)
-        ));
-        let max = crate::spend_full_v7_k::MAX_INS;
-        assert!(matches!(
-            verify_spend_wire_v7(&d, &vec![d; max + 1], 1, &[d, d], junk),
-            Err(WireVerifyError::UnsupportedInputCount { got }) if got == max + 1
-        ));
+        ), "a repeat inside an accepted wide arity is a duplicate");
+        // only 1, 2 and the accepted wide sizes (4): 3, 5, 7 and 8 are unsupported arities
+        for n in [3usize, 5, 7, 8] {
+            let mut nfs = Vec::new();
+            for i in 0..n { let mut x = d; x[0] = i as u8; nfs.push(x); }
+            assert!(matches!(
+                verify_spend_wire_v7(&d, &nfs, 1, &[d, d], junk),
+                Err(WireVerifyError::UnsupportedInputCount { got }) if got == n
+            ), "arity {n}");
+        }
         assert!(matches!(
             verify_spend_wire_v7(&d, &[d], 1u128 << RANGE_BITS, &[d, d], junk),
             Err(WireVerifyError::PublicValueOutOfRange(_))

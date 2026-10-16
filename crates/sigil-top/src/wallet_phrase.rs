@@ -329,7 +329,34 @@ fn after_install(got: &Installed) {
         println!("  The previous wallet {old} is kept aside (*.replaced-* in ~/.flux), with its coins.");
     }
     println!("  If sigil-top is running, restart it so the miner picks this up.");
+    publish_receiving_key();
 }
+
+/// 2026-10-15: a new or imported wallet publishes its private receiving key right away, so it
+/// can be paid before sigil-top is ever started (the boot keeper would only do it later).
+/// Asks the chain first; a wallet already registered to this key costs nothing.
+#[cfg(feature = "shield-register")]
+fn publish_receiving_key() {
+    use crate::shield_setup::{self as ss, RegisterOutcome, RegistrationState};
+    // The file just written — not `miner_seed`, which prefers an env var naming another wallet.
+    let Some(seed_hex) = std::fs::read_to_string(seed_path_in(&crate::flux_home())).ok()
+        .and_then(|h| derive_secret(h.trim()).ok()).map(hex::encode) else { return };
+    let (Some(sk), Some(pk)) = (ss::wallet_signing_key(&seed_hex), ss::expected_pk_shield(&seed_hex)) else { return };
+    let wallet = hex::encode(sk.verifying_key().to_bytes());
+    let node = crate::engine_node_url();
+    match ss::registration_state(&node, &wallet, &pk) {
+        RegistrationState::Ours => println!("  ✓ it can receive private payments (receiving key already on the chain)."),
+        RegistrationState::Foreign { .. } => println!("  ⚠ the chain holds a DIFFERENT receiving key for this address — payments to it could not be spent here."),
+        RegistrationState::Unknown(why) => println!("  … could not reach the network ({why}); sigil-top publishes the receiving key when it starts."),
+        RegistrationState::Absent => match ss::register_for_shielded_mining(&node, &seed_hex) {
+            RegisterOutcome::Registered { .. } => println!("  ✓ receiving key published — this wallet can be paid privately within about a minute."),
+            RegisterOutcome::Failed { reason, .. } => println!("  ⚠ publishing the receiving key failed ({reason}); sigil-top retries when it starts."),
+            RegisterOutcome::BadSeed => {}
+        },
+    }
+}
+#[cfg(not(feature = "shield-register"))]
+fn publish_receiving_key() {}
 
 /// `sigil-top wallet [show | phrase | import | new [--replace]]`
 pub(crate) fn run_cli(args: &[String]) {

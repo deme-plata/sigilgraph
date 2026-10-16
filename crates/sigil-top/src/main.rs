@@ -1735,8 +1735,12 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
         // 2026-08-24: SIGIL_MINE_SEED is ALREADY required to reach this point (audit
         // C1, above) — so this is genuinely "out of the box": nobody who can already
         // use [M]ine has anything new to configure to also get shielded rewards.
+        // 2026-10-15: the seed the miner signs with — SIGIL_MINE_SEED OR the wallet file this
+        // install made/imported (`miner_seed`). Reading only the env var meant every wallet
+        // created by sigil-top itself mined but never published its receiving key, so nobody
+        // could pay it (a 189 SIGIL phone payment bounced on exactly such a wallet).
         #[cfg(feature = "shield-register")]
-        if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
+        if let Some(seed_hex) = miner_seed().map(hex::encode) {
             // Registration lives on the dual-lane money API (same base `mine-rig`
             // uses), not `url` above (that's `/mine`, the legacy single-lane path
             // this function itself POSTs shares to) — the two are different services.
@@ -2663,15 +2667,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     #[cfg(feature = "shield-register")]
     {
         static BOOT_REG: std::sync::Once = std::sync::Once::new();
-        if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
-            if miner_seed().is_some() {
-                BOOT_REG.call_once(|| {
-                    boot_trace("shield-register: publishing this wallet's receiving key (boot keeper)");
-                    shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, |line| {
-                        log_line(format!("shield-register: {line}"));
-                    });
+        // 2026-10-15: env seed OR this install's wallet file (see `miner_seed`); env-only left
+        // every wallet sigil-top made for itself unpayable.
+        if let Some(seed_hex) = miner_seed().map(hex::encode) {
+            BOOT_REG.call_once(|| {
+                boot_trace("shield-register: publishing this wallet's receiving key (boot keeper)");
+                shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, |line| {
+                    log_line(format!("shield-register: {line}"));
                 });
-            }
+            });
         }
     }
     // v0.71.1 LANE-V: resume the operator's chosen sync mode after update/restart.

@@ -9172,7 +9172,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "10.4.32"
+version = "10.4.33"
 dependencies = [
  "anyhow",
  "argon2",

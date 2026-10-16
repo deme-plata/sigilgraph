@@ -1119,4 +1119,26 @@ mod tests {
         let proof = SpendFullV7kProver::new(opt).prove(t).expect("prove");
         assert!(verify_spend_full_v7k(proof, pi(&tree, &ns, &ps, pv, &o3)).is_err(), "outputs exceeding the inputs");
     }
+
+    /// THE NODE'S ENTRY POINT: a 4-input proof through `note_v7::verify_spend_wire_v7` (bytes in,
+    /// arity-dispatched); the same proof claimed as 3 inputs is refused by width before any AIR.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn wide_merge_through_the_wire() {
+        use crate::note_v1::WireVerifyError;
+        use crate::note_v7::verify_spend_wire_v7;
+        let ns = notes(4);
+        let ps = positions(4);
+        let (tree, paths) = pool(&ns, &ps);
+        let (pv, o) = outs(&ns);
+        let t = build_spend_full_v7k_trace_seeded(&ns, &paths, e(pv), &o, &v7_options(), [7u8; 32]);
+        let bytes = SpendFullV7kProver::new(v7_options()).prove_hiding(t).expect("prove").to_bytes();
+        let nfs: Vec<[u8; 32]> = ns.iter().zip(&ps).map(|(n, &p)| n.nullifier(p as u64).to_wire()).collect();
+        let cms = [o[0].commitment().to_wire(), o[1].commitment().to_wire()];
+        verify_spend_wire_v7(&tree.root().to_wire(), &nfs, pv as u128, &cms, &bytes).expect("a 4-input merge through the wire");
+        match verify_spend_wire_v7(&tree.root().to_wire(), &nfs[..3], pv as u128, &cms, &bytes) {
+            Err(WireVerifyError::WrongTraceWidth { expected, got }) => { assert_eq!(expected, width(3)); assert_eq!(got, width(4)); }
+            other => panic!("expected a width refusal, got {other:?}"),
+        }
+    }
 }

@@ -469,9 +469,10 @@ impl TryFrom<u8> for PoolGeneration {
 /// checked against this circuit's (a mismatch is a refusal, never a re-route, and would
 /// otherwise be a process abort inside `Air::new`), and only then does any cryptography run.
 ///
-/// v7 has two input forms: one nullifier is the single spend, two is the merge
-/// (`spend_full_v7_2`), whose circuit refuses one note fed in twice; a repeated nullifier is
-/// still refused here before any proof is parsed.
+/// v7 input forms: one nullifier is the single spend, two is the merge (`spend_full_v7_2`),
+/// 3..=`spend_full_v7_k::MAX_INS` is the wide merge (`spend_full_v7_k`, 2026-10-16). The merge
+/// circuits refuse one note fed in twice; a repeated nullifier is still refused here before
+/// any proof is parsed.
 pub fn verify_spend_wire_v7(
     anchor: &[u8; 32],
     nullifiers: &[[u8; 32]],
@@ -480,20 +481,23 @@ pub fn verify_spend_wire_v7(
     proof: &[u8],
 ) -> Result<(), WireVerifyError> {
     use crate::spend_full_v7::{verify_spend_full_v7, SpendFullV7PublicInputs, N_OUTS, TRACE_LEN, WIDTH};
-    use crate::spend_full_v7_2::{verify_spend_full_v7x2, SpendFullV7x2PublicInputs, N_INS, WIDTH as WIDTH_2};
+    use crate::spend_full_v7_2::{verify_spend_full_v7x2, SpendFullV7x2PublicInputs, WIDTH as WIDTH_2};
+    use crate::spend_full_v7_k::{verify_spend_full_v7k, width as width_k, SpendFullV7kPublicInputs, MAX_INS};
 
     if cm_outs.len() != N_OUTS {
         return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
     }
     // 2026-10-13: ONE input is `spend_full_v7`, TWO is `spend_full_v7_2` (the merge). The
     // ARITY decides which circuit's shape the proof must have — nothing is read off the proof.
-    if nullifiers.is_empty() || nullifiers.len() > N_INS {
+    if nullifiers.is_empty() || nullifiers.len() > MAX_INS {
         return Err(WireVerifyError::UnsupportedInputCount { got: nullifiers.len() });
     }
-    // Distinct inputs. The v7 merge circuit cannot be satisfied with one note twice (the
-    // position-gap inverse), and consensus checks the set again — this is defence in depth.
-    if nullifiers.len() == 2 && nullifiers[0] == nullifiers[1] {
-        return Err(WireVerifyError::DuplicateNullifier);
+    // Distinct inputs. The v7 merge circuits cannot be satisfied with one note twice (the
+    // position-gap inverses), and consensus checks the set again — this is defence in depth.
+    for (i, a) in nullifiers.iter().enumerate() {
+        if nullifiers[i + 1..].contains(a) {
+            return Err(WireVerifyError::DuplicateNullifier);
+        }
     }
     if public_value >= (1u128 << RANGE_BITS) {
         return Err(WireVerifyError::PublicValueOutOfRange(public_value));
@@ -513,7 +517,7 @@ pub fn verify_spend_wire_v7(
     // SHAPE GUARDS — both attacker-chosen numbers a `Proof` carries, checked before any
     // AIR is constructed (see `note_v1::verify_spend_wire_multi` for the history). Each
     // arity has exactly one shape, so the checks are equalities, not ranges.
-    let want_width = if nfs.len() == 1 { WIDTH } else { WIDTH_2 };
+    let want_width = match nfs.len() { 1 => WIDTH, 2 => WIDTH_2, k => width_k(k) };
     let got_width = p.trace_info().main_trace_width();
     if got_width != want_width {
         return Err(WireVerifyError::WrongTraceWidth { expected: want_width, got: got_width });
@@ -531,7 +535,7 @@ pub fn verify_spend_wire_v7(
             cm_outs: outs,
         };
         verify_spend_full_v7(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
-    } else {
+    } else if nfs.len() == 2 {
         let pi = SpendFullV7x2PublicInputs {
             root: root.0,
             nf: nfs[0].0,
@@ -540,6 +544,14 @@ pub fn verify_spend_wire_v7(
             cm_outs: outs,
         };
         verify_spend_full_v7x2(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+    } else {
+        let pi = SpendFullV7kPublicInputs {
+            root: root.0,
+            nfs: nfs.iter().map(|d| d.0).collect(),
+            public_value: BaseElement::new(public_value as u64),
+            cm_outs: outs,
+        };
+        verify_spend_full_v7k(p, pi).map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
     }
 }
 
@@ -822,15 +834,23 @@ mod wire_tests {
             verify_spend_wire_v7(&d, &[d], 1, &[d], junk),
             Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: 1 })
         ));
-        // Since M7 two inputs are legal (the merge form): the same note twice is refused as a
-        // duplicate before parsing, and three inputs are the unsupported arity.
+        // Since M7 two inputs are legal (the merge form), since 2026-10-16 up to MAX_INS (the
+        // wide merge): a repeated note anywhere is refused as a duplicate before parsing, and one
+        // input more than MAX_INS is the unsupported arity.
         assert!(matches!(
             verify_spend_wire_v7(&d, &[d, d], 1, &[d, d], junk),
             Err(WireVerifyError::DuplicateNullifier)
         ));
+        let mut other = d;
+        other[0] ^= 1;
         assert!(matches!(
-            verify_spend_wire_v7(&d, &[d, d, d], 1, &[d, d], junk),
-            Err(WireVerifyError::UnsupportedInputCount { got: 3 })
+            verify_spend_wire_v7(&d, &[d, other, d], 1, &[d, d], junk),
+            Err(WireVerifyError::DuplicateNullifier)
+        ));
+        let max = crate::spend_full_v7_k::MAX_INS;
+        assert!(matches!(
+            verify_spend_wire_v7(&d, &vec![d; max + 1], 1, &[d, d], junk),
+            Err(WireVerifyError::UnsupportedInputCount { got }) if got == max + 1
         ));
         assert!(matches!(
             verify_spend_wire_v7(&d, &[d], 1u128 << RANGE_BITS, &[d, d], junk),

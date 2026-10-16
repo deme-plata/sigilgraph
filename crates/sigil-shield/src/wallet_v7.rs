@@ -377,6 +377,103 @@ pub fn build_spend_2_v7(
     })
 }
 
+/// The WIDE merge (2026-10-16): K = 3..=`spend_full_v7_k::MAX_INS` notes of this wallet in one
+/// proof (`spend_full_v7_k`). Two inputs stay on [`build_spend_2_v7`] — the node routes arity 2 to
+/// the deployed `spend_full_v7_2`, whose constraint order differs, so a K = 2 wide proof would
+/// not verify there. Same output rules as the two-input form.
+pub fn build_spend_k_v7(
+    account: &AccountV7,
+    store: &mut NoteStoreV7,
+    leaves: &[[u8; 32]],
+    capacity: usize,
+    slots: &[usize],
+    public_value: u64,
+    outs_spec: &[(u64, Digest4)],
+) -> Result<SpendBundleV7, SpendBuildErrorV7> {
+    use crate::spend_full_v7_k::{build_spend_full_v7k_trace, SpendFullV7kProver, MAX_INS};
+    if slots.len() == 2 {
+        return build_spend_2_v7(account, store, leaves, capacity, [slots[0], slots[1]], public_value, outs_spec);
+    }
+    if slots.len() < 3 || slots.len() > MAX_INS {
+        return Err(SpendBuildErrorV7::NoSuitableNote);
+    }
+    if outs_spec.len() != N_OUTS {
+        return Err(SpendBuildErrorV7::WrongOutputCount { expected: N_OUTS, got: outs_spec.len() });
+    }
+    if slots.iter().collect::<BTreeSet<_>>().len() != slots.len() {
+        return Err(SpendBuildErrorV7::SameNoteTwice);
+    }
+    let mut owned = Vec::with_capacity(slots.len());
+    let mut positions = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let n = store.notes.get(*slot).filter(|n| !n.spent).cloned().ok_or(SpendBuildErrorV7::NoSuitableNote)?;
+        positions.push(n.position.ok_or(SpendBuildErrorV7::NoteNotOnChain)?);
+        owned.push(n);
+    }
+    if positions.iter().collect::<BTreeSet<_>>().len() != positions.len() {
+        return Err(SpendBuildErrorV7::SameNoteTwice);
+    }
+    let mut have: u64 = 0;
+    for n in &owned {
+        have = have.checked_add(n.value).ok_or(SpendBuildErrorV7::OutOfRange)?;
+    }
+    let sum: u64 = outs_spec.iter().map(|(v, _)| *v).sum();
+    let expected = have.saturating_sub(public_value);
+    if sum != expected {
+        return Err(SpendBuildErrorV7::NonConserving { expected, got: sum });
+    }
+    if outs_spec.iter().any(|(v, _)| *v >= (1u64 << RANGE_BITS)) || public_value >= (1u64 << RANGE_BITS) {
+        return Err(SpendBuildErrorV7::OutOfRange);
+    }
+    let mut notes = Vec::with_capacity(owned.len());
+    for n in &owned {
+        notes.push(account.note_with_blinding(n.blinding, n.value)?);
+    }
+    let mut digests: Vec<Digest4> = leaves.iter().map(|c| Digest4::from_wire(c).unwrap_or_else(|_| padding_leaf())).collect();
+    if digests.len() > capacity {
+        return Err(SpendBuildErrorV7::PositionMismatch);
+    }
+    digests.resize(capacity, padding_leaf());
+    let tree = PoolTreeV7::new(digests)?;
+    let mut paths = Vec::with_capacity(positions.len());
+    for (&pos, n) in positions.iter().zip(notes.iter()) {
+        let p = tree.path(pos as usize)?;
+        if p.leaf != n.commitment() {
+            return Err(SpendBuildErrorV7::PositionMismatch);
+        }
+        paths.push(p);
+    }
+    let anchor = tree.root().to_wire();
+    let mine = account.owner_pk();
+    let mut outs = Vec::with_capacity(N_OUTS);
+    let mut out_indices = Vec::new();
+    let mut out_preimages = Vec::with_capacity(N_OUTS);
+    for (i, (v, recipient)) in outs_spec.iter().enumerate() {
+        // derived from the FIRST input's position — consumed exactly once, so never reused
+        let idx = output_derivation_index(&anchor, positions[0], i);
+        let blinding = account.blinding(idx);
+        if *recipient == mine {
+            store.record_derived(idx, *v, blinding);
+            out_indices.push(idx);
+        }
+        out_preimages.push((*v, blinding));
+        outs.push(OutputV7 { value: BaseElement::new(*v), blinding, recipient_pk: *recipient });
+    }
+    let outs: [OutputV7; N_OUTS] = [outs[0], outs[1]];
+    let trace = build_spend_full_v7k_trace(&notes, &paths, BaseElement::new(public_value), &outs, &v7_options());
+    let proof = SpendFullV7kProver::new(v7_options()).prove_hiding(trace).expect("a conserving, in-range, K-note witness must prove and hide");
+    Ok(SpendBundleV7 {
+        anchor,
+        nullifier: notes[0].nullifier(positions[0]).to_wire(),
+        extra_nullifiers: notes[1..].iter().zip(&positions[1..]).map(|(n, &p)| n.nullifier(p).to_wire()).collect(),
+        cm_outs: outs.iter().map(|o| o.commitment().to_wire()).collect(),
+        public_value: public_value as u128,
+        proof: proof.to_bytes(),
+        out_indices,
+        out_preimages,
+    })
+}
+
 /// Seal a v7 output to its recipient's delivery key.
 pub fn seal_output_v7(value: u64, blinding: [BaseElement; 4], pk_enc_hex: &str, memo: &str) -> Result<NoteCiphertext, CipherError> {
     note_cipher::seal_note_v7(&NotePlaintextV7::new(value, Digest4(blinding)).with_memo(memo)?, pk_enc_hex)
@@ -473,6 +570,37 @@ mod tests {
         assert_eq!(store.scan_owned(&alice, &leaves), 1);
         let spent: BTreeSet<[u8; 32]> = nfs.iter().map(|n| scoped_nullifier_v7(1, *n)).collect();
         assert_eq!(store.mark_spent(&alice, &spent, 1), 2);
+        assert_eq!(store.balance(), change as u128);
+    }
+
+    /// WIDE MERGE: five landed notes → one payment + change in ONE proof (`spend_full_v7_k`),
+    /// accepted at the wire by arity; all five end up spent; a repeated slot is refused.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore)]
+    fn five_notes_merge_in_one_proof_and_verify_at_the_wire() {
+        let alice = AccountV7::from_seed([0xA7; 32]);
+        let bob = AccountV7::from_seed([0xB7; 32]);
+        let mut store = NoteStoreV7::new();
+        let mut leaves: Vec<[u8; 32]> = vec![[1u8; 32]];
+        for v in [1_000_000u64, 2_000_000, 3_000_000, 4_000_000, 5_000_000] {
+            leaves.push(shield_note_v7(&alice, &mut store, v).unwrap().cm);
+            leaves.push([2u8; 32]);
+        }
+        assert_eq!(store.scan_owned(&alice, &leaves), 5);
+        let change = 15_000_000 - 14_000_000 - FEE;
+        let bundle = build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 2, 3, 4], FEE,
+            &[(14_000_000, bob.owner_pk()), (change, alice.owner_pk())]).unwrap();
+        assert_eq!(bundle.extra_nullifiers.len(), 4);
+        let mut nfs = vec![bundle.nullifier];
+        nfs.extend_from_slice(&bundle.extra_nullifiers);
+        verify_spend_wire_v7(&bundle.anchor, &nfs, FEE as u128, &bundle.cm_outs, &bundle.proof).expect("a 5-note merge verifies at the wire");
+        assert!(verify_spend_wire_v7(&bundle.anchor, &nfs[..4], FEE as u128, &bundle.cm_outs, &bundle.proof).is_err(), "fewer nullifiers = another shape");
+        assert!(matches!(build_spend_k_v7(&alice, &mut store, &leaves, CAP, &[0, 1, 1], FEE,
+            &[(1, bob.owner_pk()), (1, alice.owner_pk())]), Err(SpendBuildErrorV7::SameNoteTwice)));
+        leaves.extend_from_slice(&bundle.cm_outs);
+        assert_eq!(store.scan_owned(&alice, &leaves), 1);
+        let spent: BTreeSet<[u8; 32]> = nfs.iter().map(|n| scoped_nullifier_v7(1, *n)).collect();
+        assert_eq!(store.mark_spent(&alice, &spent, 1), 5);
         assert_eq!(store.balance(), change as u128);
     }
 

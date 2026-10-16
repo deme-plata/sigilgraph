@@ -808,6 +808,29 @@ pub async fn shielded_send_handler(
         Ok(p) => p,
         Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
     };
+    shielded_send_submit(&st, &req, proof)
+}
+
+/// The same transfer as `/v1/shielded_send`, with the proof as raw bytes instead of hex
+/// (wire: [`decode_proof_upload`]). Hex doubles every proof byte, so a payment uploads
+/// about half as much: a ~100 KB proof is ~200 KB as hex. Same door, same queue, same
+/// answer as the JSON route — only the transport differs, so the txid is identical.
+#[flux_api_macros::api(POST, "/v1/shielded_send/bin", summary = "Private shielded-to-shielded transfer, proof as raw bytes (half the upload)")]
+pub async fn shielded_send_bin_handler(
+    State(st): State<AppState>,
+    body: axum::body::Bytes,
+) -> Json<serde_json::Value> {
+    match decode_proof_upload::<shielded::ShieldedSendRequest>(&body) {
+        Ok((req, proof)) => shielded_send_submit(&st, &req, proof),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+fn shielded_send_submit(
+    st: &AppState,
+    req: &shielded::ShieldedSendRequest,
+    proof: Vec<u8>,
+) -> Json<serde_json::Value> {
     // Door check against the chain's spent set BEFORE queueing or signing a receipt —
     // otherwise a spent note gets "ok" now and a reversal ~14 s later (2026-09-25, live).
     {
@@ -833,7 +856,7 @@ pub async fn shielded_send_handler(
                 tx_id: h,
                 wallet: None,
                 req_nonce: None,
-                accepted_at_height: observed_tip_height(&st),
+                accepted_at_height: observed_tip_height(st),
             }),
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
@@ -850,6 +873,26 @@ pub async fn unshield_handler(
         Ok(p) => p,
         Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
     };
+    unshield_submit(&st, &req, proof)
+}
+
+/// `/v1/unshield` with the proof as raw bytes (wire: [`decode_proof_upload`]).
+#[flux_api_macros::api(POST, "/v1/unshield/bin", summary = "Withdraw from the shielded pool, proof as raw bytes (half the upload)")]
+pub async fn unshield_bin_handler(
+    State(st): State<AppState>,
+    body: axum::body::Bytes,
+) -> Json<serde_json::Value> {
+    match decode_proof_upload::<shielded::UnshieldRequest>(&body) {
+        Ok((req, proof)) => unshield_submit(&st, &req, proof),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+fn unshield_submit(
+    st: &AppState,
+    req: &shielded::UnshieldRequest,
+    proof: Vec<u8>,
+) -> Json<serde_json::Value> {
     {
         let guard = match st.state.read() { Ok(g) => g, Err(p) => p.into_inner() };
         if let Err(e) = shielded::refuse_if_spent(guard.shielded(), &req.anchor, &[req.nullifier.as_str()]) {
@@ -871,11 +914,52 @@ pub async fn unshield_handler(
                 tx_id: h,
                 wallet: None,
                 req_nonce: None,
-                accepted_at_height: observed_tip_height(&st),
+                accepted_at_height: observed_tip_height(st),
             }),
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
+}
+
+/// First four bytes of a binary proof upload: "SGP1" = SIGIL proof upload, framing v1.
+pub const PROOF_UPLOAD_MAGIC: [u8; 4] = *b"SGP1";
+
+/// Decode a binary proof upload into the JSON route's request type plus the raw proof.
+///
+/// ```text
+///   "SGP1" ‖ meta_len: u32 LE ‖ meta: JSON (meta_len bytes) ‖ proof: every remaining byte
+/// ```
+///
+/// `meta` is the JSON route's body with the `proof` field left out; everything else
+/// (anchor, nullifiers, outputs, fee, ciphertexts) keeps its existing JSON form, so both
+/// routes share one request type and one validation path. Only the proof, which is
+/// ~98 % of the bytes, travels raw. A `proof` key inside `meta` is refused rather than
+/// silently ignored, so a client can never send two proofs and wonder which one counted.
+pub fn decode_proof_upload<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+) -> Result<(T, Vec<u8>), &'static str> {
+    if body.len() < 8 || body[..4] != PROOF_UPLOAD_MAGIC {
+        return Err("binary upload must start with SGP1 and a 4-byte metadata length");
+    }
+    let meta_len = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
+    let rest = &body[8..];
+    if meta_len > rest.len() {
+        return Err("metadata length runs past the end of the upload");
+    }
+    let (meta, proof) = rest.split_at(meta_len);
+    if proof.is_empty() {
+        return Err("binary upload carries no proof bytes");
+    }
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(meta).map_err(|_| "upload metadata must be a JSON object")?;
+    let obj = meta.as_object_mut().ok_or("upload metadata must be a JSON object")?;
+    if obj.contains_key("proof") {
+        return Err("metadata must not carry a proof; the proof is the bytes after it");
+    }
+    // The request types require `proof: String`; the real proof travels outside the JSON.
+    obj.insert("proof".into(), serde_json::Value::String(String::new()));
+    let req = serde_json::from_value(meta).map_err(|_| "upload metadata is missing or has malformed fields")?;
+    Ok((req, proof.to_vec()))
 }
 
 /// The current anonymity-set root plus the pool's public counters.
@@ -2585,7 +2669,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/register", post(shielded_register_handler))
         .route("/v1/shield", post(shield_handler))
         .route("/v1/shielded_send", post(shielded_send_handler))
+        .route("/v1/shielded_send/bin", post(shielded_send_bin_handler))
         .route("/v1/unshield", post(unshield_handler))
+        .route("/v1/unshield/bin", post(unshield_bin_handler))
         .route("/v1/shielded/anchor", get(shielded_anchor_handler))
         .route("/v1/shielded/nullifiers", get(shielded_nullifiers_handler))
         .route("/v1/shielded/leaves", get(shielded_leaves_handler))

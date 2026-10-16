@@ -63,6 +63,7 @@ pub mod spend_full_v6;
 /// v7 single-input Rescue spend AIR (M1: value opening, owner, membership, nullifier, position).
 pub mod spend_full_v7;
 pub mod spend_full_v7_2;
+pub mod spend_full_v7_k;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;

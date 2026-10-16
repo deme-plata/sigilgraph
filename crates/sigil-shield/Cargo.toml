@@ -31,6 +31,13 @@ rand = { workspace = true }
 # unpinned ("0.2") but MUST resolve to the same version the `wasm-bindgen` CLI tool is
 # invoked with when generating JS glue — a mismatch hard-fails at that step, not at
 # compile time. Pinned in practice by Cargo.lock (0.2.122 at the time this was added).
+# Measurement only (examples/bench_v7_hasher.rs, option C: Poseidon2 next to Rescue-Prime).
+# dev-dependencies never reach a node, a wallet or the wasm build.
+[dev-dependencies]
+p3-goldilocks = "=0.8.0"
+p3-field = "=0.8.0"
+p3-symmetric = "=0.8.0"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = "0.2"

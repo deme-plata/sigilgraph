@@ -819,6 +819,9 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
         return Some((include_str!("../../../gui/sigil-metamask.js").as_bytes().to_vec(), JS));
     }
     // Exchange UI 2026-10-15 r2: reviewed minimum + submission latches.
+    if names(safe, "sigil-address-book.js") {
+        return Some((include_str!("../../../gui/sigil-address-book.js").as_bytes().to_vec(), JS));
+    }
     if names(safe, "sigil-exchange.js") {
         return Some((include_str!("../../../gui/sigil-exchange.js").as_bytes().to_vec(), JS));
     }

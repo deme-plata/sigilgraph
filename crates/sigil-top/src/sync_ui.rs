@@ -1217,7 +1217,9 @@ pub(crate) fn record_spine_sample(
         }
     }
     trail.push_back((now, spine));
-    while trail.len() > 1 && now.duration_since(trail[0].0).as_secs_f64() > 30.0 {
+    // Drop the oldest only while the NEXT one is still past the window, so one anchor just
+    // beyond 30 s always remains (two sparse samples must still make a rate).
+    while trail.len() > 2 && now.duration_since(trail[1].0).as_secs_f64() > 30.0 {
         trail.pop_front();
     }
 }

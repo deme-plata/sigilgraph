@@ -74,6 +74,9 @@ mod producer;
 // crate's Cargo.toml `shield-register` feature comment).
 #[cfg(feature = "shield-register")]
 mod shield_setup;
+// The private-balance scanner (2026-10-17): incremental, per generation, view tags.
+#[cfg(feature = "shield-register")]
+mod shield_scan;
 
 use crate::cathedral::Cathedral;
 

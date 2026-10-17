@@ -320,6 +320,12 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                         if sn.spent > 0 { format!("{}", sn.spent) } else { String::new() },
                         Style::default().fg(C_DIM),
                     ),
+                    // 2026-10-17: what the last scan cost — it reads only what is new now.
+                    dim(format!(
+                        "   last scan {}{}",
+                        crate::store_lifecycle::human_bytes(sn.fetched_bytes),
+                        if sn.view_tags { " · view tags" } else { "" }
+                    )),
                     dim("   (transparent balance stays 0 — this is the real one)"),
                 ])), shrow);
 

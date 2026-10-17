@@ -2730,6 +2730,27 @@ fn run_start() -> Result<()> {
                             eprintln!("⚠ publish peer-heights failed: {}", e);
                         }
                         eprintln!("⚡ heartbeat — peers={} started={}", sum.peer_count, sum.started);
+                        // 2026-10-17: every 6th heartbeat, name what the parked set waits for:
+                        // each missing parent, how many parked blocks wait on it directly, and the
+                        // lowest of them. A stall that says only "N still missing" cannot be traced.
+                        {
+                            static HB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                            let n = HB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if let Some(br) = braid.as_ref().filter(|_| n % 6 == 0) {
+                                let rep = br.missing_parent_report(6);
+                                if !rep.is_empty() {
+                                    let parts: Vec<String> = rep.iter().map(|(p, kids)| {
+                                        let low = kids.first()
+                                            .map(|(k, h)| format!("h={h} {}", hex::encode(&k[..8])))
+                                            .unwrap_or_else(|| "-".into());
+                                        format!("{} ← {} waiting, lowest {low}", hex::encode(&p[..8]), kids.len())
+                                    }).collect();
+                                    let st = br.stats();
+                                    eprintln!("🧩 parked {} · final H={} · missing parents: {}",
+                                        st.pending, st.finalized_height, parts.join(" | "));
+                                }
+                            }
+                        }
                         // Phase 2's whole deliverable: the measured comparison
                         // between a certificate and today's 512-block depth rule.
                         // Silent unless finality is configured.
@@ -4328,8 +4349,11 @@ fn run_start() -> Result<()> {
                         static BH_RECV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                         let n = BH_RECV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if n % 64 == 0 {
-                            eprintln!("⇩ by-hash: got {got} → {ins} inserted, {parked} parked, {other} no-op, {} still missing ({} answers so far)",
-                                still_missing.len(), n + 1);
+                            // 2026-10-17: name them (r1 stalled for hours on "1 still missing").
+                            let names: Vec<String> = still_missing.iter().take(4)
+                                .map(|h| hex::encode(&h[..8])).collect();
+                            eprintln!("⇩ by-hash: got {got} → {ins} inserted, {parked} parked, {other} no-op, {} still missing [{}] ({} answers so far)",
+                                still_missing.len(), names.join(" "), n + 1);
                         }
                         let want = parents_in_flight.take_new(&still_missing, std::time::Instant::now());
                         if !want.is_empty() {

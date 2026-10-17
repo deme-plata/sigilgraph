@@ -1345,6 +1345,31 @@ impl Braid {
         out
     }
 
+    /// [`Self::missing_parents`] with, for each, the parked blocks waiting on it as
+    /// `(hash, height)` (lowest first); the roots ordered by their lowest waiting height,
+    /// at most `limit`. For logs: 2026-10-17 the r1 rehearsal stalled for hours on
+    /// "1 still missing" and nothing could name the block.
+    pub fn missing_parent_report(&self, limit: usize) -> Vec<(BlockHash, Vec<(BlockHash, u64)>)> {
+        let mut out: Vec<(BlockHash, Vec<(BlockHash, u64)>)> = self
+            .missing_parents()
+            .into_iter()
+            .map(|p| {
+                let mut kids: Vec<(BlockHash, u64)> = self
+                    .waiters
+                    .get(&p)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|k| self.pending.get(k).map(|v| (*k, v.height)))
+                    .collect();
+                kids.sort_by_key(|&(k, h)| (h, k));
+                (p, kids)
+            })
+            .collect();
+        out.sort_by_key(|(p, kids)| (kids.first().map(|&(_, h)| h).unwrap_or(u64::MAX), *p));
+        out.truncate(limit);
+        out
+    }
+
     /// Window / pending / finalized / tips occupancy + rejection counters.
     pub fn stats(&self) -> BraidStats {
         let tips = self
@@ -2530,6 +2555,10 @@ mod certified_tests {
         assert!(b.is_parked(&c7) && !b.is_parked(&p6));
         assert!(m.iter().all(|h| b.is_parked(h)), "nothing in this list is worth fetching");
         assert_eq!(b.missing_parents(), vec![p6], "the actionable root");
+        // 2026-10-17: the report names the root and who waits on it — only c7 waits on p6
+        // directly; c8 waits on c7, which is parked, so it is not listed under p6.
+        assert_eq!(b.missing_parent_report(8), vec![(p6, vec![(c7, 7)])]);
+        assert!(b.missing_parent_report(0).is_empty());
         // The root arrives: the whole parked run unparks.
         assert!(matches!(b.insert(view(p6, hh(5), 6)), InsertOutcome::Inserted { newly_ready: 3 }));
         assert!(!b.is_parked(&c7) && !b.is_parked(&c8));

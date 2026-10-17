@@ -141,21 +141,75 @@ fn refuse_local_signing(req: &str) -> Option<&'static str> {
     None
 }
 
-fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Option<&LocalApi>) {
-    let mut buf = [0u8; 4096];
-    let n = match stream.read(&mut buf) {
-        Ok(n) if n > 0 => n,
-        _ => return,
+/// Largest request body the local server accepts. A private send is ~210 KB as JSON and
+/// ~104 KB as a binary upload; 16 MiB leaves room for anything a wallet sends.
+const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
+
+/// Read one whole HTTP request: the head (text) and exactly `Content-Length` body bytes.
+///
+/// 2026-10-17: this used to be ONE `read` into a 4 KiB buffer. A private send from the [W]
+/// page (proof ≈ 210 KB of JSON) reached the node cut off at ~4 KB — measured:
+/// "Failed to parse the request body as JSON: proof: EOF while parsing a string at line 1
+/// column 3946" — so the page could never pay through this server (sigil-top's own native
+/// send does not come through here, which is why it went unnoticed). `Err(status)` = answer
+/// with that status; `Ok(None)` = the client went away.
+fn read_http_request(stream: &mut std::net::TcpStream) -> Result<Option<(String, Vec<u8>)>, &'static str> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    let mut raw: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    let head_end = loop {
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if raw.len() > 64 * 1024 {
+            return Err("431 Request Header Fields Too Large");
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) if raw.is_empty() => return Ok(None),
+            Ok(0) | Err(_) => break raw.len(), // no blank line: treat what came as the head
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        }
     };
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
+    let declared = request_header(&head, "content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    if declared > MAX_REQUEST_BODY {
+        return Err("413 Payload Too Large");
+    }
+    let mut body: Vec<u8> = raw.get(head_end + 4..).map(|b| b.to_vec()).unwrap_or_default();
+    while body.len() < declared {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return Err("400 Bad Request"), // shorter than it said: never forward half a body
+            Ok(n) => body.extend_from_slice(&buf[..n]),
+        }
+    }
+    body.truncate(declared);
+    Ok(Some((head, body)))
+}
+
+fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Option<&LocalApi>) {
+    let (head, req_body_bytes) = match read_http_request(stream) {
+        Ok(Some(r)) => r,
+        Ok(None) => return,
+        Err(status) => {
+            let body = format!("{{\"ok\":false,\"error\":\"{status}\"}}");
+            let _ = stream.write_all(format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).as_bytes());
+            return;
+        }
+    };
+    let req = head.as_str();
     let first_line = req.lines().next().unwrap_or("GET / HTTP/1.1");
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/");
     // v7.0.10-fix: capture the request body so POSTs (e.g. /api/v1/send) proxy correctly. The
     // old proxy hardcoded GET + dropped the body, so every wallet Send hit the node as a GET →
-    // "unknown route". Body follows the blank line after the headers (small JSON, one read).
-    let req_body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    // "unknown route". 2026-10-17: the whole body, as bytes (see `read_http_request`); the
+    // local endpoints take it as text, the node proxy forwards the bytes untouched.
+    let req_body = String::from_utf8_lossy(&req_body_bytes).into_owned();
+    let req_content_type = request_header(req, "content-type").unwrap_or_else(|| "application/json".into());
 
     // 2026-08-26: LOCAL-ONLY fast-path signing/shield endpoints — pressing Shield/Send/
     // Swap/Bridge from THIS box's own wallet (opened via [W], localhost:9800) completes
@@ -288,7 +342,7 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
                 return;
             }
         }
-        let (status, body, ct) = proxy_api(&method, path, &req_body);
+        let (status, body, ct) = proxy_api(&method, path, &req_body_bytes, &req_content_type);
         let resp = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
             body.len()
@@ -904,13 +958,13 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
 /// session, sigil-api/src/lib.rs) so this port actually serves what the wallet
 /// asks for now — status/recent/search/send are NOT yet ported (separate,
 /// larger follow-up: sigil-api has no transaction-history indexing yet).
-fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec<u8>, &'static str) {
+fn proxy_api(method: &str, path_and_query: &str, req_body: &[u8], content_type: &str) -> (String, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
         .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
-    proxy_api_to(&node, method, path_and_query, req_body)
+    proxy_api_to(&node, method, path_and_query, req_body, content_type)
 }
 
-fn proxy_api_to(node: &str, method: &str, path_and_query: &str, req_body: &str) -> (String, Vec<u8>, &'static str) {
+fn proxy_api_to(node: &str, method: &str, path_and_query: &str, req_body: &[u8], content_type: &str) -> (String, Vec<u8>, &'static str) {
     let hostport = node
         .trim_start_matches("http://")
         .trim_start_matches("https://");
@@ -934,11 +988,15 @@ fn proxy_api_to(node: &str, method: &str, path_and_query: &str, req_body: &str) 
     let _ = stream.set_write_timeout(Some(Duration::from_secs(6)));
     // v7.0.10-fix: forward the REAL method + body (was hardcoded GET) so POST /api/v1/send etc.
     // reach the node's POST routes instead of falling through to "unknown route".
+    // 2026-10-17: the body is forwarded as BYTES with the browser's own Content-Type, so a
+    // binary proof upload ("SGP1" + metadata + raw proof, application/octet-stream) reaches the
+    // node's /v1/shielded_send/bin intact. It used to be a &str under a fixed JSON label.
+    let content_type: String = content_type.chars().filter(|c| *c != '\r' && *c != '\n').collect();
     let req = format!(
-        "{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{req_body}",
+        "{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         req_body.len()
     );
-    if stream.write_all(req.as_bytes()).is_err() {
+    if stream.write_all(req.as_bytes()).and_then(|_| stream.write_all(req_body)).is_err() {
         return (
             "502 Bad Gateway".to_string(),
             b"{\"error\":\"node write failed\"}".to_vec(),
@@ -1878,6 +1936,45 @@ pub mod pay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-17: a private send's body (~210 KB) is read WHOLE — it used to be cut at the
+    /// first 4 KiB read. Binary bytes survive untouched; a body shorter than its
+    /// Content-Length is refused, never forwarded.
+    #[test]
+    fn a_large_or_binary_request_body_is_read_whole() {
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut body: Vec<u8> = b"SGP1".to_vec();
+        body.extend((0..300_000u32).map(|i| (i % 251) as u8)); // binary, 0x00..0xFA
+        let sent = body.clone();
+        let w = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            let head = format!(
+                "POST /v1/shielded_send/bin HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                sent.len()
+            );
+            s.write_all(head.as_bytes()).unwrap();
+            for chunk in sent.chunks(7_001) {
+                s.write_all(chunk).unwrap(); // arrives in many reads
+            }
+        });
+        let (mut conn, _) = listener.accept().unwrap();
+        let (head, got) = read_http_request(&mut conn).unwrap().unwrap();
+        w.join().unwrap();
+        assert!(head.starts_with("POST /v1/shielded_send/bin "));
+        assert_eq!(request_header(&head, "content-type").as_deref(), Some("application/octet-stream"));
+        assert_eq!(got, body, "every byte, in order");
+
+        // shorter than declared → refused
+        let w = std::thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(b"POST /x HTTP/1.1\r\nContent-Length: 100\r\n\r\nonly-this").unwrap();
+        });
+        let (mut conn, _) = listener.accept().unwrap();
+        w.join().unwrap();
+        assert_eq!(read_http_request(&mut conn), Err("400 Bad Request"));
+    }
     #[test]
     fn dechunk_decodes_and_refuses_broken_frames() {
         assert_eq!(dechunk_body(b"1E1\r\n").is_none(), true);
@@ -1906,7 +2003,7 @@ mod tests {
             resp.extend_from_slice(b"\r\n0\r\n\r\n");
             c.write_all(&resp).unwrap();
         });
-        let (status, body, _) = proxy_api_to(&format!("http://127.0.0.1:{port}"), "GET", "/v1/mining/miners", "");
+        let (status, body, _) = proxy_api_to(&format!("http://127.0.0.1:{port}"), "GET", "/v1/mining/miners", b"", "application/json");
         t.join().unwrap();
         assert_eq!(status, "200 OK");
         let v: serde_json::Value = serde_json::from_slice(&body).expect("plain JSON, no chunk framing");

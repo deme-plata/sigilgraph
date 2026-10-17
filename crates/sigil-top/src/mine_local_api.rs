@@ -883,19 +883,47 @@ fn deposit_opening(account: &ShieldedAccount, index: u64, value: u64) -> Result<
             "nullifier": hex::encode(bundle.nullifier),
             "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
             "fee": fee.to_string(),
-            "proof": hex::encode(bundle.proof),
+            "proof": hex::encode(&bundle.proof),
             "note_ciphertexts": [ct.0, change_ct],
         });
         let send_url = format!("{}/v1/shielded_send", node.trim_end_matches('/'));
         let sent_nf = hex::encode(bundle.nullifier);
-        let resp = match client.post(&send_url).json(&payload).send() {
+        // 2026-10-17: send the proof as raw bytes (node route `/v1/shielded_send/bin`, live on
+        // g2 since 10-16): ~104 KB instead of ~210 KB of hex. Same request, same answer. An older
+        // node without the route answers 404/405, and only then is the JSON route used. A network
+        // error is NOT retried as JSON: the first upload may have been accepted.
+        let mut meta = payload.clone();
+        if let Some(o) = meta.as_object_mut() {
+            o.remove("proof");
+        }
+        let frame = crate::mine_local_api::proof_upload_frame(&meta, &bundle.proof);
+        let bin = client
+            .post(format!("{send_url}/bin"))
+            .header("Content-Type", "application/octet-stream")
+            .body(frame)
+            .send();
+        let resp = match bin {
+            Ok(r) if matches!(r.status().as_u16(), 404 | 405) => match client.post(&send_url).json(&payload).send() {
+                Ok(r) => r,
+                Err(e) => return outcome_unknown(format!("network error submitting the private send: {e}"), &sent_nf),
+            },
             Ok(r) => r,
             Err(e) => return outcome_unknown(format!("network error submitting the private send: {e}"), &sent_nf),
         };
-        let parsed: serde_json::Value = match resp.json() {
+        let mut parsed: serde_json::Value = match resp.json() {
             Ok(v) => v,
             Err(e) => return outcome_unknown(format!("bad response from node: {e}"), &sent_nf),
         };
+        // The node refusing the binary PACKAGING (not the payment) proves nothing was queued:
+        // same rule as the page's helper — send it once more as JSON.
+        let frame_refused = parsed.get("ok").and_then(|v| v.as_bool()) == Some(false)
+            && parsed.get("error").and_then(|v| v.as_str()).is_some_and(|e| e.starts_with("binary upload") || e.contains("metadata"));
+        if frame_refused {
+            parsed = match client.post(&send_url).json(&payload).send().and_then(|r| r.json::<serde_json::Value>()) {
+                Ok(v) => v,
+                Err(e) => return outcome_unknown(format!("network error submitting the private send: {e}"), &sent_nf),
+            };
+        }
         if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let reason = parsed
                 .get("error")
@@ -1563,6 +1591,19 @@ fn outcome_unknown(reason: String, nullifier_hex: &str) -> (&'static str, String
     )
 }
 
+/// The node's binary proof upload (sigil-api `decode_proof_upload`, route
+/// `/v1/shielded_send/bin`): `"SGP1" ‖ meta_len u32 LE ‖ meta ‖ proof`, where `meta` is the
+/// JSON body without `proof` and `proof` is the raw proof bytes.
+pub(crate) fn proof_upload_frame(meta: &serde_json::Value, proof: &[u8]) -> Vec<u8> {
+    let m = serde_json::to_vec(meta).unwrap_or_default();
+    let mut out = Vec::with_capacity(8 + m.len() + proof.len());
+    out.extend_from_slice(b"SGP1");
+    out.extend_from_slice(&(m.len() as u32).to_le_bytes());
+    out.extend_from_slice(&m);
+    out.extend_from_slice(proof);
+    out
+}
+
 fn bad_request(reason: String) -> (&'static str, String) {
     // Deliberately HTTP 200 (not 4xx): the request reached this box and was understood,
     // it just couldn't be completed locally (bad amount, no covering note, the real node
@@ -1609,6 +1650,21 @@ pub fn handle(path: &str, body: &str) -> (&'static str, String) {
 #[cfg(test)]
 mod reply_tests {
     use super::*;
+
+    /// The layout the node's `decode_proof_upload` reads: "SGP1", a little-endian u32 meta
+    /// length, the meta JSON (no `proof` key), then every remaining byte is the proof.
+    #[test]
+    fn the_binary_upload_frame_is_magic_length_meta_proof() {
+        let meta = serde_json::json!({"anchor": "aa", "fee": "100000"});
+        let proof = [7u8, 0, 255, 1];
+        let f = proof_upload_frame(&meta, &proof);
+        assert_eq!(&f[..4], b"SGP1");
+        let n = u32::from_le_bytes([f[4], f[5], f[6], f[7]]) as usize;
+        let back: serde_json::Value = serde_json::from_slice(&f[8..8 + n]).unwrap();
+        assert_eq!(back, meta);
+        assert!(back.get("proof").is_none(), "the node refuses a meta that carries a proof");
+        assert_eq!(&f[8 + n..], &proof, "the proof is every byte after the meta, raw");
+    }
 
     #[test]
     fn a_reply_without_a_list_is_unknown_not_not_spent() {

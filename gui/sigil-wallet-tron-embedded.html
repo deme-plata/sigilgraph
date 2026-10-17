@@ -3120,6 +3120,41 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   function saveMyNotes(addr,arr){ try{ localStorage.setItem('sigil-shielded-notes-'+addr, JSON.stringify(arr)); }catch(e){} }
 
+// 2026-10-16 binary proof upload (1M-users step 1): the proof travels as raw bytes, about half
+// the upload of hex JSON. Wire: "SGP1" | meta_len u32 LE | meta JSON (the JSON body minus
+// "proof") | proof bytes. Falls back to JSON only when nothing can have been queued.
+// 2026-10-17 [W]: ON for localhost too — sigil-top 10.4.37's pass-through forwards bytes.
+async function sigilPostProof(path, obj){
+  var useBin = window.sigilProofBin!==false;
+  var hex = typeof obj.proof==='string' ? obj.proof.replace(/^0x/,'') : '';
+  var body=null;
+  if(useBin && hex.length>0 && hex.length%2===0 && /^[0-9a-fA-F]+$/.test(hex)){
+    try{
+      var proof=new Uint8Array(hex.length/2);
+      for(var i=0;i<proof.length;i++) proof[i]=parseInt(hex.substr(i*2,2),16);
+      var meta={}; for(var k in obj){ if(k!=='proof' && Object.prototype.hasOwnProperty.call(obj,k)) meta[k]=obj[k]; }
+      var mb=new TextEncoder().encode(JSON.stringify(meta));
+      body=new Uint8Array(8+mb.length+proof.length);
+      body.set([0x53,0x47,0x50,0x31],0);
+      new DataView(body.buffer).setUint32(4,mb.length,true);
+      body.set(mb,8); body.set(proof,8+mb.length);
+    }catch(_){ body=null; }
+  }
+  if(body){
+    // A network failure here propagates like the JSON route's would: the outcome is unknown,
+    // so it is never retried (a resubmission is answered "already queued"). Only an answer
+    // proving nothing was queued — no such route, a door that did not forward, or the node
+    // refusing the FRAME — falls back to JSON. Any other answer is the node's verdict.
+    var r=await fetch(path+'/bin',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:body});
+    if([404,405,413,415,502,503].indexOf(r.status)<0){
+      var j=null; try{ j=await r.clone().json(); }catch(_){}
+      if(!(j && j.ok===false && /^binary upload|metadata/.test(String(j.error||'')))) return r;
+    }
+  }
+  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});
+}
+window.sigilPostProof = sigilPostProof;
+
   // Real end-to-end private send: pick one of this wallet's own LANDED shielded notes
   // that covers amount+fee, build+prove a real spend_full_v4 STARK client-side (via the
   // WASM module above), seal the recipient's output so they can discover it, and POST
@@ -3418,8 +3453,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
                   my.value.toString(), myb, my.position,
                   JSON.stringify(leaves), capacity, mePkS, mePkE, merged.toString(), ''));
           }catch(e){ privMsg('✗ could not build the combine: '+(e&&e.message||e), '#ff8a8a'); return; }
-          var mr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({anchor:mreq.anchor, nullifier:mreq.nullifier, extra_nullifiers:mreq.extra_nullifiers||[], cm_outs:mreq.cm_outs, fee:mreq.fee, proof:mreq.proof, note_ciphertexts:mreq.note_ciphertexts})});
+          var mr=await sigilPostProof('/v1/shielded_send',
+            {anchor:mreq.anchor, nullifier:mreq.nullifier, extra_nullifiers:mreq.extra_nullifiers||[], cm_outs:mreq.cm_outs, fee:mreq.fee, proof:mreq.proof, note_ciphertexts:mreq.note_ciphertexts});
           var mj=null; try{ mj=await mr.json(); }catch(_){}
           if(!mr.ok||!mj||!mj.ok){ var mErr=String((mj&&(mj.error||mj.message))||('HTTP '+mr.status)); if(/already spent|double.?spend/i.test(mErr)){ try{ privRetire(from, {kind:'multi', notes:[mx,my]}, _retireTag, noteEp, [mreq.nullifier].concat(mreq.extra_nullifiers||[]), null); }catch(_){} } privMsg('✗ the network refused the combine: '+mErr, '#ff8a8a'); return; } // 2026-09-25 rocky-help-0925: retire refused inputs
           // book the two inputs as spent locally (self-made ones; received ones are netted by the chain's nullifiers)
@@ -3506,11 +3541,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       }catch(e){ try{ console.warn('change not sealed to self:', e&&e.message||e); }catch(_){} }
 
       privMsg('Submitting…', '#6df3ff');
-      var sr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
+      var sr=await sigilPostProof('/v1/shielded_send', {
           anchor:req.anchor, nullifier:req.nullifier, extra_nullifiers:req.extra_nullifiers||[], cm_outs:req.cm_outs,
           fee:req.fee, proof:req.proof, note_ciphertexts:req.note_ciphertexts
-        })});
+        });
       var sj=null; try{ sj=await sr.json(); }catch(_){}
       if(!sr.ok || !sj || !sj.ok){
         var sErr=String((sj&&(sj.error||sj.message))||('HTTP '+sr.status));

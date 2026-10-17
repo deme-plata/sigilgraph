@@ -136,11 +136,64 @@ pub struct GossipTransport {
     set_id: u64,
     publish: Box<dyn Fn(Vec<u8>) + Send + Sync>,
     inner: Mutex<Inner>,
+    /// Where the last completed round is kept across restarts (see [`Self::use_round_file`]).
+    round_file: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl GossipTransport {
     pub fn new(set_id: u64, publish: Box<dyn Fn(Vec<u8>) + Send + Sync>) -> Arc<Self> {
-        Arc::new(Self { set_id, publish, inner: Mutex::new(Inner::default()) })
+        Arc::new(Self { set_id, publish, inner: Mutex::new(Inner::default()), round_file: Mutex::new(None) })
+    }
+
+    /// Keep the last completed round in `path` across restarts (2026-10-17), and load it
+    /// now if it is there. Returns the loaded round.
+    ///
+    /// Why: a voter that fell behind is pulled into the current round by a catch-up, and a
+    /// catch-up is a COMPLETED round with its votes. That round lived only in memory. On the
+    /// r1 rehearsal every voter restarted (rolling) and came back in a different round — two
+    /// in 567,945, one in 567,946, one in 567,726 — and no voter held a completed round to
+    /// catch the others up with, so no round ever had 3 of 4 voters again. With the round on
+    /// disk, a restarted voter can still serve it.
+    pub fn use_round_file(&self, path: std::path::PathBuf) -> Option<u64> {
+        let loaded = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Wire>(&b).ok()).and_then(|w| match w {
+            Wire::CatchUp { set, round, base_hash, base_number, pv, pc } if set == self.set_id => {
+                let base = (h32(&base_hash)?, base_number);
+                let votes: Option<Vec<SigilSignedMessage>> =
+                    pv.iter().map(|v| decode_vote(0, v)).chain(pc.iter().map(|v| decode_vote(1, v))).collect();
+                Some((round, base, votes?))
+            }
+            _ => None,
+        });
+        *self.round_file.lock() = Some(path);
+        let (round, base, votes) = loaded?;
+        let mut n = self.inner.lock();
+        if n.completed.as_ref().is_none_or(|(r, _, _)| round > *r) {
+            n.completed = Some((round, base, votes));
+        }
+        Some(round)
+    }
+
+    /// The round a catch-up from this transport would carry, if any.
+    pub fn completed_round(&self) -> Option<u64> {
+        self.inner.lock().completed.as_ref().map(|(r, _, _)| *r)
+    }
+
+    /// The last completed round with its base and votes — where a restarted voter resumes
+    /// (2026-10-17): from the round AFTER it, not above the newest round it signed in.
+    pub fn completed(&self) -> Option<(u64, (Hash, Number), Vec<SigilSignedMessage>)> {
+        self.inner.lock().completed.clone()
+    }
+
+    fn catch_up_wire(&self, round: u64, base: (Hash, Number), votes: &[SigilSignedMessage]) -> Wire {
+        let (mut pv, mut pc) = (Vec::new(), Vec::new());
+        for m in votes {
+            match &m.message {
+                Message::Prevote(v) => pv.push(wv(&v.target_hash, v.target_number, &m.id, &m.signature)),
+                Message::Precommit(v) => pc.push(wv(&v.target_hash, v.target_number, &m.id, &m.signature)),
+                Message::PrimaryPropose(_) => {}
+            }
+        }
+        Wire::CatchUp { set: self.set_id, round, base_hash: hex::encode(base.0), base_number: base.1, pv, pc }
     }
 
     /// The round the local voter is in (highest round it opened).
@@ -210,15 +263,8 @@ impl GossipTransport {
                 return;
             }
             n.last_catch_up = Some(Instant::now());
-            let (mut pv, mut pc) = (Vec::new(), Vec::new());
-            for m in &votes {
-                match &m.message {
-                    Message::Prevote(v) => pv.push(wv(&v.target_hash, v.target_number, &m.id, &m.signature)),
-                    Message::Precommit(v) => pc.push(wv(&v.target_hash, v.target_number, &m.id, &m.signature)),
-                    Message::PrimaryPropose(_) => {}
-                }
-            }
-            Wire::CatchUp { set: self.set_id, round: r, base_hash: hex::encode(base.0), base_number: base.1, pv, pc }
+            drop(n);
+            self.catch_up_wire(r, base, &votes)
         };
         (self.publish)(serde_json::to_vec(&msg).unwrap_or_default());
     }
@@ -281,9 +327,21 @@ impl Transport for GossipTransport {
     }
 
     fn note_completed(&self, round: u64, base: (Hash, Number), votes: &[SigilSignedMessage]) {
-        let mut n = self.inner.lock();
-        if n.completed.as_ref().is_none_or(|(r, _, _)| round > *r) {
+        {
+            let mut n = self.inner.lock();
+            if n.completed.as_ref().is_some_and(|(r, _, _)| round <= *r) {
+                return;
+            }
             n.completed = Some((round, base, votes.to_vec()));
+        }
+        // 2026-10-17: and on disk (see `use_round_file`). tmp + rename, no fsync: a lost write
+        // only means a restart serves an older round, never a wrong one.
+        if let Some(path) = self.round_file.lock().clone() {
+            let body = serde_json::to_vec(&self.catch_up_wire(round, base, votes)).unwrap_or_default();
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, &body).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 }

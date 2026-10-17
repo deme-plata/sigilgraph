@@ -176,6 +176,77 @@ impl Harness {
         b
     }
 
+    /// Restart voter `i` the way a PROCESS restart does (2026-10-17): new transport and
+    /// environment, so the round buffers and the completed round held in memory are gone.
+    /// Survives: the signer guard (on disk) and, with `round_dir`, the saved completed round.
+    /// `reannounce`: re-send the votes the guard recorded in the last two rounds.
+    fn restart_process(&mut self, i: usize, round_dir: Option<&std::path::Path>, reannounce: bool) {
+        self.crash(i);
+        let b = self.bus.clone();
+        let net = GossipTransport::new(SET_ID, Box::new(move |bytes| b.0.lock().queue.push_back((i, bytes))));
+        if let Some(d) = round_dir {
+            net.use_round_file(d.join(format!("round-{i}.json")));
+        }
+        let fin = self.envs[i].last_finalized();
+        let mut tree = SpineTree::new(GENESIS);
+        for (h, p, n) in self.all_blocks() {
+            tree.insert_or_park(h, p, n); // the node re-learns its blocks through sync
+        }
+        let env = Arc::new(SigilEnv::new(
+            tree,
+            key(i as u8),
+            GENESIS,
+            SET_ID,
+            net.clone(),
+            self.guards[i].clone(),
+            GOSSIP,
+            fin,
+            self.log.clone(),
+        ));
+        self.nets[i] = net;
+        self.envs[i] = env;
+        if reannounce {
+            self.envs[i].reannounce_recorded_votes(2);
+        }
+        // With a saved completed round: resume after it, with its votes (the node's rule since
+        // 10-17). Without: above the newest round the guard signed in (the old rule).
+        match self.nets[i].completed().filter(|_| round_dir.is_some()) {
+            Some((r, base, votes)) => {
+                let env = self.envs[i].clone();
+                let voter = Voter::new(env.clone(), self.voters.clone(), env.global_comms(), r, votes, base, fin);
+                let (fut, handle) = abortable(voter);
+                let errors = self.errors.clone();
+                self.pool
+                    .spawner()
+                    .spawn_local(fut.map(move |r| {
+                        if let Ok(Err(e)) = r {
+                            errors.lock().push(format!("voter {i} died: {e:?}"));
+                        }
+                    }))
+                    .unwrap();
+                self.aborts[i] = Some(handle);
+            }
+            None => self.start(i, true),
+        }
+    }
+
+    fn all_blocks(&self) -> Vec<(Hash, Hash, Number)> {
+        let mut all: Vec<(Hash, Hash, Number)> = Vec::new();
+        for t in self.tips.values() {
+            let mut cur = t.0;
+            while let Some(n) = self.truth.number(&cur) {
+                if n == 0 {
+                    break;
+                }
+                let parent = self.truth.ancestry(GENESIS, cur).ok().and_then(|a| a.first().copied()).unwrap_or(GENESIS);
+                all.push((cur, parent, n));
+                cur = parent;
+            }
+        }
+        all.reverse();
+        all
+    }
+
     fn sync_all(&self) {
         let mut all: Vec<(Hash, Hash, Number)> = Vec::new();
         for t in self.tips.values() {
@@ -296,6 +367,120 @@ fn over_gossip_a_voter_restarted_above_its_guard_round_rejoins() {
     eprintln!("restart: guard round {newest}, tip {tip}, finalized {fin:?}");
     assert!(fin[0] + 40 >= tip, "restarted voter finalizes again: {fin:?} vs {tip}");
     h.assert_safe();
+}
+
+/// The reference voter's own debug lines (target "grandpa"), when `SIM_LOG=1`.
+struct SimLog;
+impl log::Log for SimLog {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.target().starts_with("grandpa")
+    }
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            eprintln!("    [fg {}] {}", r.level(), r.args());
+        }
+    }
+    fn flush(&self) {}
+}
+static SIM_LOG: SimLog = SimLog;
+fn sim_log_on() {
+    if std::env::var("SIM_LOG").ok().as_deref() == Some("1") {
+        let _ = log::set_logger(&SIM_LOG).map(|()| log::set_max_level(log::LevelFilter::Trace));
+    }
+}
+
+/// 2026-10-17, the r1 rehearsal end state: every voter restarted (memory lost) and they came
+/// back spread over rounds — two in round R+1, one in R+2, one far behind. Returns
+/// (finalized just after the restarts, finalized 2.5 s later, tip).
+fn spread_restart(fix: bool) -> (Vec<Number>, Vec<Number>, Number) {
+    let dir = std::env::temp_dir().join(format!("sigil-grandpa-spread-{}-{fix}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut h = Harness::new();
+    if fix {
+        for (i, n) in h.nets.iter().enumerate() {
+            n.use_round_file(dir.join(format!("round-{i}.json")));
+        }
+    }
+    h.run_for(Duration::from_millis(600), |h| {
+        h.grow(1, (GENESIS, 0), &[0, 1, 2, 3]);
+    });
+    h.bus.0.lock().online[3] = false; // voter 3 falls far behind (r3 was ~220 rounds back)
+    h.run_for(Duration::from_millis(600), |h| {
+        h.grow(1, (GENESIS, 0), &[0, 1, 2, 3]);
+    });
+    for i in 0..4 {
+        h.crash(i);
+    }
+    // r1's spread: voters 0 and 1 last signed in round R, voter 2 already in R+1.
+    let r = (0..3).map(|i| h.guards[i].lock().newest_round()).max().unwrap();
+    for (i, round) in [(0usize, r), (1, r), (2, r + 1)] {
+        let fin = h.envs[i].last_finalized();
+        if h.guards[i].lock().newest_round() < round {
+            h.guards[i].lock().decide(round, fg::Message::Prevote(fg::Prevote::new(fin.0, fin.1)));
+        }
+    }
+    h.bus.0.lock().online[3] = true;
+    sim_log_on();
+    for i in 0..4 {
+        h.restart_process(i, fix.then_some(dir.as_path()), fix);
+    }
+    let before = h.finalized();
+    h.run_for(Duration::from_millis(2500), |h| {
+        h.grow(1, (GENESIS, 0), &[0, 1, 2, 3]);
+    });
+    let (after, tip) = (h.finalized(), h.tips[&1].1);
+    eprintln!("spread restart (fix={fix}): rounds {:?}, finalized {before:?} -> {after:?}, tip {tip}",
+        h.nets.iter().map(|n| n.my_round()).collect::<Vec<_>>());
+    for (i, n) in h.nets.iter().enumerate() {
+        let rr = n.my_round();
+        eprintln!("  node {i} round {rr}: (phase, target, voter) {:?} | {}: {:?} | {}: {:?}",
+            n.round_summary(rr), rr - 1, n.round_summary(rr - 1), rr + 1, n.round_summary(rr + 1));
+        let rec: Vec<(u64, u8)> = h.guards[i].lock().recorded(rr.saturating_sub(1)).iter().map(|(r, m)| (*r, match m {
+            fg::Message::Prevote(_) => 0, fg::Message::Precommit(_) => 1, fg::Message::PrimaryPropose(_) => 2,
+        })).collect();
+        eprintln!("    guard {i} signed (round, phase) from {}: {rec:?} · last finalized {:?} · completed {:?}",
+            rr.saturating_sub(1), h.envs[i].last_finalized().1, n.completed_round());
+    }
+    h.assert_safe();
+    let _ = std::fs::remove_dir_all(&dir);
+    (before, after, tip)
+}
+
+/// 2026-10-17 probe: after an offline voter returns and is caught up, does it precommit again?
+#[test]
+fn over_gossip_a_caught_up_voter_precommits_again() {
+    let mut h = Harness::new();
+    h.run_for(Duration::from_millis(500), |h| {
+        h.grow(1, (GENESIS, 0), &[0, 1, 2, 3]);
+    });
+    h.bus.0.lock().online[3] = false;
+    h.run_for(Duration::from_millis(800), |h| {
+        h.grow(1, (GENESIS, 0), &[0, 1, 2, 3]);
+    });
+    let back_at = h.nets[0].my_round();
+    h.bus.0.lock().online[3] = true;
+    h.run_for(Duration::from_millis(1500), |h| {
+        h.grow(1, (GENESIS, 0), &[0, 1, 2, 3]);
+    });
+    let rec = h.guards[3].lock().recorded(back_at + 2);
+    let pc = rec.iter().filter(|(_, m)| matches!(m, fg::Message::Precommit(_))).count();
+    let pv = rec.iter().filter(|(_, m)| matches!(m, fg::Message::Prevote(_))).count();
+    eprintln!("caught-up voter 3: rounds {back_at}+2.. → {pv} prevotes, {pc} precommits signed; now round {}", h.nets[3].my_round());
+    assert!(pc > 0, "a caught-up voter must precommit in later rounds ({pv} prevotes, {pc} precommits)");
+}
+
+#[test]
+fn over_gossip_voters_restarted_into_different_rounds_stay_frozen_without_saved_rounds() {
+    let (before, after, _) = spread_restart(false);
+    assert_eq!(before, after, "the control: this is the r1 freeze — no round has 3 of 4 voters");
+}
+
+#[test]
+fn over_gossip_voters_restarted_into_different_rounds_resume_with_saved_rounds() {
+    let (before, after, tip) = spread_restart(true);
+    assert!(after.iter().zip(&before).all(|(a, b)| a > b), "every voter finalizes again: {before:?} -> {after:?}");
+    assert!(after.iter().all(|f| *f + 40 >= tip), "and keeps up with the tip: {after:?} vs {tip}");
 }
 
 #[test]

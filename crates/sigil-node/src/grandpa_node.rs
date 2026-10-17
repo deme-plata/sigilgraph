@@ -86,6 +86,13 @@ impl GrandpaNode {
                 let _ = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, bytes);
             }),
         );
+        // 2026-10-17: the last completed round survives a restart, so this voter can still
+        // catch lagging peers up after EVERY voter restarted (see `use_round_file`).
+        let round_path = snap_dir.join("grandpa-round.json");
+        match net.use_round_file(round_path.clone()) {
+            Some(r) => eprintln!("🏁 grandpa: loaded completed round {r} from {} (catch-up source after restart)", round_path.display()),
+            None => eprintln!("🏁 grandpa: no saved completed round yet ({})", round_path.display()),
+        }
         let env = Arc::new(SigilEnv::new(
             SpineTree::with_root(base.0, base.1),
             key,
@@ -112,15 +119,31 @@ impl GrandpaNode {
 
         // The voter, on its own thread; restarted above its guard round after any error.
         {
-            let (env, guard) = (env.clone(), guard.clone());
+            let (env, guard, net) = (env.clone(), guard.clone(), net.clone());
             std::thread::Builder::new()
                 .name("sigil-grandpa".into())
                 .spawn(move || loop {
                     let fin = env.last_finalized();
-                    let last_round = guard.lock().newest_round();
-                    eprintln!("🏁 grandpa: voter starting above round {last_round} from finalized H={} (n={}, gossip {} ms)",
-                        fin.1, voters.len(), gossip.as_millis());
-                    let voter = Voter::new(env.clone(), voters.clone(), env.global_comms(), last_round, Vec::new(), fin, fin);
+                    // 2026-10-17: resume in the round AFTER the last COMPLETED one, with its votes,
+                    // as Substrate does; the signer guard repeats whatever was already signed in
+                    // the rounds that follow. Starting above the newest SIGNED round skipped rounds
+                    // this voter had only prevoted in, and after every voter restarted no round
+                    // could finish (r1, 10-17). No saved round yet: the old way.
+                    let (last_round, last_votes, last_base) = match net.completed() {
+                        Some((r, base, votes)) if r > 0 => {
+                            if env.tree.lock().contains(&base.0) { (r, votes, base) } else { (r, Vec::new(), fin) }
+                        }
+                        _ => (guard.lock().newest_round(), Vec::new(), fin),
+                    };
+                    eprintln!("🏁 grandpa: voter starting above round {last_round} ({} of its votes, guard newest {}) from finalized H={} (n={}, gossip {} ms)",
+                        last_votes.len(), guard.lock().newest_round(), fin.1, voters.len(), gossip.as_millis());
+                    // 2026-10-17: and say again what we signed in our last two rounds, for peers
+                    // still in them (identical messages — the guard decides, Ed25519 repeats).
+                    let n = env.reannounce_recorded_votes(2);
+                    if n > 0 {
+                        eprintln!("🏁 grandpa: re-announced {n} vote(s) this validator signed before the restart");
+                    }
+                    let voter = Voter::new(env.clone(), voters.clone(), env.global_comms(), last_round, last_votes, last_base, fin);
                     match sigil_grandpa::futures::executor::block_on(voter) {
                         Ok(()) => eprintln!("🏁 grandpa: voter ended; restarting"),
                         Err(e) => eprintln!("⚠ grandpa: voter error {e:?}; restarting in 1 s"),

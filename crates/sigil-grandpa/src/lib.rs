@@ -390,6 +390,16 @@ impl SignerGuard {
         self.votes.keys().map(|(r, _)| *r).max().unwrap_or(0)
     }
 
+    /// Every recorded vote in rounds `>= from_round`, oldest first (2026-10-17: what a
+    /// restarted voter announces again — see `SigilEnv::reannounce_recorded_votes`).
+    pub fn recorded(&self, from_round: u64) -> Vec<(u64, Message<Hash, Number>)> {
+        self.votes
+            .iter()
+            .filter(|((r, _), _)| *r >= from_round)
+            .map(|((r, p), t)| (*r, with_target(*p, *t)))
+            .collect()
+    }
+
     /// What may be signed for `(round, msg)`: the recorded vote if one exists, else `msg`
     /// (recorded first). `None` = sign nothing (poisoned, or the record could not be saved).
     pub fn decide(&mut self, round: u64, msg: Message<Hash, Number>) -> Option<Message<Hash, Number>> {
@@ -523,6 +533,21 @@ impl<T: Transport> SigilEnv<T> {
             on_finalize: Mutex::new(None),
             recent_bases: Mutex::new(std::collections::VecDeque::new()),
         }
+    }
+
+    /// Send again the votes this voter signed in its newest `rounds` rounds (2026-10-17).
+    /// After a restart its peers may have lost them too (every voter restarted on r1), and a
+    /// voter still in one of those rounds needs them to finish it. Ed25519 signing is
+    /// deterministic, so each is the identical message, not a second vote. Returns how many.
+    pub fn reannounce_recorded_votes(&self, rounds: u64) -> usize {
+        let recorded = {
+            let g = self.guard.lock();
+            g.recorded(g.newest_round().saturating_sub(rounds.saturating_sub(1)).max(1))
+        };
+        for (round, m) in &recorded {
+            self.transport.broadcast_round(*round, self.id, sign(&self.key, &self.genesis, self.set_id, *round, m.clone()));
+        }
+        recorded.len()
     }
 
     /// Called (hash, number, round) after every block this voter finalizes.
@@ -784,6 +809,18 @@ impl<T: Transport> fg::voter::Environment<Hash, Number> for SigilEnv<T> {
                 hex::encode(&hash[..4]), hex::encode(&fin.0[..4]), fin.1
             ));
             return Ok(());
+        }
+        // 2026-10-17: the round in progress may count from the PREVIOUS finalized block —
+        // after a catch-up, the reference voter starts the next round from its old
+        // last-finalized and only then moves it forward. Keep that base too: the spread-restart
+        // simulation pruned it (finality 97 → 204 at once), every vote of the new round then read
+        // "lower than round base", and the caught-up voter never precommitted.
+        {
+            let mut b = self.recent_bases.lock();
+            b.push_back(fin.1);
+            while b.len() > RECENT_BASES {
+                b.pop_front();
+            }
         }
         *fin = (hash, number);
         drop(tree);

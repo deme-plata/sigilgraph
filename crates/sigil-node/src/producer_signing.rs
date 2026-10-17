@@ -283,8 +283,29 @@ pub fn check_hybrid_on_apply(header: &SigilBlockHeaderV0) -> Result<(), String> 
     if header.sig_scheme != SigScheme::HybridSqiEd25519 {
         return Ok(());
     }
+    // 2026-10-17: a producer rebuilds its frontier from the settled tip on every tick, so
+    // during a long stall the SAME checkpoint headers were re-verified many times a second
+    // (r1: 14 SQIsign checks per tick, production 8 → 0.3 blk/s, peers' requests timing
+    // out). A header that verified once verifies again: remember it. The key is the block
+    // hash, which covers `producer_sig` (a copy with a different signature is checked anew),
+    // plus the trusted-producer list the verdict depends on (a changed list re-checks).
+    let key: [u8; 32] = {
+        let mut k = blake3::Hasher::new();
+        k.update(&header.hash());
+        k.update(std::env::var(TRUSTED_PRODUCER_ID_ENV).unwrap_or_default().as_bytes());
+        *k.finalize().as_bytes()
+    };
+    if hybrid_verified_cache().lock().map(|c| c.contains(&key)).unwrap_or(false) {
+        return Ok(());
+    }
     match verify_self_mined_hybrid(header) {
         Ok(()) => {
+            if let Ok(mut c) = hybrid_verified_cache().lock() {
+                if c.len() >= HYBRID_VERIFIED_CACHE_MAX {
+                    c.clear();
+                }
+                c.insert(key);
+            }
             eprintln!(
                 "🔏 hybrid checkpoint verified at height {} (producer {}…)",
                 header.height,
@@ -301,6 +322,16 @@ pub fn check_hybrid_on_apply(header: &SigilBlockHeaderV0) -> Result<(), String> 
             Ok(())
         }
     }
+}
+
+/// Headers whose hybrid signature already verified (by block hash). One checkpoint per
+/// 1,024 blocks, so 4,096 entries cover ~4 M blocks of unsettled history; cleared when full.
+const HYBRID_VERIFIED_CACHE_MAX: usize = 4096;
+
+fn hybrid_verified_cache() -> &'static std::sync::Mutex<std::collections::HashSet<[u8; 32]>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 /// Content-address of a (SQIsign pk, Ed25519 pk) pair — what `header.
@@ -781,6 +812,19 @@ mod tests {
         let mut h_new_early = h_new.clone();
         h_new_early.height = 42; // signature no longer matches either, but the id gate fires first
         assert!(verify_self_mined_hybrid(&h_new_early).is_err());
+
+        // 2026-10-17 cache: h_old verified (and was remembered) under the two-id list above;
+        // under the single-id list it is a different question and must be asked again.
+        // A tampered copy of a remembered header is never served from the cache either.
+        std::env::set_var(TRUSTED_PRODUCER_ID_ENV, format!("{},{}", hex::encode(id_old), hex::encode(id_new)));
+        check_hybrid_on_apply(&h_new).expect("verified once");
+        let mut forged = h_new.clone();
+        forged.producer_sig.0[0] ^= 0xFF;
+        std::env::set_var(HYBRID_ENFORCE_ENV, "1");
+        check_hybrid_on_apply(&h_new).expect("remembered: still accepted");
+        assert!(check_hybrid_on_apply(&forged).is_err(), "a different signature is checked, not remembered");
+        std::env::remove_var(HYBRID_ENFORCE_ENV);
+        std::env::set_var(TRUSTED_PRODUCER_ID_ENV, hex::encode(id_new));
 
         // observe-only vs enforce on a rejected block
         std::env::remove_var(HYBRID_ENFORCE_ENV);

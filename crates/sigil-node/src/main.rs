@@ -151,8 +151,15 @@ fn vote_held(br: Option<&Braid>, h: u64) -> bool {
     // Same reach as the braid's certificate hold: a vote at `h` is held if `h` is at or
     // above where a parked block's missing parent can sit, and within the grace.
     let reach = sigil_dagknight::braid::CERT_HOLD_PARENT_REACH;
-    let held = matches!(br.pending_floor_height(),
+    let floor = br.pending_floor_height();
+    let mut held = matches!(floor,
         Some(floor) if floor.saturating_sub(1 + reach) <= h && floor.saturating_add(g) > h);
+    // 2026-10-17: a hold must end. The parked blocks it waits for may exist on no node any
+    // more (r1 from 22:17: every voter held, so finality never moved again). Once the same
+    // pending floor has held votes for SIGIL_VOTE_HOLD_MAX_SECS (default 60), vote anyway.
+    if held && vote_hold_expired(floor) {
+        held = false;
+    }
     if held {
         static HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = HELD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -162,6 +169,40 @@ fn vote_held(br: Option<&Braid>, h: u64) -> bool {
         }
     }
     held
+}
+
+/// True once the same pending floor has been holding votes longer than the limit
+/// (`SIGIL_VOTE_HOLD_MAX_SECS`, default 60; 0 = never expire). A new floor restarts the clock.
+fn vote_hold_expired(floor: Option<u64>) -> bool {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let limit = *LIMIT.get_or_init(|| {
+        std::env::var("SIGIL_VOTE_HOLD_MAX_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+    });
+    hold_clock_expired(floor, std::time::Instant::now(), std::time::Duration::from_secs(limit))
+}
+
+fn hold_clock_expired(floor: Option<u64>, now: std::time::Instant, limit: std::time::Duration) -> bool {
+    static SINCE: std::sync::Mutex<Option<(Option<u64>, std::time::Instant)>> = std::sync::Mutex::new(None);
+    if limit.is_zero() {
+        return false;
+    }
+    let Ok(mut s) = SINCE.lock() else { return false };
+    let started = match *s {
+        Some((f, t)) if f == floor => t,
+        _ => {
+            *s = Some((floor, now));
+            now
+        }
+    };
+    let expired = now.duration_since(started) >= limit;
+    if expired {
+        static LOGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+            eprintln!("⏯ finality vote hold EXPIRED: pending floor {floor:?} unresolved for {}s — voting on our own complete view",
+                now.duration_since(started).as_secs());
+        }
+    }
+    expired
 }
 
 /// 2026-10-08 (roadmap step 1): SPINE voting, the caller side of the signer guard
@@ -1371,6 +1412,11 @@ fn run_start() -> Result<()> {
         // `frontier.parent_hash() != tip` check catches exactly this), so an
         // explicit reset here would be redundant, not a safety requirement.
         let mut frontier_cache: Option<ChainTip> = None;
+        // 2026-10-17: the last full frontier build — (selected tip height, path walked,
+        // applied, why it stopped, frontier height) — reported every 30 s, and whether the
+        // producer may mint on a path that does not reach its selected tip (default: no).
+        let mut frontier_status: Option<(u64, usize, usize, &'static str, u64)> = None;
+        let mint_on_broken_spine = std::env::var("SIGIL_MINT_ON_BROKEN_SPINE").ok().as_deref() == Some("1");
         // v7.1.29: which SendBridge-pending tx hashes each of OUR OWN minted
         // candidates carries, keyed by that candidate's own block hash — lets
         // `dag_drain_apply` retire a pending send the instant its containing
@@ -2120,6 +2166,7 @@ fn run_start() -> Result<()> {
                     // cache and turns the fast path off for good in this process — the
                     // failure mode is bounded to at most that many blocks, and the follower
                     // would refuse them at the first divergent root.
+                    let mut frontier_broken: Option<Option<BlockHash>> = None;
                     let ff_can_reuse = ff_enabled
                         && braid.as_ref().is_some_and(|br| crate::frontier::frontier_reusable(frontier_cache.as_ref(), &chain, br));
                     let frontier_opt: Option<ChainTip> = if ff_can_reuse {
@@ -2141,8 +2188,40 @@ fn run_start() -> Result<()> {
                     } else {
                         if braid.is_some() { ff_rebuilds += 1; }
                         frontier_cache = None;
-                        braid.as_ref().map(|br| dag_build_frontier(&chain, br, &dag_bodies).frontier)
+                        braid.as_ref().map(|br| {
+                            let fb = dag_build_frontier(&chain, br, &dag_bodies);
+                            frontier_status = Some((fb.tip_height, fb.path_len, fb.applied, fb.fail_reason, fb.frontier.height()));
+                            if !fb.fail_reason.is_empty() {
+                                frontier_broken = Some(fb.gap);
+                            }
+                            fb.frontier
+                        })
                     };
+                    // 2026-10-17: NEVER MINT ON A BROKEN PATH. The frontier stopped below the
+                    // braid's selected tip (a body is missing, or a block does not chain on), so
+                    // a block minted here can never become the tip: on r1 one producer minted 378
+                    // blocks at a single height that way, each one more for its peers to chase.
+                    // Ask a peer for the missing body instead and try again next tick.
+                    // SIGIL_MINT_ON_BROKEN_SPINE=1 restores the old behaviour.
+                    if let (Some(gap), false) = (frontier_broken, mint_on_broken_spine) {
+                        if let Some(g) = gap {
+                            let want = parents_in_flight.take_new(&[g], std::time::Instant::now());
+                            if !want.is_empty() {
+                                let connected = mgr.connected_peers();
+                                if let Some(peer) = peer_affinity.best_for(&connected, None) {
+                                    spawn_parent_fetch(&mgr, peer, &want, &sync_hs, &bh_tx);
+                                }
+                            }
+                        }
+                        static BROKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let n = BROKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n % 256 == 0 {
+                            let (tip_h, walked, applied, why, fh) = frontier_status.unwrap_or((0, 0, 0, "", 0));
+                            eprintln!("⛔ not minting: our path to the selected tip H={tip_h} is broken ({why}; walked {walked}, applied {applied}, frontier H={fh}){} — {} ticks skipped",
+                                gap.map(|g| format!(", fetching {}", hex::encode(&g[..8]))).unwrap_or_default(), n + 1);
+                        }
+                        continue;
+                    }
                     ph_frontier_us += _t_frontier.elapsed().as_micros() as u64;
                     ph_ticks += 1;
                     let mint_ref: &ChainTip = frontier_opt.as_ref().unwrap_or(&chain);
@@ -2433,7 +2512,7 @@ fn run_start() -> Result<()> {
                                     if matches!(br.insert(view), InsertOutcome::Rejected(_)) { // own block joins the DAG
                                         frontier_cache = None;
                                     }
-                                    dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
+                                    dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, vh, body, &|h| body_use(br, h));
                                     // Remember what THIS specific candidate carries, keyed by
                                     // its own hash — dag_drain_apply looks this up ONLY for the
                                     // candidate(s) that actually land on the settled spine, so
@@ -2746,9 +2825,13 @@ fn run_start() -> Result<()> {
                                         format!("{} ← {} waiting, lowest {low}", hex::encode(&p[..8]), kids.len())
                                     }).collect();
                                     let st = br.stats();
-                                    eprintln!("🧩 parked {} · final H={} · missing parents: {}",
-                                        st.pending, st.finalized_height, parts.join(" | "));
+                                    eprintln!("🧩 parked {} · final H={} · dropped-to-make-room {} · missing parents: {}",
+                                        st.pending, st.finalized_height, st.overflow_evicted, parts.join(" | "));
                                 }
+                            }
+                            if let Some((tip_h, walked, applied, why, fh)) = frontier_status.filter(|_| n % 6 == 0) {
+                                eprintln!("🧭 frontier: selected tip H={tip_h} · walked {walked} · applied {applied} · {} · next block H={fh}",
+                                    if why.is_empty() { "path complete" } else { why });
                             }
                         }
                         // Phase 2's whole deliverable: the measured comparison
@@ -3634,7 +3717,7 @@ fn run_start() -> Result<()> {
                                     match br.insert(BlockView::from(&block.header)) {
                                         InsertOutcome::Inserted { .. } => {
                                             let topo = block.header.topology_commitment;
-                                            dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                            dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, block, &|h| body_use(br, h));
                                             // legacy tips deque stays fed for one release
                                             // (harmless; unused when braid is Some).
                                             peer_tips.push_back(bhash);
@@ -3682,7 +3765,7 @@ fn run_start() -> Result<()> {
                                             // 15 hours. The settled chain advances only from final
                                             // blocks: the braid's own finalized drain, or a peer's
                                             // range reply (served from ITS settled chain only).
-                                            dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                            dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, block, &|h| body_use(br, h));
                                             // 2026-10-07 (roadmap step 1): ALSO ask for the exact
                                             // missing parents BY HASH. The height-range ask below can
                                             // only return the server's own settled spine; the other
@@ -4327,11 +4410,11 @@ fn run_start() -> Result<()> {
                             match br.insert(BlockView::from(&block.header)) {
                                 InsertOutcome::Inserted { .. } => {
                                     ins += 1;
-                                    dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                    dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, block, &|h| body_use(br, h));
                                 }
                                 InsertOutcome::MissingParents(m) => {
                                     parked += 1;
-                                    dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                    dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, block, &|h| body_use(br, h));
                                     still_missing.extend(m);
                                 }
                                 _ => other += 1,
@@ -4411,7 +4494,7 @@ fn run_start() -> Result<()> {
                                         }
                                     }
                                     if matches!(br.insert(view), InsertOutcome::Inserted { .. }) {
-                                        dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, b);
+                                        dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, b, &|h| body_use(br, h));
                                     }
                                 }
                                 Err(e) => {
@@ -4953,7 +5036,7 @@ use genesis::{
 // in sigil-top for the shared consumer this move exists for.
 use dag::{
     compute_topology_commitment, dag_drain_apply, dag_seed_braid,
-    dag_store_body, pending_insert, prune_mint_hash_tracking, topology_commit_hash,
+    body_use, dag_store_body, dag_store_body_ranked, pending_insert, prune_mint_hash_tracking, topology_commit_hash,
     window_is_complete, MINT_HASH_TRACKING_CAP, PENDING_MAX_AHEAD, PENDING_MAX_ENTRIES,
     TOPOLOGY_COMMITMENT_WINDOW,
 };
@@ -5605,6 +5688,59 @@ mod dag_wiring_tests {
     //! `ChainTip::apply` chokepoint, delivered in worst-case (children-first)
     //! order. No node boot, no networking, no new dev-deps.
     use super::*;
+
+    /// 2026-10-17: a vote hold ends after the limit on the SAME pending floor; a new floor
+    /// restarts the clock; a zero limit never expires.
+    #[test]
+    fn a_vote_hold_expires_on_a_stuck_floor_and_restarts_on_a_new_one() {
+        use std::time::Duration;
+        let t0 = std::time::Instant::now();
+        let lim = Duration::from_secs(60);
+        assert!(!hold_clock_expired(Some(5), t0, lim));
+        assert!(!hold_clock_expired(Some(5), t0 + Duration::from_secs(59), lim));
+        assert!(hold_clock_expired(Some(5), t0 + Duration::from_secs(61), lim));
+        assert!(!hold_clock_expired(Some(6), t0 + Duration::from_secs(62), lim), "new floor, new clock");
+        assert!(hold_clock_expired(Some(6), t0 + Duration::from_secs(123), lim));
+        assert!(!hold_clock_expired(Some(6), t0 + Duration::from_secs(999), Duration::ZERO), "0 = never");
+    }
+
+    /// 2026-10-17: a full body store drops a block the braid does not know, then one still
+    /// waiting for parents (newest first), and only then the LOWEST held block. The old rule
+    /// (always lowest) threw away the unsettled blocks settlement needs next during a stall.
+    #[test]
+    fn a_full_body_store_keeps_the_lowest_held_blocks() {
+        let mut builder = ChainTip::new();
+        let g = build_genesis().expect("genesis");
+        let mut blocks = vec![g.clone()];
+        builder.apply(g).expect("apply genesis");
+        for _ in 0..3 {
+            let (b, _) = mint_next_block(&builder, vec![], &[], None, None, None, None).expect("mint");
+            blocks.push(b.clone());
+            builder.apply(b).expect("apply");
+        }
+        let [b0, b1, b2, b3] = [0, 1, 2, 3].map(|i| blocks[i].hash());
+        let mut bodies = std::collections::HashMap::new();
+        for b in &blocks {
+            bodies.insert(b.hash(), b.clone());
+        }
+        // b3 unknown to the braid, b2 parked, b0/b1 held → b3 goes first.
+        let uses = |u3: dag::BodyUse| move |h: &BlockHash| {
+            if *h == b3 { u3 } else if *h == b2 { dag::BodyUse::Parked } else { dag::BodyUse::Held }
+        };
+        assert_eq!(dag::body_to_evict(&bodies, &uses(dag::BodyUse::Unknown)), Some(b3));
+        // b3 and b2 both parked → the newest of them, b3.
+        assert_eq!(dag::body_to_evict(&bodies, &uses(dag::BodyUse::Parked)), Some(b3));
+        // Everything held → the old rule, lowest first.
+        assert_eq!(dag::body_to_evict(&bodies, &|_: &BlockHash| dag::BodyUse::Held), Some(b0));
+        // Through the store: cap 4, a fifth block arrives while b2 is parked → b2 is dropped.
+        let (extra, _) = mint_next_block(&builder, vec![], &[], None, None, None, None).expect("mint");
+        let eh = extra.hash();
+        dag_store_body_ranked(&mut bodies, 4, eh, extra, &|h: &BlockHash| {
+            if *h == b2 { dag::BodyUse::Parked } else { dag::BodyUse::Held }
+        });
+        assert!(bodies.contains_key(&b0) && bodies.contains_key(&b1) && bodies.contains_key(&eh));
+        assert!(!bodies.contains_key(&b2), "the parked block went, not the lowest held one");
+    }
 
     #[test]
     fn braid_drain_applies_spine_blocks_in_order() {

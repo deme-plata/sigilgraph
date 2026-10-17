@@ -347,6 +347,71 @@ pub fn dag_store_body(
     dag_bodies.insert(hash, block);
 }
 
+/// How useful a stored body is to the braid, for [`dag_store_body_ranked`]: a block the
+/// braid does not know at all, one still waiting for its own parents, or one it holds.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum BodyUse {
+    Unknown,
+    Parked,
+    Held,
+}
+
+/// The body a full store drops (2026-10-17). The old rule, lowest height first, was right
+/// when everything low is already settled; during a stall the lowest UNSETTLED blocks are
+/// the very ones settlement needs next, and on r1 the cap (reached at 01:29) threw them away
+/// on every node. So: a block the braid does not know, then one still waiting for parents —
+/// newest first in both, the furthest from being needed — and only then the lowest held one.
+pub fn body_to_evict(
+    dag_bodies: &HashMap<BlockHash, Block>,
+    use_of: &dyn Fn(&BlockHash) -> BodyUse,
+) -> Option<BlockHash> {
+    for class in [BodyUse::Unknown, BodyUse::Parked] {
+        if let Some(h) = dag_bodies
+            .iter()
+            .filter(|(h, _)| use_of(h) == class)
+            .max_by_key(|(h, b)| (b.header.height, **h))
+            .map(|(h, _)| *h)
+        {
+            return Some(h);
+        }
+    }
+    dag_bodies
+        .iter()
+        .min_by_key(|(h, b)| (b.header.height, **h))
+        .map(|(h, _)| *h)
+}
+
+/// [`dag_store_body`] with the eviction order of [`body_to_evict`], for callers that hold
+/// the braid. `use_of` is only consulted when the store is full.
+pub fn dag_store_body_ranked(
+    dag_bodies: &mut HashMap<BlockHash, Block>,
+    cap: usize,
+    hash: BlockHash,
+    block: Block,
+    use_of: &dyn Fn(&BlockHash) -> BodyUse,
+) {
+    if let Some(observe) = BLOCK_OBSERVER.get() {
+        observe(hash, block.header.parent_hash, block.header.height);
+    }
+    if dag_bodies.len() >= cap && !dag_bodies.contains_key(&hash) {
+        if let Some(evict) = body_to_evict(dag_bodies, use_of) {
+            dag_bodies.remove(&evict);
+        }
+    }
+    dag_bodies.insert(hash, block);
+}
+
+/// The braid's view of a stored body, for [`dag_store_body_ranked`].
+pub fn body_use(braid: &Braid, h: &BlockHash) -> BodyUse {
+    if braid.is_parked(h) {
+        BodyUse::Parked
+    } else if braid.contains(h) {
+        BodyUse::Held
+    } else {
+        BodyUse::Unknown
+    }
+}
+
 /// Bound on `mint_hash_to_tx_hashes` — same order of magnitude as `dag_bodies`'
 /// default cap (32,768). In practice this map stays tiny (only OUR OWN
 /// candidates that carried at least one pending send get an entry at all,

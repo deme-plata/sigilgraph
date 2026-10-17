@@ -43,6 +43,11 @@ pub struct FrontierBuild {
     pub applied: usize,
     /// Why the apply loop stopped early, if it did.
     pub fail_reason: &'static str,
+    /// Height of the braid's selected tip the walk started from (0 if none).
+    pub tip_height: u64,
+    /// The block whose body the walk needed and did not have, if that is where it
+    /// stopped (2026-10-17) — the hash to fetch from a peer.
+    pub gap: Option<BlockHash>,
 }
 pub fn dag_build_frontier(
     chain: &ChainTip,
@@ -60,15 +65,17 @@ pub fn dag_build_frontier(
     // 2026-09-12: one-block window, not the 8192-block clone — see ChainTip::fork_for_frontier.
     let mut frontier = chain.fork_for_frontier();
     let Some(tip) = braid.selected_tip() else {
-        return FrontierBuild { frontier, path_len: 0, applied: 0, fail_reason: "no-tip" };
+        return FrontierBuild { frontier, path_len: 0, applied: 0, fail_reason: "no-tip", tip_height: 0, gap: None };
     };
+    let tip_height = braid.height_of(&tip).unwrap_or(0);
     // THE COST: `base` is the settled tip, which only moves when the finality
     // drain lands. Every tick re-walks and re-applies [base, tip] from scratch.
     let base = frontier.height();
     let mut path: Vec<BlockHash> = Vec::new();
     let mut cur = tip;
+    let mut missing: Option<BlockHash> = None;
     loop {
-        let Some(b) = dag_bodies.get(&cur) else { break };
+        let Some(b) = dag_bodies.get(&cur) else { missing = Some(cur); break };
         if b.header.height < base { break; }
         path.push(cur);
         cur = b.header.parent_hash;
@@ -90,7 +97,10 @@ pub fn dag_build_frontier(
             break;
         }
     }
-    FrontierBuild { frontier, path_len, applied, fail_reason }
+    // A missing body only matters if the walk then failed to chain onto the settled tip
+    // (the settled tip's own body may legitimately be gone: the walk stops above it).
+    let gap = if fail_reason.is_empty() { None } else { missing };
+    FrontierBuild { frontier, path_len, applied, fail_reason, tip_height, gap }
 }
 
 /// The candidate fix: EXTEND a frontier carried across ticks instead of
@@ -146,7 +156,7 @@ pub fn dag_build_frontier_memo(
     let start = cached.expect("usable implies Some");
     let mut frontier = start.clone();
     let Some(tip) = braid.selected_tip() else {
-        return FrontierBuild { frontier, path_len: 0, applied: 0, fail_reason: "no-tip" };
+        return FrontierBuild { frontier, path_len: 0, applied: 0, fail_reason: "no-tip", tip_height: 0, gap: None };
     };
     let base = frontier.height();
     let mut path: Vec<BlockHash> = Vec::new();
@@ -191,7 +201,7 @@ pub fn dag_build_frontier_memo(
     if path_len == 0 && frontier.parent_hash() != tip {
         return dag_build_frontier(chain, braid, dag_bodies);
     }
-    FrontierBuild { frontier, path_len, applied, fail_reason }
+    FrontierBuild { frontier, path_len, applied, fail_reason, tip_height: 0, gap: None }
 }
 
 // UPDATE 2026-08-25: the fixture this file called for now exists —

@@ -155,6 +155,12 @@ pub struct Braid {
     /// clock for `evict_stale_pending`. Kept beside `pending` rather than inside
     /// `BlockView` so the wire type is untouched.
     pending_parked_at: HashMap<BlockHash, u64>,
+    /// Arrival order of each parked view (2026-10-17) — which one has waited longest
+    /// when the pool is full; see `evict_oldest_parked`.
+    pending_order: HashMap<BlockHash, u64>,
+    park_seq: u64,
+    /// Parked views dropped to make room for a newcomer in a full pool.
+    overflow_evicted: u64,
     rejected_count: u64,
     /// Parked views dropped at unpark time (turned stale/invalid/window-full).
     dropped_count: u64,
@@ -203,6 +209,9 @@ impl Braid {
             below_final_refused: 0,
             below_final_dropped: 0,
             pending_parked_at: HashMap::new(),
+            pending_order: HashMap::new(),
+            park_seq: 0,
+            overflow_evicted: 0,
             rejected_count: 0,
             dropped_count: 0,
         }
@@ -281,7 +290,13 @@ impl Braid {
                 InsertOutcome::Inserted { newly_ready }
             }
             Accept::Missing(missing) => {
-                if self.pending.len() >= self.cfg.max_pending {
+                // 2026-10-17: a full pool makes room by dropping the block that has waited
+                // LONGEST, instead of refusing the newcomer. Refusing kept the oldest waiters
+                // (on r1: strands whose root no node holds any more) and threw away every
+                // live block arriving after them; each refused block became a new hole, so
+                // the pool never emptied and the chain stayed frozen for hours. A dropped
+                // waiter is not lost for good: a later child names it and it is fetched again.
+                if self.pending.len() >= self.cfg.max_pending && !self.evict_oldest_parked() {
                     self.rejected_count += 1;
                     return InsertOutcome::Rejected("pending overflow");
                 }
@@ -347,7 +362,30 @@ impl Braid {
         if self.pending.insert(hash, view).is_none() {
             *self.pending_heights.entry(h).or_insert(0) += 1;
             self.pending_parked_at.insert(hash, at);
+            self.park_seq += 1;
+            self.pending_order.insert(hash, self.park_seq);
         }
+    }
+
+    /// Drop the parked view that has waited longest (arrival order — the tip-height stamp
+    /// cannot tell them apart while the tip is stuck, which is exactly when this runs).
+    /// Returns false if nothing is parked.
+    fn evict_oldest_parked(&mut self) -> bool {
+        let Some(oldest) = self
+            .pending_order
+            .iter()
+            .min_by_key(|&(h, seq)| (*seq, *h))
+            .map(|(h, _)| *h)
+        else {
+            return false;
+        };
+        self.unpark_take(&oldest);
+        for kids in self.waiters.values_mut() {
+            kids.retain(|k| *k != oldest);
+        }
+        self.waiters.retain(|_, kids| !kids.is_empty());
+        self.overflow_evicted += 1;
+        true
     }
 
     /// Height of the currently selected tip, if the window has one.
@@ -410,6 +448,7 @@ impl Braid {
     fn unpark_take(&mut self, hash: &BlockHash) -> Option<BlockView> {
         let view = self.pending.remove(hash)?;
         self.pending_parked_at.remove(hash);
+        self.pending_order.remove(hash);
         if let std::collections::btree_map::Entry::Occupied(mut e) =
             self.pending_heights.entry(view.height)
         {
@@ -1230,6 +1269,7 @@ impl Braid {
         let before = self.pending.len();
         self.pending.retain(|_, v| v.height > f);
         self.pending_parked_at.retain(|h, _| self.pending.contains_key(h));
+        self.pending_order.retain(|h, _| self.pending.contains_key(h));
         if self.pending.len() != before {
             self.rebuild_pending_heights();
         }
@@ -1393,6 +1433,7 @@ impl Braid {
             below_final_dropped: self.below_final_dropped,
             rejected: self.rejected_count,
             dropped: self.dropped_count,
+            overflow_evicted: self.overflow_evicted,
             dag_memory_bytes: self.dag.stats().memory_bytes,
             finality_margin: self.finality_margin(),
         }
@@ -1497,6 +1538,8 @@ pub struct BraidStats {
     pub rejected: u64,
     /// Parked views dropped at unpark time (stale / invalid / window-full).
     pub dropped: u64,
+    /// Parked views dropped to make room for a newcomer in a full pool (2026-10-17).
+    pub overflow_evicted: u64,
     /// Bytes held by the bitfield substrate.
     pub dag_memory_bytes: usize,
     /// See [`Braid::finality_margin`] — early-warning distance to the next
@@ -2473,6 +2516,34 @@ mod tests {
             "the stuck pending entries must actually be evicted once \
              finality passes their height, not just orphaned in theory"
         );
+    }
+
+    /// 2026-10-17 (the r1 freeze): a full pool drops the block that has waited LONGEST and
+    /// parks the newcomer. Before, the newcomer was refused, so a pool filled with blocks
+    /// whose root no node holds any more refused every live block after them, forever.
+    #[test]
+    fn a_full_pending_pool_drops_its_oldest_waiter_not_the_newcomer() {
+        let mut c = cfg(1);
+        c.max_pending = 2;
+        let mut b = Braid::new(c);
+        b.insert(genesis());
+        let dead_root = h(99); // never arrives
+        let (d1, d2) = (h(50), h(51));
+        assert!(matches!(b.insert(v(d1, dead_root, vec![], 1, PA)), InsertOutcome::MissingParents(_)));
+        assert!(matches!(b.insert(v(d2, dead_root, vec![], 1, PB)), InsertOutcome::MissingParents(_)));
+        // A live block whose parent is merely late: it must park, and d1 (oldest) must go.
+        let late_parent = h(60);
+        let live = h(61);
+        assert!(matches!(b.insert(v(live, late_parent, vec![], 2, PA)), InsertOutcome::MissingParents(_)));
+        assert_eq!(b.pending.len(), 2, "still bounded by max_pending");
+        assert!(!b.is_parked(&d1) && b.is_parked(&d2) && b.is_parked(&live));
+        assert_eq!(b.stats().overflow_evicted, 1);
+        assert_eq!(b.stats().rejected, 0, "nothing refused");
+        // The dropped waiter is forgotten as a waiter too, so no stale entry names it.
+        assert!(b.missing_parent_report(8).iter().all(|(_, kids)| kids.iter().all(|(k, _)| *k != d1)));
+        // When the late parent arrives the live block joins the window.
+        assert!(matches!(b.insert(v(late_parent, h(0), vec![], 1, PA)), InsertOutcome::Inserted { newly_ready: 2 }));
+        assert!(!b.is_parked(&live));
     }
 
     /// Companion to the saturated case above: BELOW the cap, behavior must

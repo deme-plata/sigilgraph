@@ -62,6 +62,19 @@ pub fn dag_seed_braid(chain: &ChainTip) -> Braid {
         }
     }
     eprintln!("🕸 braid seeded with {} local window blocks", seeded);
+    // 2026-10-17 (issue 7): a braid that follows finality certificates starts out anchored
+    // at the settled tip. Settled = final there, but a fresh braid knew no certificate until
+    // the NEXT one arrived, so its fork choice was plain "highest tip": on r1 a producer that
+    // restarted behind built its own strand below the others' final block, it was the highest,
+    // every other node chose it, and none could build on it. Anchored, a strand that does not
+    // descend from our final block is never chosen and blocks at or below it are refused.
+    if b.follows_certificates() && chain.height() > 0 {
+        let tip_h = chain.height() - 1;
+        if let Some(tip) = chain.get(tip_h) {
+            let out = b.set_certified(tip_h, tip.hash());
+            eprintln!("🕸 braid anchored at the settled tip H={tip_h} ({out:?})");
+        }
+    }
     b
 }
 

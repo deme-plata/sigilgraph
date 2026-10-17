@@ -958,6 +958,13 @@ fn run_start() -> Result<()> {
         // joins mid-stream and gaps forever, Phase 0 has no backfill).
         let grace_ms: u64 = std::env::var("SIGIL_PRODUCE_GRACE_MS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
+        // 2026-10-17 (issue 7): catch up before producing — see the gate in the produce arm.
+        let produce_boot_at = std::time::Instant::now();
+        let produce_sync_margin: u64 = std::env::var("SIGIL_PRODUCE_SYNC_MARGIN")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        let produce_sync_wait = std::time::Duration::from_secs(
+            std::env::var("SIGIL_PRODUCE_SYNC_WAIT_S").ok().and_then(|v| v.parse().ok()).unwrap_or(20),
+        );
         // 📸 v0.36.1: periodic producer state snapshot every SIGIL_SNAPSHOT_EVERY
         // blocks (default 100_000 ≈ 10 min at ~156 blk/s; 0 disables). The capture
         // (clone of state + 8192-block window) happens on the producer tick; the
@@ -2100,7 +2107,12 @@ fn run_start() -> Result<()> {
                     // — otherwise the receiver joins mid-stream and gaps
                     // forever (Phase 0 has no backfill). Once grace elapses,
                     // both advance from H=1 in lockstep.
-                    let peers = mgr.summary().peer_count;
+                    let sum_now = mgr.summary();
+                    let peers = sum_now.peer_count;
+                    // 2026-10-17 (issue 7): the highest SETTLED height another node advertises
+                    // (peer-heights heartbeat, every 5 s); None until one has been heard.
+                    let net_settled: Option<u64> =
+                        sum_now.mesh_health.as_ref().and_then(|h| h.peer_heights.values().copied().max());
                     // DEV: SIGIL_SOLO_MINT=1 lets a single node mint with no peer
                     // (self-contained coinbase/chronos proofs). Off by default —
                     // the peer+grace gate below is unchanged for real meshes.
@@ -2119,6 +2131,30 @@ fn run_start() -> Result<()> {
                     {
                         producing = true;
                         eprintln!("🏭 grace elapsed — streaming blocks now");
+                    }
+                    // 2026-10-17 (issue 7): CATCH UP BEFORE PRODUCING. A producer that restarted
+                    // with a settled chain BEHIND the network's (r1: 3,158 while the others had
+                    // 3,199 final) minted its own strand from its stale tip, under blocks the others
+                    // had already finalized. So: no minting while another node advertises a settled
+                    // height more than SIGIL_PRODUCE_SYNC_MARGIN (8) above ours — the range backfill
+                    // closes the gap meanwhile — nor in the first SIGIL_PRODUCE_SYNC_WAIT_S (20) s
+                    // before any height has been heard. Advertised heights are unauthenticated: a
+                    // lying peer can delay a producer, never make it mint on a wrong tip.
+                    if producing && !solo && dag_mode {
+                        let behind_by = net_settled.map(|n| n.saturating_sub(chain.height()));
+                        let unheard = behind_by.is_none() && produce_boot_at.elapsed() < produce_sync_wait;
+                        if unheard || behind_by.is_some_and(|d| d > produce_sync_margin) {
+                            static SYNC_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                            let n = SYNC_WAIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if n % 256 == 0 {
+                                match behind_by {
+                                    Some(d) => eprintln!("⏳ not minting: our settled H={} is {d} behind the network's {} — catching up first ({} ticks)",
+                                        chain.height().saturating_sub(1), net_settled.unwrap_or(0).saturating_sub(1), n + 1),
+                                    None => eprintln!("⏳ not minting yet: no peer has told us its height ({} ticks)", n + 1),
+                                }
+                            }
+                            continue;
+                        }
                     }
                     if producing {
                     // DAGKnight: mint on the FRONTIER (settled chain + pending selected

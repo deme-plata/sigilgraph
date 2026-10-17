@@ -241,6 +241,27 @@ pub(crate) fn oversized_store_for_light_boot(path: &str, want_sync: bool) -> Opt
     }
 }
 
+/// Where a fallback store goes when the primary can't be opened: BESIDE the primary's real
+/// location (symlinks resolved), as `<primary file name>.<kind>`, never in the system temp
+/// dir. 10.4.36, after 2026-10-16: the temp fallback put a fresh full-chain re-sync on
+/// Epsilon's 40 GB root disk (the primary was a symlink into the 80 TB array) and filled it
+/// twice in one night; it also shared `/tmp/sigil-top-blocks.db` with an unrelated
+/// sigil-top. Beside the primary, a fallback lives on the disk the user chose for blocks.
+pub(crate) fn fallback_store_path(db_path: &str, kind: &str) -> std::path::PathBuf {
+    let primary = std::path::Path::new(db_path);
+    let real = std::fs::canonicalize(primary).unwrap_or_else(|_| primary.to_path_buf());
+    let name = real
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sigil-top-blocks.db".to_string());
+    let dir = real
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    dir.join(format!("{name}.{kind}"))
+}
+
 pub(crate) fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut n = bytes as f64;
@@ -323,7 +344,9 @@ fn open_store_with_fallbacks_inner(
                 match dir_size_capped(db_path, BIG_STORE_BYTES) {
                     Ok(bytes) if bytes > BIG_STORE_BYTES => {
                         boot_trace(&format!("store is >{} bytes — open watchdog DISABLED (never abandon a big archive)", BIG_STORE_BYTES));
-                        u64::MAX / 4 // effectively: wait for the open, however long
+                        // wait for the open, however long — this also switches off the
+                        // block store's own no-progress check (10.4.36)
+                        block_store::OPEN_NEVER_ABANDON
                     }
                     _ => 180,
                 }
@@ -332,15 +355,15 @@ fn open_store_with_fallbacks_inner(
             Ok(s) => s,
             Err(primary) => {
                 boot_trace(&format!("primary store open failed/hung: {primary}"));
-                let temp_path = std::env::temp_dir().join("sigil-top-blocks.db");
+                let temp_path = fallback_store_path(db_path, "fallback");
+                boot_trace(&format!("fallback store path={}", temp_path.display()));
                 match block_store::BlockStore::open_with_timeout(temp_path.to_string_lossy().as_ref(), open_timeout) {
                     Ok(s) => {
                         note = Some(format!("⚠ primary block store unavailable ({primary}); using temp store"));
                         s
                     }
                     Err(temp_err) => {
-                        let volatile = std::env::temp_dir()
-                            .join(format!("sigil-top-blocks-volatile-{}.db", std::process::id()));
+                        let volatile = fallback_store_path(db_path, &format!("volatile-{}", std::process::id()));
                         match block_store::BlockStore::open_with_timeout(volatile.to_string_lossy().as_ref(), open_timeout) {
                             Ok(s) => {
                                 note = Some(format!("⚠ block store fallback is volatile ({primary}; temp: {temp_err})"));
@@ -415,6 +438,49 @@ mod foreign_store_tests {
         reset_store_on_network_change(&path);
         assert!(!store.exists(), "the foreign store must be cleared");
         assert_eq!(std::fs::read_to_string(format!("{path}.netid")).unwrap().trim(), current);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 10.4.36: a fallback store lands beside the primary's REAL location, never in the
+    /// system temp dir — on 2026-10-16 the primary was a symlink from the small root disk
+    /// into the big array, and the temp fallback filled the root disk.
+    #[test]
+    fn a_fallback_store_sits_beside_the_real_primary_not_in_temp() {
+        let dir = std::env::temp_dir().join(format!("sigil-top-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let array = dir.join("array");
+        let home = dir.join("home");
+        std::fs::create_dir_all(array.join("sigil-top-blocks.db")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let link = home.join("sigil-top-blocks.db");
+        std::os::unix::fs::symlink(array.join("sigil-top-blocks.db"), &link).unwrap();
+
+        let fb = fallback_store_path(link.to_str().unwrap(), "fallback");
+        let real_array = std::fs::canonicalize(&array).unwrap();
+        assert_eq!(fb, real_array.join("sigil-top-blocks.db.fallback"));
+        assert!(!fb.starts_with(std::fs::canonicalize(&home).unwrap()));
+
+        // a primary that does not exist yet: beside the path as given
+        let fresh = fallback_store_path(home.join("new.db").to_str().unwrap(), "volatile-7");
+        assert_eq!(fresh, home.join("new.db.volatile-7"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_big_store_open_is_never_abandoned() {
+        // the value sigil-top passes for a store over 256 MB is the block store's own
+        // never-abandon marker, which also switches off its no-progress check
+        assert!(block_store::OPEN_NEVER_ABANDON >= u64::MAX / 4);
+        let dir = std::env::temp_dir().join(format!("sigil-top-patient-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("s.db");
+        let s = block_store::BlockStore::open_with_timeout_and_progress(
+            p.to_str().unwrap(),
+            block_store::OPEN_NEVER_ABANDON,
+            Some(block_store::OpenProgress::new()),
+        );
+        assert!(s.is_ok());
+        drop(s);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

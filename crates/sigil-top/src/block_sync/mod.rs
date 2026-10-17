@@ -576,11 +576,24 @@ impl P2PBlockSync {
                                     // existing 100_000-block bar (scaled down since first-boot
                                     // poisoning can legitimately be smaller in magnitude, but
                                     // ordinary propagation jitter is nowhere near this size).
+                                    //
+                                    // 10.4.36: and even a REAL gap no longer wipes the store. What
+                                    // is suspect here is the remembered SEED (a number), not the
+                                    // block store: dropping the seed is the whole cure. Setting
+                                    // reset_pending made the sync loop zero synced_to AND
+                                    // verified_to of a healthy archive on ONE oracle read (2,000
+                                    // blocks is ~4 min of a stale CDN answer at 8 blk/s). Measured
+                                    // 2026-10-16 on a 43 M-block store: every later open re-walked
+                                    // the synced pointer for ~2 h with no visible progress (the
+                                    // block store's 45 s check then threw the archive away), and
+                                    // the spine re-verifies 43 M blocks. A genuine chain reset is
+                                    // still caught by the 3-poll streak branches below and by the
+                                    // foreign-genesis check on the first verify break.
                                     const FIRST_POLL_POISON_GAP: u64 = 2_000;
                                     let looks_poisoned = pb > h && pb - h > FIRST_POLL_POISON_GAP;
                                     crate::tlog!(
                                         "[tipfetch] first oracle confirmation this session — adopting {} over unverified seed {}{}",
-                                        h, pb, if looks_poisoned { " (gap looks poisoned, wiping)" } else { "" }
+                                        h, pb, if looks_poisoned { " (seed looks poisoned — seed dropped, block store kept)" } else { "" }
                                     );
                                     s.peer_best_height = h;
                                     s.peer_best_oracle_confirmed = true;
@@ -589,7 +602,6 @@ impl P2PBlockSync {
                                     s.sync_total    = s.sync_total.min(h);
                                     s.verified      = s.verified.min(h);
                                     if s.base > h { s.base = h; }
-                                    if looks_poisoned { s.reset_pending = true; }
                                     reset_streak = 0;
                                     clear_persisted_tip();
                                     persist = Some(h);

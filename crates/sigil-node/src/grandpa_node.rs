@@ -193,6 +193,22 @@ impl GrandpaNode {
     pub fn last_finalized(&self) -> (Hash, Number) {
         self.env.last_finalized()
     }
+
+    /// One diagnostic line (2026-10-17): the round this voter is in, the last round it saw
+    /// complete, what it has finalized, and what it prefers to vote for.
+    pub fn status_line(&self) -> String {
+        let fin = self.env.last_finalized();
+        let pref = *self.env.preferred.lock();
+        let n = self.net.my_round();
+        format!(
+            "round {} · last completed {:?} · finalized H={} · prefers {} · votes held this round {:?}",
+            n,
+            self.net.completed_round(),
+            fin.1,
+            pref.map(|(h, n)| format!("H={n} {}", hex::encode(&h[..4]))).unwrap_or_else(|| "nothing".into()),
+            self.net.round_summary(n),
+        )
+    }
 }
 
 /// Raise the braid's finality line to the newest GRANDPA-finalized block, if the braid can

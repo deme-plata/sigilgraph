@@ -68,7 +68,11 @@ pub fn dag_seed_braid(chain: &ChainTip) -> Braid {
     // restarted behind built its own strand below the others' final block, it was the highest,
     // every other node chose it, and none could build on it. Anchored, a strand that does not
     // descend from our final block is never chosen and blocks at or below it are refused.
-    if b.follows_certificates() && chain.height() > 0 {
+    // Opt-in (SIGIL_DAG_ANCHOR_SEED=1) since the first r1 test: with it on, a follower that was
+    // catching up after a rolling restart re-anchored at every re-seed and did not get back to
+    // the tip (r4 stuck at 6,874–7,114 while the others finalized 7,452) — under investigation.
+    let anchor_seed = std::env::var("SIGIL_DAG_ANCHOR_SEED").ok().as_deref() == Some("1");
+    if anchor_seed && b.follows_certificates() && chain.height() > 0 {
         let tip_h = chain.height() - 1;
         if let Some(tip) = chain.get(tip_h) {
             let out = b.set_certified(tip_h, tip.hash());

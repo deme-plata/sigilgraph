@@ -2865,6 +2865,9 @@ fn run_start() -> Result<()> {
                                         st.pending, st.finalized_height, st.overflow_evicted, parts.join(" | "));
                                 }
                             }
+                            if let Some(g) = grandpa.as_ref().filter(|_| n % 6 == 0) {
+                                eprintln!("🏁 grandpa status: {}", g.status_line());
+                            }
                             if let Some((tip_h, walked, applied, why, fh)) = frontier_status.filter(|_| n % 6 == 0) {
                                 eprintln!("🧭 frontier: selected tip H={tip_h} · walked {walked} · applied {applied} · {} · next block H={fh}",
                                     if why.is_empty() { "path complete" } else { why });

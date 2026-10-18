@@ -186,6 +186,29 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<Option<(String,
     Ok(Some((head, body)))
 }
 
+/// 10.4.39: the address `/w` redirects to — handed over by the TUI, which already knows its
+/// mining address. Never computed here: `miner_wallet()` CREATES a wallet when none exists, and
+/// a page visit must not mint a seed file as a side effect. Empty = `/w` behaves like `/`.
+static SHORT_LINK_ADDR: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// Tell the server which PUBLIC address `/w` opens (called whenever the TUI brings it up).
+pub(crate) fn remember_wallet_addr(addr: &str) {
+    if let Ok(mut g) = SHORT_LINK_ADDR.write() {
+        *g = addr.to_string();
+    }
+}
+
+/// Where `/w` sends the browser. Only an exact 64-hex address goes into the header — anything
+/// else (unset, or junk with CR/LF in it) gets the plain wallet page.
+fn short_link_location() -> String {
+    let a = SHORT_LINK_ADDR.read().map(|g| g.clone()).unwrap_or_default();
+    if a.len() == 64 && a.bytes().all(|b| b.is_ascii_hexdigit()) {
+        format!("/?addr={a}")
+    } else {
+        "/".into()
+    }
+}
+
 fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Option<&LocalApi>) {
     let (head, req_body_bytes) = match read_http_request(stream) {
         Ok(Some(r)) => r,
@@ -355,6 +378,17 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
 
     // Decode URL (static files)
     let path = path.split('?').next().unwrap_or(path);
+    // 10.4.39: `localhost:9800/w` is the SHORT [W] link — 23 characters instead of ~110 (a
+    // 64-hex address), so it fits any terminal and can be copied. Same page, same address.
+    if path == "/w" || path == "/w/" {
+        let resp = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            short_link_location()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+        return;
+    }
     let path = if path == "/" { "/sigil-wallet-tron.html" } else { path };
     let safe = path.trim_start_matches('/').replace("..", "").replace('\\', "");
 
@@ -1936,6 +1970,69 @@ pub mod pay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 10.4.39: `/w` redirects to the wallet page for the address the TUI handed over — and
+    /// only a real 64-hex address ever reaches the Location header.
+    /// Both /w tests set the process-wide SHORT_LINK_ADDR; tests run in parallel.
+    static SHORT_LINK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_short_wallet_link_redirects_to_this_nodes_address() {
+        let _one_at_a_time = SHORT_LINK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Read;
+        use std::net::{TcpListener, TcpStream};
+        let get = |addr_set: &str| -> String {
+            remember_wallet_addr(addr_set);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = listener.local_addr().unwrap();
+            let client = std::thread::spawn(move || {
+                let mut s = TcpStream::connect(at).unwrap();
+                s.write_all(b"GET /w?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+                let mut out = String::new();
+                let _ = s.read_to_string(&mut out);
+                out
+            });
+            let (mut conn, _) = listener.accept().unwrap();
+            handle_conn(&mut conn, &PathBuf::from("/nonexistent-sigil-static"), None);
+            drop(conn);
+            client.join().unwrap()
+        };
+        let a = "ab".repeat(32);
+        let r = get(&a);
+        assert!(r.starts_with("HTTP/1.1 302 Found\r\n"), "{r}");
+        assert!(r.contains(&format!("\r\nLocation: /?addr={a}\r\n")), "{r}");
+        let r = get("not-an-address\r\nX-Evil: 1");
+        assert!(r.contains("\r\nLocation: /\r\n") && !r.contains("X-Evil"), "{r}");
+        let r = get("");
+        assert!(r.contains("\r\nLocation: /\r\n"), "{r}");
+    }
+
+    /// 10.4.39: the [W] key's own check, against this server: it accepts the short link only
+    /// when `/w` redirects to THIS node's address (another sigil-top on the port would not).
+    #[test]
+    fn the_w_key_accepts_the_short_link_only_from_a_server_that_knows_its_address() {
+        let _one_at_a_time = SHORT_LINK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        use std::net::TcpListener;
+        let serve_one = || {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let t = std::thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                handle_conn(&mut conn, &PathBuf::from("/nonexistent-sigil-static"), None);
+            });
+            (port, t)
+        };
+        let mine = "cd".repeat(32);
+        remember_wallet_addr(&mine);
+        let (port, t) = serve_one();
+        assert!(crate::wallet_ui::short_link_answers(port, &mine));
+        t.join().unwrap();
+        let (port, t) = serve_one();
+        assert!(!crate::wallet_ui::short_link_answers(port, &"ef".repeat(32)), "a server redirecting elsewhere is refused");
+        t.join().unwrap();
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(!crate::wallet_ui::short_link_answers(dead, &mine), "nothing listening → full link");
+    }
 
     /// 2026-10-17: a private send's body (~210 KB) is read WHOLE — it used to be cut at the
     /// first 4 KiB read. Binary bytes survive untouched; a body shorter than its

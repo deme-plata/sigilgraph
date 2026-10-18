@@ -2574,6 +2574,9 @@ pub(crate) use safe_backend::SafeSizeBackend;
 // and the reason was invisible because `serve_status` is rendered nowhere. Both
 // the keypress paths and the watchdog now go through here.
 fn ensure_serve_up(app: &mut App) -> bool {
+    // 10.4.39: `/w` opens this address (the server never derives it itself — see
+    // serve::SHORT_LINK_ADDR for why).
+    serve::remember_wallet_addr(&miner_wallet());
     if wallet_server_alive() {
         return true;
     }
@@ -3241,7 +3244,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     app.toast = format!("✗ local wallet server down ({})", app.serve_status).into();
                                     app.toast_sticky = true;
                                 } else if open_browser_private(&url) {
-                                    app.toast = format!("◆ local wallet → {url}").into();
+                                    // 10.4.39: show `localhost:9800/w` when this server answers it —
+                                    // the full link (~110 characters) was cut at the terminal's edge
+                                    // (operator, 2026-10-18). The browser still gets the full URL.
+                                    app.toast = format!("◆ local wallet → {}", wallet_ui::shown_wallet_link(&url)).into();
                                     app.toast_sticky = false;
                                 } else {
                                     // Headless (SSH/terminal-only): localhost:9800 only means
@@ -3256,7 +3262,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     // away, headless just never pointed at it. Offer the tunnel
                                     // that actually reaches it, alongside the remote fallback.
                                     let fallback = wallet_ui::headless_wallet_view_url();
-                                    app.toast = match wallet_ui::ssh_tunnel_hint() {
+                                    app.toast = match wallet_ui::ssh_tunnel_hint(&wallet_ui::shown_wallet_link(&url)) {
                                         Some(hint) => format!("🔐 {hint}\n🔗 or, prompted: {fallback}").into(),
                                         None => format!("🔗 headless — open your wallet from any device:  {fallback}").into(),
                                     };

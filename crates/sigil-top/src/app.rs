@@ -591,6 +591,9 @@ impl App {
         }
         // v0.2.35: carry wallet balance from feed into local state (non-breaking — 0 when absent).
         if self.st.wallet_balance > 0 { self.wallet_balance = self.st.wallet_balance; }
+        // 2026-10-19: the feed never carries a wallet, so poll the node for the mining wallet.
+        crate::ai_tools::start_balance_poller();
+        if let Some(b) = crate::ai_tools::polled_balance() { self.wallet_balance = b; }
         // Auto-update signal: poll the flux release channel every 5 min so the update
         // v0.7.5: Non-blocking update check — runs on background thread
         if self.last_update_check.elapsed() > Duration::from_secs(300) {

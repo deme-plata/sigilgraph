@@ -140,6 +140,38 @@ pub(crate) fn is_shielded_addr(s: &str) -> bool {
 
 fn short(a: &str) -> String { if a.len() > 16 { format!("{}…{}", &a[..8], &a[a.len() - 4..]) } else { a.to_string() } }
 
+/// The mining wallet's PUBLIC balance, polled every 30 s on a background thread for the dashboard
+/// card (2026-10-19: that line read 0.00 for everyone — nothing ever filled it). Same node as [W]'s
+/// proxy. On g3 block rewards are public, so this is the balance a miner earns into.
+static POLLED_BAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static POLLED_BAL_KNOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static POLLER: std::sync::Once = std::sync::Once::new();
+
+pub(crate) fn start_balance_poller() {
+    use std::sync::atomic::Ordering;
+    POLLER.call_once(|| {
+        std::thread::spawn(|| loop {
+            let base = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+            let wallet = crate::miner_wallet();
+            if is_wallet(&wallet) {
+                if let Ok(j) = get(base.trim_end_matches('/'), &format!("/v1/balance?wallet={wallet}")) {
+                    if let Some(g) = j.pointer("/data/balance").and_then(|v| v.as_str()).and_then(|s| s.parse::<u64>().ok()) {
+                        POLLED_BAL.store(g, Ordering::Relaxed);
+                        POLLED_BAL_KNOWN.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+    });
+}
+
+/// `None` until the node has answered once — the card then shows "—", never a false 0.00.
+pub(crate) fn polled_balance() -> Option<u128> {
+    use std::sync::atomic::Ordering;
+    POLLED_BAL_KNOWN.load(Ordering::Relaxed).then(|| POLLED_BAL.load(Ordering::Relaxed) as u128)
+}
+
 fn get(base: &str, path: &str) -> Result<Value, String> {
     let url = format!("{base}{path}");
     let r = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(15)).build()

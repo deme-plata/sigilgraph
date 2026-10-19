@@ -465,7 +465,11 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
 
     // ── telemetry (left): network economics + YOUR mining ────────────────
     let est_earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
-    let wallet_bal = fmt_glyphs(app.wallet_balance, 2);
+    let wallet_bal = if app.wallet_balance > 0 || crate::ai_tools::polled_balance().is_some() {
+        fmt_glyphs(app.wallet_balance, 2)
+    } else {
+        "—".to_string()   // the node has not answered yet: never show a false 0.00
+    };
     let tlines = vec![
         Line::from(vec![
             dim("reward "), Span::styled(format!("{} SIGIL/blk", crate::heroes::reward_text(app.st.reward_sig)), Style::default().fg(C_GREEN)),

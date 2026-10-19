@@ -54,7 +54,7 @@ pub(crate) fn headless_wallet_view_url() -> String {
 /// itself. Returns `None` when no seed is configured: there would be nothing
 /// zero-prompt to tunnel to, and offering the tunnel would just relocate the
 /// same recovery-phrase prompt to a different browser tab.
-pub(crate) fn ssh_tunnel_hint() -> Option<String> {
+pub(crate) fn ssh_tunnel_hint(link: &str) -> Option<String> {
     crate::miner_seed()?;
     let user = std::env::var("USER").ok()
         .or_else(|| std::env::var("LOGNAME").ok())
@@ -66,9 +66,51 @@ pub(crate) fn ssh_tunnel_hint() -> Option<String> {
         .and_then(|s| s.split_whitespace().nth(2).map(str::to_string))
         .unwrap_or_else(|| "<this-machine>".into());
     Some(format!(
-        "zero-prompt signing is running locally — from your OWN device: ssh -L 9800:localhost:9800 {user}@{host}  then open http://localhost:9800/?addr={}",
-        crate::miner_wallet()
+        "zero-prompt signing is running locally — from your OWN device: ssh -L 9800:localhost:9800 {user}@{host}  then open {link}"
     ))
+}
+
+/// 10.4.39: the short form of the [W] link — `http://localhost:9800/w`, 23 characters. The
+/// full one (`/?addr=` + a 64-hex address, ~110 characters) was cut at the terminal's edge.
+pub(crate) fn short_wallet_link() -> String {
+    format!("http://localhost:{WALLET_PORT}/w")
+}
+
+/// A `/w` reply head that redirects to the wallet page for `addr`.
+fn redirects_to(head: &str, addr: &str) -> bool {
+    head.starts_with("HTTP/1.1 302") && head.contains(&format!("\r\nLocation: /?addr={addr}\r\n"))
+}
+
+/// True when the server holding :9800 answers `/w` with THIS node's address — i.e. it is this
+/// binary's server. An older sigil-top (or a second copy) holding the port would answer 404 or
+/// send the browser elsewhere, and then the toast must show the full link instead.
+pub(crate) fn short_link_works(addr: &str) -> bool {
+    short_link_answers(WALLET_PORT, addr)
+}
+
+/// [`short_link_works`] against any local port (tests run a real server on an ephemeral one).
+pub(crate) fn short_link_answers(port: u16, addr: &str) -> bool {
+    use std::io::{Read, Write};
+    let sa = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&sa, std::time::Duration::from_millis(300)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    if s.write_all(b"GET /w HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let _ = (&mut s).take(4096).read_to_end(&mut buf);
+    redirects_to(&String::from_utf8_lossy(&buf), addr)
+}
+
+/// The link the [W] toast shows: the short one when this server answers it, else `full`.
+pub(crate) fn shown_wallet_link(full: &str) -> String {
+    if short_link_works(&crate::miner_wallet()) {
+        short_wallet_link()
+    } else {
+        full.to_string()
+    }
 }
 
 pub(crate) fn dirs_next() -> Option<std::path::PathBuf> {

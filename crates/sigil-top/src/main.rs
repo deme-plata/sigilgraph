@@ -39,6 +39,7 @@ mod serve;
 mod heroes;
 use heroes::*;
 mod mining_ui;  // LANE-U: mining tab + hero renderers
+mod forge_ui;   // 10.4.27: ◆ PRODUCER hero — the seal + block belt, from producer::status
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
@@ -77,6 +78,9 @@ mod producer;
 // crate's Cargo.toml `shield-register` feature comment).
 #[cfg(feature = "shield-register")]
 mod shield_setup;
+// The private-balance scanner (2026-10-17): incremental, per generation, view tags.
+#[cfg(feature = "shield-register")]
+mod shield_scan;
 
 use crate::cathedral::Cathedral;
 
@@ -383,8 +387,40 @@ fn main() {
             }
             boot_trace("producer-mode: full node requested — sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
             tlog!("[producer] full node requested (F / persisted full / SIGIL_TOP_PRODUCE=1) — sync-then-produce bootstrap starting");
-            if let Some(handle) = producer::run::maybe_start(Duration::from_millis(tick_ms)) {
-                if let Ok(mut g) = slot_bg.lock() { *g = Some(handle); }
+            // 10.4.27: a refused bootstrap is no longer final. Viktor's Windows node (2026-10-15)
+            // read "full node: refused" until restarted, because one failed snapshot fetch
+            // ended the attempt for the life of the process. Now it tries again with a growing
+            // pause (1 → 2 → 5 min, then every 5 min), shown on the PRODUCER card as a countdown.
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                producer::status::set_retry_at(0);
+                // Leave REFUSED before the new attempt starts, or the wait below would read the
+                // previous attempt's verdict and give up instantly.
+                producer::status::set_replayed(0);
+                producer::status::set_phase(producer::status::SYNCING);
+                if attempt > 1 {
+                    producer::status::set_message("");
+                    tlog!("[producer] bootstrap attempt {attempt} — trying again");
+                }
+                match producer::run::maybe_start(Duration::from_millis(tick_ms)) {
+                    Some(handle) => { if let Ok(mut g) = slot_bg.lock() { *g = Some(handle); } }
+                    None => return,
+                }
+                // Wait while the loop syncs or produces; only a REFUSED phase brings us back.
+                while producer::status::phase() != producer::status::REFUSED {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                if let Ok(mut g) = slot_bg.lock() { g.take(); }
+                let pause = match attempt { 1 => 60, 2 => 120, _ => 300 };
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                producer::status::set_retry_at(now + pause);
+                tlog!("[producer] bootstrap refused ({}) — retrying in {pause}s", producer::status::message());
+                std::thread::sleep(Duration::from_secs(pause));
+                if !producer::full_node_requested() {
+                    producer::status::set_retry_at(0);
+                    while !producer::full_node_requested() { std::thread::sleep(Duration::from_secs(1)); }
+                }
             }
         });
         slot

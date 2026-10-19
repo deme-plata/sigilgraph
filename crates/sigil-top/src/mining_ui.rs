@@ -320,6 +320,12 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                         if sn.spent > 0 { format!("{}", sn.spent) } else { String::new() },
                         Style::default().fg(C_DIM),
                     ),
+                    // 2026-10-17: what the last scan cost — it reads only what is new now.
+                    dim(format!(
+                        "   last scan {}{}",
+                        crate::store_lifecycle::human_bytes(sn.fetched_bytes),
+                        if sn.view_tags { " · view tags" } else { "" }
+                    )),
                     dim("   (transparent balance stays 0 — this is the real one)"),
                 ])), shrow);
 
@@ -446,9 +452,10 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
     let [tele, art] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG network-power bar ────────────────────────────────────────────
-    let label = format!(" {:.2} {}  {}", hv, hu, ptext);
+    // Fixed slot, same as the SYNC bar (10.4.28): the hashrate's digit count must not resize the bar.
+    let label = crate::sync_ui::pad_to_slot(format!(" {:>7.2} {}  {}", hv, hu, ptext), 32);
     let total = bar_row.width as usize;
-    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let barw = total.saturating_sub(display_width(&label) + 1).max(4);
     let fill = (rig_frac * barw as f64).round() as usize;
     let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
     f.render_widget(Paragraph::new(Line::from(vec![

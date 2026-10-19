@@ -565,8 +565,12 @@ pub(crate) fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         // 2026-08-24: SIGIL_MINE_SEED is ALREADY required to reach this point (audit
         // C1, above) — so this is genuinely "out of the box": nobody who can already
         // use [M]ine has anything new to configure to also get shielded rewards.
+        // 2026-10-15: the seed the miner signs with — SIGIL_MINE_SEED OR the wallet file this
+        // install made/imported (`miner_seed`). Reading only the env var meant every wallet
+        // created by sigil-top itself mined but never published its receiving key, so nobody
+        // could pay it (a 189 SIGIL phone payment bounced on exactly such a wallet).
         #[cfg(feature = "shield-register")]
-        if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
+        if let Some(seed_hex) = miner_seed().map(hex::encode) {
             // Registration lives on the dual-lane money API (same base `mine-rig`
             // uses), not `url` above (that's `/mine`, the legacy single-lane path
             // this function itself POSTs shares to) — the two are different services.

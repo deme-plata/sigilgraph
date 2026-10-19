@@ -653,6 +653,10 @@ pub struct ShieldedSnapshot {
     /// Notes in that epoch (pool-wide), and this wallet's spendable value among them.
     pub v7_notes: usize,
     pub v7_balance: u128,
+    /// Bytes this scan downloaded (2026-10-17: the scanner reads only what is new).
+    pub fetched_bytes: u64,
+    /// The node served view tags, so strangers' envelopes were skipped.
+    pub view_tags: bool,
 }
 
 impl ShieldedSnapshot {
@@ -667,140 +671,10 @@ fn http_json(client: &reqwest::blocking::Client, url: &str) -> Option<serde_json
     client.get(url).send().ok()?.json().ok()
 }
 
-fn wire32(h: &str) -> Option<[u8; 32]> {
-    let raw = hex::decode(h).ok()?;
-    (raw.len() == 32).then(|| {
-        let mut b = [0u8; 32];
-        b.copy_from_slice(&raw);
-        b
-    })
-}
-
-/// Rebuild this seed's shielded position from the chain alone.
-///
-/// Walks EVERY epoch, not just the live one. Rotation seals a full generation and opens a
-/// fresh one; the sealed generations keep holding spendable notes, and their delivery
-/// ciphertexts exist only in their own archive — so a scanner that looked at the live epoch
-/// only would quietly under-report a miner's balance the moment the pool first rotated,
-/// which is exactly the class of bug this whole function exists to fix.
-pub fn scan_shielded(node_url: &str, seed_hex: &str) -> Option<ShieldedSnapshot> {
-    let seed = seed_bytes(seed_hex)?;
-    let account = ShieldedAccount::from_seed(seed);
-    let enc_id = sigil_shield::note_cipher::enc_identity_from_seed(&seed);
-    let base = node_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .ok()?;
-
-    let anchor = http_json(&client, &format!("{base}/v1/shielded/anchor"))?;
-    let mut snap = ShieldedSnapshot {
-        pool_notes: anchor.get("notes").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-        pool_capacity: anchor.get("capacity").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-        pool_locked: anchor
-            .get("value_locked")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<u128>().ok())
-            .unwrap_or(0),
-        epoch: anchor.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        sealed_epochs: anchor
-            .get("sealed_epochs")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0),
-        registered: anchor.get("registered").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-        nullifiers: anchor.get("nullifiers").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-        ..Default::default()
-    };
-
-    // The spent set is public by design — it is the double-spend guard — and it is the only
-    // way a wallet learns about a spend it did not make on this device.
-    // A failed fetch here is NO READING, not an empty spent set: with the set empty every note that
-    // was already spent counted as balance. The scanner keeps its last good snapshot and retries.
-    let spent_list = http_json(&client, &format!("{base}/v1/shielded/nullifiers"))
-        .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())?;
-    let spent: std::collections::BTreeSet<[u8; 32]> =
-        spent_list.iter().filter_map(|v| v.as_str().and_then(wire32)).collect();
-
-    let mut store = sigil_shield::wallet::NoteStore::new();
-    for epoch in 0..=snap.epoch {
-        // Omitting `?epoch=` serves the live generation, so this is also correct against a
-        // node that predates the epoch API.
-        let url = if epoch == snap.epoch {
-            format!("{base}/v1/shielded/leaves")
-        } else {
-            format!("{base}/v1/shielded/leaves?epoch={epoch}")
-        };
-        // Skipping an epoch we could not read silently UNDER-reports the balance (its notes are
-        // simply absent). Better no reading this cycle than a confidently low one.
-        let page = http_json(&client, &url)?;
-        if page.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            return None;
-        }
-        let leaves: Vec<[u8; 32]> = page
-            .get("leaves")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().and_then(wire32)).collect())
-            .unwrap_or_default();
-        let cts: Vec<sigil_shield::note_cipher::NoteCiphertext> = page
-            .get("ciphertexts")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| sigil_shield::note_cipher::NoteCiphertext(s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Trial decryption IS the ownership proof: the AEAD tag fails for everyone else, so
-        // a successful open means the note was addressed to us. Nothing on-chain marks a
-        // ciphertext as ours, which is precisely why an observer cannot tell who was paid.
-        store.scan_ciphertexts(&enc_id, &cts);
-        store.scan_owned(&account, &leaves);
-    }
-    store.mark_spent(&account, &spent);
-
-    snap.balance = store.balance();
-    snap.owned = store.notes.iter().filter(|n| n.position.is_some()).count();
-    snap.spent = store.notes.iter().filter(|n| n.spent).count();
-
-    // 2026-10-13 v7: the 256-bit epoch (numbered live+1) sits beside the v1 epochs with its own
-    // envelopes, keys and epoch-scoped nullifiers. Its notes are this wallet's money too.
-    if let Some(v7_epoch) = anchor.get("v7").and_then(|x| x.get("epoch")).and_then(|x| x.as_u64()) {
-        let account7 = AccountV7::from_seed(seed);
-        let page = http_json(&client, &format!("{base}/v1/shielded/leaves?epoch={v7_epoch}"))?;
-        if page.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            return None;
-        }
-        let leaves: Vec<[u8; 32]> = page
-            .get("leaves")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().and_then(wire32)).collect())
-            .unwrap_or_default();
-        let cts: Vec<sigil_shield::note_cipher::NoteCiphertext> = page
-            .get("ciphertexts")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| sigil_shield::note_cipher::NoteCiphertext(s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut store7 = sigil_shield::wallet_v7::NoteStoreV7::new();
-        store7.scan_ciphertexts(&account7.enc_identity(), &cts);
-        store7.scan_owned(&account7, &leaves);
-        store7.mark_spent(&account7, &spent, v7_epoch as u32);
-        snap.v7_epoch = Some(v7_epoch as u32);
-        snap.v7_notes = anchor.get("v7").and_then(|x| x.get("notes")).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-        snap.v7_balance = store7.balance();
-        snap.balance += store7.balance();
-        snap.owned += store7.notes.iter().filter(|n| n.position.is_some()).count();
-        snap.spent += store7.notes.iter().filter(|n| n.spent).count();
-    }
-    Some(snap)
-}
+// 2026-10-17 (10.4.38): the scanner itself lives in `shield_scan.rs` — incremental per pool
+// generation, epoch-scoped spent markers, zstd, view tags. The function that stood here
+// re-downloaded every generation in full every cycle (~113 MB on g2) and compared raw spent
+// markers across generations; see that file's header for the measurements.
 
 /// The most recent scan, shared with the UI thread.
 ///
@@ -821,9 +695,8 @@ pub fn latest_shielded() -> Option<ShieldedSnapshot> {
 
 /// How often the shielded position is re-scanned.
 ///
-/// The scan pulls the whole leaf+ciphertext page and trial-decrypts it, so it is far from
-/// free — but it is local, and a miner watching their balance wants it to move on a human
-/// timescale, not a frame timescale.
+/// The first scan reads every generation once; after that a cycle reads only the notes that
+/// arrived since (plus the spent set when it moved), so a short interval costs little.
 const SHIELDED_SCAN_EVERY: Duration = Duration::from_secs(45);
 
 /// Keep [`latest_shielded`] fresh in the background.
@@ -831,16 +704,24 @@ const SHIELDED_SCAN_EVERY: Duration = Duration::from_secs(45);
 /// Spawned wherever a seed is available. Without a seed there is nothing to scan — the
 /// pool is hiding values from everyone who cannot open them, which very much includes us.
 pub fn spawn_shielded_scanner(node_url: &str, seed_hex: &str) -> Option<std::thread::JoinHandle<()>> {
-    let _ = seed_bytes(seed_hex)?; // reject a malformed seed once, here, not every cycle
+    let seed = seed_bytes(seed_hex)?;
     let node = node_url.to_string();
-    let seed = seed_hex.to_string();
-    Some(std::thread::spawn(move || loop {
-        if let Some(snap) = scan_shielded(&node, &seed) {
-            if let Ok(mut g) = latest_cell().lock() {
-                *g = Some(snap);
+    Some(std::thread::spawn(move || {
+        // A whole sealed generation is ~45 MB of JSON before compression; on a slow line the
+        // first read needs far longer than a status call.
+        let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(180)).build() else {
+            return;
+        };
+        let mut get = crate::shield_scan::http_getter(client);
+        let mut scanner = crate::shield_scan::ShieldedScanner::new(&node, seed);
+        loop {
+            if let Some(snap) = scanner.cycle(&mut get) {
+                if let Ok(mut g) = latest_cell().lock() {
+                    *g = Some(snap);
+                }
             }
+            std::thread::sleep(SHIELDED_SCAN_EVERY);
         }
-        std::thread::sleep(SHIELDED_SCAN_EVERY);
     }))
 }
 

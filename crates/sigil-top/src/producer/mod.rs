@@ -215,6 +215,26 @@ pub mod status {
     /// Mid-run tail resyncs performed (each one is a logged `[producer] RESYNC` line).
     static RESYNCS: AtomicU64 = AtomicU64::new(0);
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    /// Settled blocks whose header names THIS node's mining wallet as producer — blocks the
+    /// operator's rig WON, whoever minted them (on g2 the network's producer mints the block
+    /// that carries a winning solve and writes the solver's wallet into `header.producer`;
+    /// measured 2026-10-15: g2 block 42,491,273 → Viktor's wallet c4dfe8f9…).
+    static WON: AtomicU64 = AtomicU64::new(0);
+    static LAST_WON_HEIGHT: AtomicU64 = AtomicU64::new(0);
+    pub fn note_won(height: u64) {
+        WON.fetch_add(1, Ordering::Relaxed);
+        LAST_WON_HEIGHT.fetch_max(height, Ordering::Relaxed);
+    }
+    pub fn won() -> u64 { WON.load(Ordering::Relaxed) }
+    pub fn last_won_height() -> u64 { LAST_WON_HEIGHT.load(Ordering::Relaxed) }
+    /// Does this node forge blocks of its own? (`SIGIL_TOP_MINT_POLICY`, default off.)
+    static MINTING: AtomicBool = AtomicBool::new(false);
+    pub fn set_minting(on: bool) { MINTING.store(on, Ordering::Relaxed); }
+    pub fn minting() -> bool { MINTING.load(Ordering::Relaxed) }
+    /// Unix seconds when a refused bootstrap will be tried again (0 = no retry pending).
+    static RETRY_AT: AtomicU64 = AtomicU64::new(0);
+    pub fn set_retry_at(unix: u64) { RETRY_AT.store(unix, Ordering::Relaxed); }
+    pub fn retry_at() -> u64 { RETRY_AT.load(Ordering::Relaxed) }
     /// The newest settled `(height, block hash)` pairs, for the DATA INTEGRITY card's
     /// exact-at-height comparison against the network (8,192 ≈ 17 min at 8 blk/s).
     static SETTLED_RING: std::sync::Mutex<std::collections::VecDeque<(u64, [u8; 32])>> =
@@ -283,7 +303,9 @@ pub mod status {
             SYNCING => {
                 let h = replayed();
                 let t = replay_target();
-                Some(if t > h && t > 0 {
+                Some(if h == 0 {
+                    "full node: fetching the signed starting snapshot (~109 MB) — then replays to the tip".to_string()
+                } else if t > h && t > 0 {
                     format!("full node: replaying chain h={h} of ~{t} ({:.1}%) — produces once at the tip", 100.0 * h as f64 / t as f64)
                 } else {
                     format!("full node: replaying chain h={h} — produces once at the tip")
@@ -301,8 +323,9 @@ pub mod status {
                 };
                 Some(if minted() == 0 {
                     format!(
-                        "full node: LIVE — settled h={} · net h={} · gossip in {} · peers {}{behind} · mints when a rig solves or a tx is pending",
-                        settled(), gossip_tip(), ingested(), peers()
+                        "full node: LIVE — settled h={} · net h={} · gossip in {} · peers {}{behind} · your rig's wins: {}{}",
+                        settled(), gossip_tip(), ingested(), peers(), won(),
+                        if minting() { " · forges its own on a rig solve" } else { "" }
                     )
                 } else {
                     format!(
@@ -311,7 +334,11 @@ pub mod status {
                     )
                 })
             }
-            _ => Some(format!("full node: refused — {}", message())),
+            _ => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let retry = match retry_at() { 0 => String::new(), t => format!(" · retrying in {}s", t.saturating_sub(now)) };
+                Some(format!("full node: refused — {}{retry}", message()))
+            }
         }
     }
 }

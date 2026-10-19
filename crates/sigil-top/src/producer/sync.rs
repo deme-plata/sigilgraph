@@ -105,6 +105,12 @@ fn decode_full_backfill(bytes: &[u8]) -> Result<Decoded, String> {
 const SNAPSHOT_URL_ENV: &str = "SIGIL_TOP_SNAPSHOT_URL";
 const SIGNER_PK_ENV: &str = "SIGIL_TOP_SNAPSHOT_SIGNER_PK_HEX";
 const DEFAULT_SNAPSHOT_URL: &str = "http://89.149.241.126:18183/snapshot";
+/// 10.4.27: the public mirror, tried FIRST. Epsilon's firewall drops :18183 from outside, so
+/// every remote full node (Viktor's Windows PC, 2026-10-15) failed its bootstrap at the
+/// snapshot fetch and showed "full node: refused". `sigil-snapshot-mirror.timer` copies the
+/// node's snapshot here every 20 min. The mirror needs no trust of its own: the snapshot is
+/// SQIsign-signed and checked against the pinned key below, whichever URL served it.
+const MIRROR_SNAPSHOT_URL: &str = "https://sigilgraph.org/downloads/sigil-g2-snapshot.bin";
 /// The g2 node's snapshot signing key (SQIsign L5, `snapshot-sqisign.pk` generated
 /// 2026-08-29 with the g2 genesis; read from the node's aether dir and checked against the
 /// key embedded in the served snapshot on 2026-09-17). Pinned here so a fresh install
@@ -163,7 +169,11 @@ async fn fetch_snapshot(url: &str) -> Option<ChainTip> {
     // Never fetch unpinned: a snapshot is 48 MB of state this node will PRODUCE on top of.
     let expected_pk = expected_pk?;
 
-    let bytes = match reqwest::Client::new().get(url).timeout(Duration::from_secs(120)).send().await {
+    // ~109 MB: 120 s needed ~0.9 MB/s, which a home line can miss. A firewalled URL must
+    // still fail fast so the next one gets its turn — hence the separate connect timeout.
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().unwrap_or_default();
+    crate::tlog!("[producer-sync] fetching starting snapshot from {url}");
+    let bytes = match client.get(url).timeout(Duration::from_secs(900)).send().await {
         Ok(r) if r.status().is_success() => match r.bytes().await {
             Ok(b) => b.to_vec(),
             Err(e) => {
@@ -406,8 +416,18 @@ pub async fn sync_chain(net: &flux_p2p::NetworkManager) -> Option<ChainTip> {
     // keeps the genesis-up path for anyone who wants to pay for it.
     let want_snapshot = !matches!(std::env::var("SIGIL_TOP_SNAPSHOT").as_deref(), Ok("0"));
     let mut chain = if want_snapshot {
-        let url = std::env::var(SNAPSHOT_URL_ENV).unwrap_or_else(|_| DEFAULT_SNAPSHOT_URL.to_string());
-        let c = fetch_snapshot(&url).await?;
+        let urls: Vec<String> = match std::env::var(SNAPSHOT_URL_ENV) {
+            Ok(u) if !u.trim().is_empty() => vec![u.trim().to_string()],
+            _ => vec![MIRROR_SNAPSHOT_URL.to_string(), DEFAULT_SNAPSHOT_URL.to_string()],
+        };
+        let mut got = None;
+        for url in &urls {
+            if let Some(c) = fetch_snapshot(url).await { got = Some(c); break; }
+        }
+        let Some(c) = got else {
+            super::status::set_message("could not download the starting snapshot — check the internet connection");
+            return None;
+        };
         crate::tlog!("[producer-sync] snapshot restored at height={} — starting tail replay", c.height());
         c
     } else {

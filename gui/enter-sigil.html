@@ -271,6 +271,9 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
       };
       // legacy alias kept for any old callers
       window.generateMnemonic = window.createWallet;
+      // 2026-10-14: the front page's "Create a new wallet (12 words)" lands here as #create.
+      // Open straight on a fresh 12-word phrase — this page is the ONE generator on the site.
+      if (location.hash === '#create') setTimeout(function(){ window.createWallet(); }, 0);
 
       // ── Create a SIGIL wallet from MetaMask (2026-08-26) ──────────────────
       // The user signs one fixed, human-readable message. personal_sign is
@@ -951,6 +954,37 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
   setInterval(host,3000);   // cheap, and the only thing that survives an arbitrary DOM swap
 
   tick(); setInterval(tick,20000);
+})();
+</script>
+<script>
+/* 2026-10-14 (Viktor: every wallet 12 words, keep it secure). A phrase of fewer than 12 words is a
+   weak wallet — the old front page made 6 words from a 50-word list. Warn, never refuse: those
+   wallets are real and must keep opening. Same rule in sigil-top (`phrase_warnings`). */
+(function(){
+  function isShort(p){
+    p=(p||'').trim(); if(!p) return false;
+    if(/^(0x)?[0-9a-fA-F]{64}$/.test(p)) return false;
+    var l=p.toLowerCase(); if(l.indexOf('v2:')===0||l.indexOf('mm2:')===0) return false;
+    if(l.indexOf('v1:')===0) p=p.slice(3);
+    return p.trim().split(/\s+/).length<12;
+  }
+  var MSG='⚠ Short recovery phrase: anyone can guess it. <a href="/enter-sigil.html#create" style="color:inherit;text-decoration:underline">Create a 12-word wallet</a> and move your coins to it.';
+  function banner(where){
+    if(document.getElementById('sgShortPhrase')) return document.getElementById('sgShortPhrase');
+    var d=document.createElement('div'); d.id='sgShortPhrase'; d.setAttribute('role','alert'); d.innerHTML=MSG;
+    d.style.cssText='margin:10px 0;padding:10px 14px;border-radius:12px;background:#3a1d12;color:#ffd7c2;border:1px solid #c2562b;font:600 13px/1.4 system-ui,sans-serif';
+    where(d); return d;
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    var seed=document.getElementById('seed');
+    if(seed && document.getElementById('words')){            // login page
+      var b=banner(function(d){ seed.parentNode.insertBefore(d, seed.nextSibling); }); b.style.display='none';
+      var upd=function(){ b.style.display=isShort(seed.value)?'block':'none'; };
+      seed.addEventListener('input',upd); upd(); return;
+    }
+    var p=null; try{ p=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); }catch(e){}
+    if(isShort(p)){ var b2=banner(function(d){ d.style.position='sticky'; d.style.top='0'; d.style.zIndex='9999'; d.style.margin='0'; d.style.borderRadius='0'; document.body.insertBefore(d, document.body.firstChild); }); }
+  });
 })();
 </script>
 </body>

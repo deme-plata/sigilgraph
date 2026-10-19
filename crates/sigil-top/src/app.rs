@@ -118,6 +118,11 @@ pub(crate) struct App {
     pub(crate) p2p_blocks_synced: u64,
     pub(crate) p2p_rate: f64,                            // backfill blocks/sec (10s trailing window = current speed)
     pub(crate) p2p_rate_samples: std::collections::VecDeque<(std::time::Instant, u64)>, // (t, blocks_synced)
+    /// 10.4.34: (t, verified spine height) — the rate at which the VERIFIED height climbs.
+    /// The head rate above follows the network tip (~8 blk/s on g2) and divided the gap to
+    /// the tip by it: "8 blk/s · eta 16 h" while the spine was really climbing ~650 blk/s
+    /// (Viktor's screenshots, 2026-10-16). See [`spine_rate`].
+    pub(crate) spine_samples: std::collections::VecDeque<(std::time::Instant, u64)>,
     pub(crate) sync_kf: Kalman1D,                         // v0.33.3: Kalman-smoothed sync rate (→ stable ETA)
     // v0.7.0: AI fleet monitoring — AIs worry about their nodes' uptime and version compliance
     pub(crate) fleet_nodes: Vec<FleetNode>,
@@ -201,6 +206,7 @@ impl App {
               p2p_blocks_synced: 0,
               p2p_rate: 0.0,
               p2p_rate_samples: std::collections::VecDeque::new(),
+              spine_samples: std::collections::VecDeque::new(),
               sync_kf: Kalman1D::new(),
               serve_status: String::new(),
               serve_stop: None,
@@ -395,6 +401,7 @@ impl App {
         self.p2p_blocks_synced = 0;
         self.p2p_rate = 0.0;
         self.p2p_rate_samples.clear();
+        self.spine_samples.clear();
         self.sync_kf = Kalman1D::new();
         self.full_sync_height = 0;
         self.full_sync_target = 0;

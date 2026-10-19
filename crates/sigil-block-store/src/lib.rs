@@ -10,6 +10,15 @@ use serde::{Deserialize, Serialize};
 use sigil_header::{SigilBlockHeaderV0, BlockHash};
 use std::path::PathBuf;
 
+/// `secs` for [`BlockStore::open_with_timeout_and_progress`] meaning "this store is worth
+/// waiting for, however long": the open is never abandoned — not by the deadline and not
+/// by the no-progress check. sigil-top passes it for every store over 256 MB.
+/// 10.4.36: the no-progress check used to fire for these too. On 2026-10-16 it abandoned a
+/// healthy 18 GB archive twice (the open was busy past WAL replay, where nothing reports
+/// progress), and the caller's fresh fallback store re-synced the chain onto a 40 GB root
+/// disk until it was full.
+pub const OPEN_NEVER_ABANDON: u64 = u64::MAX / 4;
+
 /// Live progress for a store that's still opening. WAL replay is the one open-time
 /// cost that actually scales with store size (see `flux_db::Database::open_with_progress`
 /// — measured ~330 MB/s, so a multi-GB WAL genuinely takes real seconds, not a stall).
@@ -318,6 +327,12 @@ impl BlockStore {
         // (consumed frozen, whether at 0 or mid-replay) trips STALL_LIMIT and bails to
         // the caller's fallback store — the exact protection `secs` was supposed to give
         // but couldn't once big stores set it to "wait forever."
+        // 10.4.36: but NOT for a store the caller marked OPEN_NEVER_ABANDON. `consumed` only
+        // moves during WAL replay; the reads after it (meta keys, the contiguous-pointer
+        // walk) report nothing, so a big archive on a busy spinning disk looked "stuck" and
+        // was thrown away. Its only true freeze cause was never real either: flux-db takes
+        // no file lock. A big store now waits; the dashboard keeps showing the open.
+        let patient = secs >= OPEN_NEVER_ABANDON;
         const POLL: std::time::Duration = std::time::Duration::from_secs(5);
         const STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(45);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
@@ -341,9 +356,9 @@ impl BlockStore {
                         if consumed != last_consumed {
                             last_consumed = consumed;
                             last_moved_at = now;
-                        } else if now.duration_since(last_moved_at) >= STALL_LIMIT {
+                        } else if !patient && now.duration_since(last_moved_at) >= STALL_LIMIT {
                             return Err(format!(
-                                "open stalled — no progress for {}s (corrupt/incompatible store, or another sigil-top process holding the file lock — falling back to a fresh store)",
+                                "open stalled — no progress for {}s (corrupt or incompatible store — falling back to a fresh store)",
                                 STALL_LIMIT.as_secs()
                             ));
                         }

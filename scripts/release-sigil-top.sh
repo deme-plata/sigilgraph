@@ -185,7 +185,8 @@ tar --sort=name --mtime='2026-01-01 00:00:00' --owner=0 --group=0 --numeric-owne
     -czf "$S/sigil-top-v${VER}-src.tar.gz" \
     -C crates sigil-top/src sigil-top/Cargo.toml \
     -C .. gui/sigil-wallet-tron-embedded.html gui/sigil-wallet-codex.css \
-    gui/enter-sigil.html gui/sigil-explorer.html gui/vite-engine-embedded.html
+    gui/enter-sigil.html gui/sigil-explorer.html gui/vite-engine-embedded.html \
+    gui/sigil-exchange.js gui/sigil-metamask.js gui/wsigil-market.js gui/sigil-send.js gui/sigil-address-book.js
 for t in "${TARGETS[@]}"; do
   f="$S/sigil-top-v${VER}-${t}"
   # Capture, THEN grep. `fluxc ... | grep -q` is a SIGPIPE race: grep -q exits on the

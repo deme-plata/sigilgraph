@@ -61,7 +61,13 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     // commit rate (s.commit_rate = the shown ⚡/s commit) is live -> fall back to it so the
     // panel never shows a false rate 0 blk/s during an ACTIVE sync (it looked dead).
     let kf_rate = if kf_rate >= 1.0 { kf_rate } else { s.commit_rate.max(0.0) };
-    let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
+    // 10.4.34: while the verified spine is catching up, the ETA is the gap ÷ how fast the SPINE
+    // climbs. The head rate (kf_rate) follows the network tip — ~8 blk/s on g2 — and divided
+    // a 470k gap by it: "8 blk/s · eta 16 h" for a spine really climbing ~650 blk/s (~12 min).
+    let verify_rate = spine_rate(&app.spine_samples).unwrap_or(0.0);
+    let catching_up = !caught && verify_rate >= 1.0;
+    let eta_rate = if catching_up { verify_rate } else { kf_rate };
+    let eta = if synced || eta_rate < 1.0 { f64::INFINITY } else { gap as f64 / eta_rate };
     // Turbo continuity score (invented for continuous high download bandwidth)
     let cont = s.turbo_continuity.continuity_score * 100.0;
 
@@ -116,10 +122,17 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG progress bar ─────────────────────────────────────────────────
-    let label = format!(" {:>5.1}%  {}  BW:{:.0}%{}", frac * 100.0, vtext, cont,
-        if s.commit_rate > 1.0 { format!("  ⚡{}/s commit", group(s.commit_rate.round() as u64)) } else { String::new() });
+    // 10.4.28 (Viktor 2026-10-15: the bar and the text beside it "bouncing left and right all the
+    // time"): the bar used to be "row width minus this label", and the label changes length every
+    // frame — the commit rate appears and vanishes, digit counts change, and ⚡ is TWO columns wide
+    // but was counted as one. The label now lives in a fixed slot measured in display columns, so
+    // the bar keeps its width and only the text inside the slot changes.
+    const LABEL_SLOT: usize = 60;
+    let commit = if s.commit_rate > 1.0 { format!("⚡{}/s commit", group(s.commit_rate.round() as u64)) } else { String::new() };
+    let core = format!(" {:>5.1}%  {}  BW:{:>3.0}%  {}", frac * 100.0, vtext, cont, commit);
+    let label = pad_to_slot(core, LABEL_SLOT);
     let total = bar_row.width as usize;
-    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let barw = total.saturating_sub(display_width(&label) + 1).max(4);
     let fill = (frac * barw as f64).round() as usize;
     let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
     f.render_widget(Paragraph::new(Line::from(vec![
@@ -212,8 +225,18 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             ])
         } else {
             Line::from(vec![
-                dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-                dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                if catching_up {
+                    Span::styled(format!("verifying {} blk/s", group(verify_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled(format!("rate {} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
+                },
+                // 10.4.35: the second rate is the DOWNLOAD rate in a full sync and the chain HEAD
+                // rate in light-monitor/snap mode (blocks_synced tracks the tip there) — 10.4.34
+                // called it "chain" in both, which read as the network's rate during a full sync.
+                if catching_up {
+                    dim(&format!("  · {} {} blk/s   eta ", if s.light_mode { "head" } else { "download" }, group(kf_rate.round() as u64)))
+                } else { dim(" ~kalman   eta ") },
+                Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
             ])
         },
@@ -341,6 +364,13 @@ fn integrity_verified_text(snap_mode: bool, spine: &str) -> String {
     } else {
         format!("⛓ INTEGRITY VERIFIED — genesis→{spine} spine · fold ✓ · tip-fp ✓ (verified here, no trusted peer)")
     }
+}
+
+/// Right-pad `s` with spaces to `slot` display columns (wide glyphs counted as they render).
+/// Longer text is left as is — the bar then shrinks, but only for that rare state.
+pub(crate) fn pad_to_slot(s: String, slot: usize) -> String {
+    let w = display_width(&s);
+    if w >= slot { s } else { format!("{s}{}", " ".repeat(slot - w)) }
 }
 
 fn is_synced(caught: bool, settled_gap: u64, fold_ok: bool, broken: bool) -> bool {
@@ -1153,5 +1183,96 @@ mod existing_blocks_tests {
         assert_eq!(existing_blocks(1_000, 11_000, 50_000), 10_000);
         assert_eq!(existing_blocks(1_000, 11_000, 0), 10_000);
         assert_eq!(existing_blocks(60_000, 70_000, 50_000), 0, "entirely above the tip: nothing existed");
+    }
+}
+
+#[cfg(test)]
+mod bar_slot_tests {
+    use super::{display_width, pad_to_slot};
+    /// The bar keeps one width while the label's numbers tick (Viktor 10-15, "bouncing").
+    #[test]
+    fn label_slot_is_constant_as_the_numbers_change() {
+        let labels = [
+            " 100.0%  ◆ SYNCED  BW: 60%  ".to_string(),
+            " 100.0%  ◆ SYNCED  BW: 60%  ⚡12/s commit".to_string(),
+            "  95.8%  ✓ SYNCING  BW: 49%  ⚡1,413/s commit".to_string(),
+            "   9.1%  ◇ LIGHT MONITOR  BW:  9%  ".to_string(),
+        ];
+        for l in labels {
+            assert_eq!(display_width(&pad_to_slot(l.clone(), 60)), 60, "{l:?}");
+        }
+        // ⚡ renders two columns wide; counting chars would have made this 1 column short.
+        assert_eq!(display_width("⚡"), 2);
+    }
+}
+
+/// 10.4.34: keep a 30 s trail of the verified spine height. A one-sample leap of more than
+/// 50,000 heights is a snap (checkpoint / re-anchor), not a rate — the trail restarts there,
+/// the same rule the head rate uses for its catch-up jumps.
+pub(crate) fn record_spine_sample(
+    trail: &mut std::collections::VecDeque<(std::time::Instant, u64)>,
+    now: std::time::Instant,
+    spine: u64,
+) {
+    if let Some(&(_, last)) = trail.back() {
+        if spine < last || spine - last > 50_000 {
+            trail.clear();
+        }
+    }
+    trail.push_back((now, spine));
+    // Drop the oldest only while the NEXT one is still past the window, so one anchor just
+    // beyond 30 s always remains (two sparse samples must still make a rate).
+    while trail.len() > 2 && now.duration_since(trail[1].0).as_secs_f64() > 30.0 {
+        trail.pop_front();
+    }
+}
+
+/// Blocks per second the verified spine climbed over its trail; `None` until it spans 3 s.
+pub(crate) fn spine_rate(trail: &std::collections::VecDeque<(std::time::Instant, u64)>) -> Option<f64> {
+    let (&(t0, b0), &(t1, b1)) = (trail.front()?, trail.back()?);
+    let dt = t1.duration_since(t0).as_secs_f64();
+    (dt >= 3.0).then(|| b1.saturating_sub(b0) as f64 / dt)
+}
+
+#[cfg(test)]
+mod spine_rate_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_rate_is_how_fast_the_verified_height_climbs() {
+        // Viktor's two screenshots: 42,888,193 → 42,908,193 in 31 s ≈ 645 blk/s.
+        let mut t = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        record_spine_sample(&mut t, t0, 42_888_193);
+        assert_eq!(spine_rate(&t), None, "one sample is not a rate");
+        record_spine_sample(&mut t, t0 + Duration::from_secs(31), 42_908_193);
+        let r = spine_rate(&t).unwrap();
+        assert!((r - 645.2).abs() < 1.0, "{r}");
+        // ETA for the remaining 470,288 blocks: ~12 min, not 16 h.
+        assert!(((470_288.0 / r) / 60.0 - 12.1).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_snap_or_a_reset_restarts_the_trail() {
+        let mut t = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        record_spine_sample(&mut t, t0, 100);
+        record_spine_sample(&mut t, t0 + Duration::from_secs(5), 2_000_000); // checkpoint snap
+        assert_eq!(t.len(), 1);
+        record_spine_sample(&mut t, t0 + Duration::from_secs(10), 1_000); // re-anchor lower
+        assert_eq!(t.len(), 1);
+        assert_eq!(spine_rate(&t), None);
+    }
+
+    #[test]
+    fn the_trail_keeps_thirty_seconds() {
+        let mut t = std::collections::VecDeque::new();
+        let t0 = Instant::now();
+        for i in 0..100u64 {
+            record_spine_sample(&mut t, t0 + Duration::from_secs(i), i * 650);
+        }
+        assert!(t.len() <= 32);
+        assert!((spine_rate(&t).unwrap() - 650.0).abs() < 1e-9);
     }
 }

@@ -33,6 +33,9 @@ pub(crate) fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(Str
 }
 
 pub(crate) fn ensure_serve_up(app: &mut App) -> bool {
+    // 10.4.39: `/w` opens this address (the server never derives it itself — see
+    // serve::SHORT_LINK_ADDR for why).
+    serve::remember_wallet_addr(&miner_wallet());
     if wallet_server_alive() {
         return true;
     }
@@ -136,15 +139,15 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
     #[cfg(feature = "shield-register")]
     {
         static BOOT_REG: std::sync::Once = std::sync::Once::new();
-        if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
-            if miner_seed().is_some() {
-                BOOT_REG.call_once(|| {
-                    boot_trace("shield-register: publishing this wallet's receiving key (boot keeper)");
-                    shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, |line| {
-                        log_line(format!("shield-register: {line}"));
-                    });
+        // 2026-10-15: env seed OR this install's wallet file (see `miner_seed`); env-only left
+        // every wallet sigil-top made for itself unpayable.
+        if let Some(seed_hex) = miner_seed().map(hex::encode) {
+            BOOT_REG.call_once(|| {
+                boot_trace("shield-register: publishing this wallet's receiving key (boot keeper)");
+                shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, |line| {
+                    log_line(format!("shield-register: {line}"));
                 });
-            }
+            });
         }
     }
     // v0.71.1 LANE-V: resume the operator's chosen sync mode after update/restart.
@@ -498,7 +501,11 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.40: 33ms full redraws are cheap on a modern terminal but heavy on the
             // legacy CP437 conhost — halve the animating cadence on Windows so the
             // console host never becomes a load source itself.
-            let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } } else { 200 };
+            // 10.4.27: the PRODUCER band's belt moves — ~10 fps is smooth enough for it and
+            // cheap enough to leave on for a node that runs for days.
+            let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } }
+                else if app.tab == Tab::Node && crate::forge_ui::wants_motion() { if cfg!(windows) { 150 } else { 100 } }
+                else { 200 };
             if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {
@@ -696,7 +703,10 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     app.toast = format!("✗ local wallet server down ({})", app.serve_status).into();
                                     app.toast_sticky = true;
                                 } else if open_browser_private(&url) {
-                                    app.toast = format!("◆ local wallet → {url}").into();
+                                    // 10.4.39: show `localhost:9800/w` when this server answers it —
+                                    // the full link (~110 characters) was cut at the terminal's edge
+                                    // (operator, 2026-10-18). The browser still gets the full URL.
+                                    app.toast = format!("◆ local wallet → {}", wallet_ui::shown_wallet_link(&url)).into();
                                     app.toast_sticky = false;
                                 } else {
                                     // Headless (SSH/terminal-only): localhost:9800 only means
@@ -711,7 +721,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     // away, headless just never pointed at it. Offer the tunnel
                                     // that actually reaches it, alongside the remote fallback.
                                     let fallback = wallet_ui::headless_wallet_view_url();
-                                    app.toast = match wallet_ui::ssh_tunnel_hint() {
+                                    app.toast = match wallet_ui::ssh_tunnel_hint(&wallet_ui::shown_wallet_link(&url)) {
                                         Some(hint) => format!("🔐 {hint}\n🔗 or, prompted: {fallback}").into(),
                                         None => format!("🔗 headless — open your wallet from any device:  {fallback}").into(),
                                     };
@@ -804,6 +814,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                 // now (heavy ingest/flush). Keep rendering the previous clone; never block
                 // the draw thread (the Windows full-archive BLACK SCREEN, #156 item 2).
                 if let Some(s) = p2p.poll_state() { app.p2p_state = s; }
+                record_spine_sample(&mut app.spine_samples, std::time::Instant::now(), app.p2p_state.verified);
                 // v0.13.1: feed the HTTP status height into the P2P backfill so the
                 // refill starts requesting chunks even when gossip/probe are silent —
                 // fixes the sync sitting forever on "connecting" with peer_best=0.

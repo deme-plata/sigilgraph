@@ -72,6 +72,15 @@ pub struct ProducerState {
     /// kind worth racing for the spine with; an idle node lets the network's idle producer
     /// run. `SIGIL_TOP_MINT_POLICY=free` restores free-run.
     pub free_run: bool,
+    /// 10.4.29: never mint, whatever arrives — settle only. The default for a user's full node
+    /// (`SIGIL_TOP_MINT_POLICY` unset or `off`). Measured on the rehearsal chain r1 2026-10-15:
+    /// a sigil-top user node minted 65 blocks (WORK policy, its own rig's solves) and r1's four
+    /// nodes took 0 of them — each arrived after GRANDPA had already finalized its height and
+    /// was dropped ("parent never arrived, or finality advanced past them"; 0 drops in the 44
+    /// min before, 13–15 per node after). On g2 a user-minted block is untested. So a user's
+    /// node does not mint; its rig mines through the network's producer, which credits a win
+    /// to the rig's wallet. `work` / `free` opt back in for experiments.
+    pub mint_off: bool,
     /// Highest header height taken off gossip so far — the network tip as this loop sees
     /// it. Compared with `chain.height()` by the resync lane in the networked loop.
     pub gossip_tip: u64,
@@ -148,7 +157,7 @@ impl ProducerState {
         let state = Arc::new(RwLock::new(chain.state_snapshot()));
         let api = sigil_api::AppState::new(mempool, state);
         let free_run = !matches!(std::env::var("SIGIL_TOP_MINT_POLICY").as_deref().map(str::trim), Ok("work"));
-        Self { chain, braid, dag_bodies: HashMap::new(), free_run, gossip_tip: 0, ingest: IngestStats::default(), mint_hash_to_tx_hashes: HashMap::new(), api }
+        Self { chain, braid, dag_bodies: HashMap::new(), free_run, mint_off: false, gossip_tip: 0, ingest: IngestStats::default(), mint_hash_to_tx_hashes: HashMap::new(), api }
     }
 
     /// One producer tick, in the same order `sigil-node`'s real loop runs it:
@@ -209,7 +218,7 @@ impl ProducerState {
         // — this instance shares the SAME `MiningBridge`, so it must make the same
         // decision or a sigil-top producer would silently reintroduce the 93.8%
         // pay-yourself behaviour Option C exists to remove.
-        if !self.free_run && solve.is_none() && txs.is_empty() {
+        if self.mint_off || (!self.free_run && solve.is_none() && txs.is_empty()) {
             // Nothing of ours to commit: settle what gossip brought and mint nothing.
             let (applied, skipped, failed) = dag_drain_apply(
                 &mut self.braid,
@@ -544,11 +553,20 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
             let net = Arc::new(net);
             let mut state = ProducerState::new(chain);
             // A user's full node: mint only with work or transactions unless told otherwise.
-            state.free_run = matches!(std::env::var("SIGIL_TOP_MINT_POLICY").as_deref().map(str::trim), Ok("free"));
+            let policy = std::env::var("SIGIL_TOP_MINT_POLICY").map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
+            state.free_run = policy == "free";
+            state.mint_off = !(policy == "free" || policy == "work");
+            super::status::set_minting(!state.mint_off);
             crate::tlog!(
-                "[producer] mint policy: {} (SIGIL_TOP_MINT_POLICY=free|work)",
-                if state.free_run { "FREE-RUN — a candidate every tick" } else { "WORK — only with a rig solve or pending transactions" }
+                "[producer] mint policy: {} (SIGIL_TOP_MINT_POLICY=off|work|free)",
+                if state.mint_off { "OFF — settles every block, mints none; the rig mines through the network's producer" }
+                else if state.free_run { "FREE-RUN — a candidate every tick" }
+                else { "WORK — only with a rig solve or pending transactions" }
             );
+            // The rig's wallet as a block producer id — to count the blocks it WINS.
+            let my_wallet: Option<[u8; 32]> = std::env::var("SIGIL_PRODUCER_WALLET").ok()
+                .and_then(|h| hex::decode(h.trim()).ok())
+                .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
             // Local mining HTTP API — 2026-08-25, operator-directed ("let a miner mine
             // against their OWN locally-running node"). Shares `state.api` by clone
             // (cheap — every field is an Arc), so a share submitted here lands in the
@@ -557,7 +575,11 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
             // two-gate reasoning (this only ever runs once BOTH SIGIL_TOP_PRODUCER=1
             // AND SIGIL_TOP_PRODUCE=1 are set — `maybe_start`'s existing contract,
             // unchanged by this addition).
-            super::mining_api::spawn_local_mining_api(state.api.clone());
+            // No local mining API when this node does not mint: the rig then falls back to the
+            // network's producer (`engine_node_url`), where a win is actually credited.
+            if !state.mint_off {
+                super::mining_api::spawn_local_mining_api(state.api.clone());
+            }
             // Realization telemetry, opt-in — see the local loop for the contract.
             // On the networked loop this is the more interesting of the two: the
             // proposer entropy it measures is real (other producers are gossiping
@@ -589,8 +611,12 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
             // it does after the first bootstrap. Healthy lag is ~final_depth (512); the
             // threshold is four times that so a node that is merely finalizing never
             // trips it.
-            const RESYNC_LAG_BLOCKS: u64 = 2048;
-            const RESYNC_STALL: Duration = Duration::from_secs(90);
+            // 10.4.29 (Viktor 10-15: "zero blocks pr sec?"): 2,048 blocks + 90 s meant every
+            // freeze showed "sealed 0.0 blk/s" for ~4 min (measured: 123 resyncs in 23 h, each
+            // after a 191 s stall). A node that is merely finalizing settles ~8 blk/s and never
+            // stands still for 20 s, so "lag ≥ 768 AND no progress for 20 s" only catches a freeze.
+            const RESYNC_LAG_BLOCKS: u64 = 768;
+            const RESYNC_STALL: Duration = Duration::from_secs(20);
             let mut last_beat = std::time::Instant::now();
             let mut last_settled_h = state.chain.height();
             let mut settled_since = std::time::Instant::now();
@@ -598,6 +624,8 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
             // Start the integrity ring at the replayed tip minus a window, so the card can
             // compare heights the network already certified.
             let mut ring_from = state.chain.height().saturating_sub(4096).max(state.chain.window_base());
+            // Wins are counted once per height: the ring is re-walked after a resync, this is not.
+            let mut won_from = ring_from;
             while !stop_flag_bg.load(Ordering::Relaxed) {
                 if last_beat.elapsed() >= Duration::from_secs(60) {
                     last_beat = std::time::Instant::now();
@@ -719,9 +747,14 @@ fn spawn_networked_loop_from(source: ChainSource, tick_interval: Duration) -> Pr
                         for h in ring_from..o.settled_height {
                             if let Some(b) = state.chain.get(h) {
                                 super::status::push_settled(h, b.hash());
+                                if h >= won_from && my_wallet.map(|w| w == b.header.producer).unwrap_or(false) {
+                                    super::status::note_won(h);
+                                    crate::tlog!("[producer] ✦ your rig won block h={h} — settled here with your wallet as producer");
+                                }
                             }
                         }
                         ring_from = ring_from.max(o.settled_height);
+                        won_from = won_from.max(o.settled_height);
                         if o.applied > 0 && o.minted_height > 0 {
                             crate::tlog!(
                                 "[producer] tick: minted h={} → settled h={} (applied={} skipped={} failed={} peers={})",

@@ -468,7 +468,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
     }
     // v0.13: tab bar between header and body — [1] Node · [2] Swarm AI · [3] Results.
     let [header_area, tab_area, body_area, footer_area] =
-        Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)]).areas(area);
+        Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Min(0), Constraint::Length(footer_height(app, area.width))]).areas(area);
 
     f.render_widget(render_header(app), header_area);
     f.render_widget(render_tab_bar(app), tab_area);
@@ -477,9 +477,12 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
         Tab::Node => {
             // v0.33.3: SYNC full-width HERO band on top; v0.36.1: an equally-large MINING hero
             // (network power + personal mining) right below it; the other cards flow beneath.
-            let [hero_sync, hero_mining, cards_area] =
-                Layout::vertical([Constraint::Length(11), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+            // 10.4.27: a full node gets a third hero — the ◆ PRODUCER band (seal + block belt).
+            let prod_h = if crate::forge_ui::band_visible() { 8 } else { 0 };
+            let [hero_sync, hero_prod, hero_mining, cards_area] =
+                Layout::vertical([Constraint::Length(11), Constraint::Length(prod_h), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
             draw_sync_hero(f, app, hero_sync);
+            if prod_h > 0 { crate::forge_ui::draw_producer_hero(f, app, hero_prod); }
             draw_mining_hero(f, app, hero_mining);
             draw_node_body(f, app, cards_area);
         }
@@ -489,7 +492,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
         Tab::Ai => draw_ai_tab(f, app, body_area),
     }
 
-    f.render_widget(render_footer(app), footer_area);
+    f.render_widget(render_footer(app, footer_area.width), footer_area);
 
     // LANE-B v0.50: float the SIGIL rune band ABOVE the live cockpit — drawn last
     // so it overlays every tab, fades on its own clock, and steals no layout slot.
@@ -610,8 +613,43 @@ pub(crate) fn render_block_stream(app: &App) -> Paragraph<'static> {
 }
 
 
-pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
-    let toast = if app.toast.is_empty() { String::new() } else { format!(" › {}", app.toast) };
+/// Most rows a long toast may take (10.4.39). The footer used to give the toast ONE row, so a
+/// link or an ssh hint was cut at the terminal's edge (operator, 2026-10-18: "i cant see the
+/// whole line for the wallet link"). Now it wraps; only what is longer still ends in "…".
+pub(crate) const TOAST_MAX_ROWS: usize = 8;
+
+/// The toast as rows that each fit `width` columns: every `\n` part on its own row(s), words
+/// wrapped, a link longer than a row hard-split, continuation rows indented under the text.
+pub(crate) fn wrap_toast(toast: &str, width: usize) -> Vec<String> {
+    if toast.is_empty() {
+        return vec![String::new()];
+    }
+    let w = width.max(20);
+    let mut rows = Vec::new();
+    for (k, part) in toast.split('\n').enumerate() {
+        let text = if k == 0 { format!(" › {part}") } else { format!("   {part}") };
+        rows.extend(wrap_rows(&text, w, 3));
+    }
+    if rows.len() > TOAST_MAX_ROWS {
+        rows.truncate(TOAST_MAX_ROWS);
+        if let Some(last) = rows.last_mut() {
+            let mut keep = last.clone();
+            while Span::raw(keep.clone()).width() + 1 > w {
+                keep.pop();
+            }
+            *last = format!("{keep}…");
+        }
+    }
+    rows
+}
+
+/// Footer rows for this frame: the toast's rows (one while offline) + the key row.
+pub(crate) fn footer_height(app: &App, width: u16) -> u16 {
+    let toast_rows = if app.online { wrap_toast(&app.toast, width as usize).len() } else { 1 };
+    toast_rows as u16 + 1
+}
+
+pub(crate) fn render_footer(app: &App, width: u16) -> Paragraph<'static> {
     let keys = |c: &'static str, rest: &'static str, col: Color| -> Vec<Span<'static>> {
         vec![Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD)), dim(rest), Span::raw(sa("  "))]
     };
@@ -627,17 +665,12 @@ pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
     kb.extend(keys("[N]", "odes", C_CYAN));
     kb.extend(keys("[L]", "ogin", C_VBRIGHT));
     kb.extend(keys("[Q]", "uit", C_RED));
-    // v0.6.0: show serve status line
-    let serve_line = if !app.serve_status.is_empty() {
-        let short: String = app.serve_status.chars().take(72).collect();
-        Line::from(Span::styled(format!(" ⚡ {}", short), Style::default().fg(C_GREEN)))
-    } else {
-        Line::from(Span::styled(" ⚡ fluxc serve :9800 · local wallet [W]", Style::default().fg(C_DIM)))
-    };
+    // 10.4.39: the old third "⚡ serve" line is gone — the layout only ever gave the footer two
+    // rows, so it was never on screen.
     // v0.10.5.1: when offline, the top line becomes a calm status banner with a
     // live "offline for X · retry in Ns" countdown instead of a stale gold toast —
     // the operator always knows the cockpit is reconnecting, not frozen.
-    let top_line = if !app.online {
+    let mut lines: Vec<Line<'static>> = if !app.online {
         let dur = app.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_else(|| "0s".into());
         let txt = if app.refresh_inflight {
             format!(" ⚠ offline {} · reconnecting…", dur)
@@ -645,21 +678,42 @@ pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
             let next = app.refresh_delay().as_secs().saturating_sub(app.last_fetch.elapsed().as_secs());
             format!(" ⚠ offline {} · retry in {}s", dur, next)
         };
-        Line::from(Span::styled(txt, Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
+        vec![Line::from(Span::styled(txt, Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))]
     } else {
-        Line::from(Span::styled(toast, Style::default().fg(C_GOLD)))
+        wrap_toast(&app.toast, width as usize)
+            .into_iter()
+            .map(|r| Line::from(Span::styled(r, Style::default().fg(C_GOLD))))
+            .collect()
     };
-    Paragraph::new(vec![
-        top_line,
-        Line::from(kb),
-        serve_line,
-    ])
+    lines.push(Line::from(kb));
+    Paragraph::new(lines)
 }
 
 #[cfg(test)]
 mod wrap_tests {
     use super::wrapped_rows;
     use ratatui::text::Line;
+
+    /// 10.4.39: the [W] toast is never cut — it wraps inside the terminal, the link survives
+    /// intact (rows joined), two-part toasts start a new row, and only a runaway one is capped.
+    #[test]
+    fn a_long_toast_wraps_instead_of_being_cut() {
+        use super::{wrap_toast, TOAST_MAX_ROWS};
+        let width = |r: &String| ratatui::text::Span::raw(r.clone()).width();
+        assert_eq!(wrap_toast("", 80), vec![String::new()]);
+        assert_eq!(wrap_toast("◆ local wallet → http://localhost:9800/w", 80).len(), 1, "the short link fits one row");
+        let url = format!("http://localhost:9800/?addr={}", "c0ffee".repeat(10) + "abcd");
+        let rows = wrap_toast(&format!("◆ local wallet → {url}"), 80);
+        assert!(rows.len() >= 2 && rows.iter().all(|r| width(r) <= 80), "{rows:?}");
+        let joined: String = rows.iter().map(|r| r.trim()).collect();
+        assert!(joined.contains(&url), "the whole link is on screen: {rows:?}");
+        let two = wrap_toast(&format!("🔐 ssh -L 9800:localhost:9800 me@host  then open http://localhost:9800/w\n🔗 or, prompted: https://sigilgraph.org/sigil-wallet-tron-embedded.html?addr={}", "ab".repeat(32)), 100);
+        assert!(two.len() >= 3 && two.len() <= TOAST_MAX_ROWS && two.iter().all(|r| width(r) <= 100), "{two:?}");
+        assert!(two.iter().any(|r| r.trim_start().starts_with("🔗")), "the second part starts its own row");
+        let long = wrap_toast(&"word ".repeat(400), 60);
+        assert_eq!(long.len(), TOAST_MAX_ROWS);
+        assert!(long.last().unwrap().ends_with('…') && long.iter().all(|r| width(r) <= 60));
+    }
     #[test]
     fn a_long_reply_counts_every_wrapped_row() {
         assert_eq!(wrapped_rows(&Line::from(""), 10), 1);

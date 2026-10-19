@@ -589,7 +589,7 @@ body.view-desktop .desktop{display:flex}
     }catch(e){}
   }
   try{ window.refreshPrice=refreshPrice; }catch(e){}
-  // This script runs BEFORE <script src="sigil-metamask.js"> further down the document,
+  // This script runs BEFORE <script src="/exchange-v1/sigil-metamask.js?v=20261015-2"> further down the document,
   // so the very first call finds no window.SigilMM and returns silently — the pill then
   // sat at "$—" until the 30 s tick, which reads as broken. Retry on a short ramp first.
   [0, 800, 2000, 4500, 9000].forEach(function(d){ setTimeout(refreshPrice, d); });
@@ -3238,8 +3238,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 // 2026-10-16 binary proof upload (1M-users step 1): the proof travels as raw bytes, about half
 // the upload of hex JSON. Wire: "SGP1" | meta_len u32 LE | meta JSON (the JSON body minus
 // "proof") | proof bytes. Falls back to JSON only when nothing can have been queued.
-// 2026-10-17 [W]: ON for localhost too — sigil-top 10.4.37's pass-through forwards bytes.
 async function sigilPostProof(path, obj){
+  // 2026-10-17 [W]: ON for localhost too — sigil-top 10.4.37's pass-through forwards bytes.
   var useBin = window.sigilProofBin!==false;
   var hex = typeof obj.proof==='string' ? obj.proof.replace(/^0x/,'') : '';
   var body=null;
@@ -4153,8 +4153,8 @@ window.sigilPostProof = sigilPostProof;
      settles. That mint is NOT instant and NOT reversible from here — this
      modal only submits the lock, it does not wait for or confirm the mint,
      so the copy below says so plainly instead of implying otherwise. -->
-<script src="sigil-metamask.js?v=20261015-exchange1"></script>
-<script src="wsigil-market.js?v=20261015-exchange1"></script>
+<script src="/exchange-v1/sigil-metamask.js?v=20261015-2"></script>
+<script src="/exchange-v1/wsigil-market.js?v=20261015-2"></script>
 <div id="bridge-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
   <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
     <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
@@ -8582,9 +8582,9 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
      every mutation and its result. The original promise is returned untouched —
      callers are unaffected whether or not we manage to record.            */
   var HOOKS = [
-    {re:/\/v1\/shielded_send(\?|$)/, cat:'out',    dir:'out', label:'Private send'},
+    {re:/\/v1\/shielded_send(\/bin)?(\?|$)/, cat:'out', dir:'out', label:'Private send'},
     {re:/\/v1\/shield(\?|$)/,        cat:'shield', dir:'out', label:'Shield → private'},
-    {re:/\/v1\/unshield(\?|$)/,      cat:'shield', dir:'in',  label:'Unshield → public'},
+    {re:/\/v1\/unshield(\/bin)?(\?|$)/, cat:'shield', dir:'in', label:'Unshield → public'},
     {re:/\/v1\/swap(\?|$)/,          cat:'swap',   dir:'out', label:'DEX swap'},
     {re:/\/v1\/bridge\/lock(\?|$)/,  cat:'out',    dir:'out', label:'Bridge → Polygon'},
     {re:/\/v1\/send(\?|$)/,          cat:'out',    dir:'out', label:'Send'}
@@ -10191,29 +10191,6 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 })();
 </script>
 
-<!-- 2026-10-12 PRIVACY: bucketed commitment lookups (see /v1/shielded/has_bucket). -->
-<script>
-(function(){
-  "use strict";
-  var cache=Object.create(null);   // first byte -> {at, set}
-  // A set of every commitment ever held whose first byte is p, or null if the node predates the
-  // endpoint (callers then fall back to the full walk, never to a single-commitment query).
-  window.__sigilCmBucket=async function(p, fresh){
-    p=String(p).toLowerCase();
-    var c=cache[p];
-    if(c && !fresh && (Date.now()-c.at)<15000) return c.set;
-    var r=await fetch('/v1/shielded/has_bucket?p='+p,{cache:'no-store'});
-    if(r.status===404) return null;
-    var j=null; try{ j=await r.json(); }catch(_){}
-    if(!j || j.ok!==true || !Array.isArray(j.cms)) throw new Error('shielded/has_bucket unreadable');
-    var set=Object.create(null);
-    for(var i=0;i<j.cms.length;i++) set[String(j.cms[i]).toLowerCase()]=1;
-    cache[p]={at:Date.now(), set:set};
-    return set;
-  };
-})();
-</script>
-
 <!-- 2026-10-12 PRIVACY GAUGE (Π). Viktor: "build the Π gauge". How many people a private payment
      hides among, as an outside chain observer can tell, read from the chain by sigil-privacy-scan
      (crowd = 2^H over the live epoch's depositors by value; exits linked by amount count as 1).
@@ -10299,6 +10276,29 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       .catch(function(){ data=null; paint(); });
   }
   host(); setInterval(host,3000); load(); setInterval(load,5*60*1000);
+})();
+</script>
+
+<!-- 2026-10-12 PRIVACY: bucketed commitment lookups (see /v1/shielded/has_bucket). -->
+<script>
+(function(){
+  "use strict";
+  var cache=Object.create(null);   // first byte -> {at, set}
+  // A set of every commitment ever held whose first byte is p, or null if the node predates the
+  // endpoint (callers then fall back to the full walk, never to a single-commitment query).
+  window.__sigilCmBucket=async function(p, fresh){
+    p=String(p).toLowerCase();
+    var c=cache[p];
+    if(c && !fresh && (Date.now()-c.at)<15000) return c.set;
+    var r=await fetch('/v1/shielded/has_bucket?p='+p,{cache:'no-store'});
+    if(r.status===404) return null;
+    var j=null; try{ j=await r.json(); }catch(_){}
+    if(!j || j.ok!==true || !Array.isArray(j.cms)) throw new Error('shielded/has_bucket unreadable');
+    var set=Object.create(null);
+    for(var i=0;i<j.cms.length;i++) set[String(j.cms[i]).toLowerCase()]=1;
+    cache[p]={at:Date.now(), set:set};
+    return set;
+  };
 })();
 </script>
 
@@ -10797,7 +10797,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   });
 })();
 </script>
-<script src="sigil-exchange.js?v=20261015-exchange1"></script>
-<script src="sigil-address-book.js?v=20261016-1"></script>
-<script src="sigil-send.js?v=20261016-1"></script>
+<script src="/exchange-v1/sigil-exchange.js?v=20261015-2"></script>
+<script src="/address-book-v1/sigil-address-book.js?v=20261016-1"></script>
+<script src="/send-v1/sigil-send.js?v=20261016-1"></script>
 </body></html>

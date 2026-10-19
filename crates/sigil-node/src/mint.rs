@@ -199,6 +199,7 @@ pub fn mint_next_block_with_schedule(
         // Height-gated fifth root (`sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT`):
         // `None` below the gate keeps every pre-gate hash byte-identical, `Some` from it.
         shielded_pool_root: if sigil_header::shielded_pool_root_required(height) { Some(pool_root) } else { None },
+        extensions: Vec::new(),
     };
     // Real signature if (and only if) the operator opted in AND this is the
     // self-mined path with a matching producer wallet — see

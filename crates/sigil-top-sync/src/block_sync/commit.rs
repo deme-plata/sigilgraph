@@ -244,7 +244,13 @@ pub(super) fn bulk_import_prefix(
     let mut imported = 0usize;
     for h in from..=to {
         let Some(header) = store.get_header_at_height(h) else { continue };
-        let bytes = bincode::serialize(&header).map_err(|e| format!("serialize h={h}: {e}"))?;
+        // 2026-10-19: the fifth-root bytes outside the g3 family (unchanged content roots).
+        let bytes = if sigil_header::IS_G3 {
+            bincode::serialize(&header)
+        } else {
+            bincode::serialize(&sigil_header::SigilBlockHeaderV0FifthRoot::from(&header))
+        }
+        .map_err(|e| format!("serialize h={h}: {e}"))?;
         let root = cas.ingest(&bytes).map_err(|e| format!("ingest h={h}: {e}"))?;
         manifest.add(h, root);
         imported += 1;
@@ -281,6 +287,7 @@ mod tests {
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
             shielded_pool_root: None,
+            extensions: Vec::new(),
         }
     }
 

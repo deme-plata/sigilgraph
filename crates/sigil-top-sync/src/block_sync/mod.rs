@@ -3315,6 +3315,7 @@ mod lane3_decode_batch_bench {
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
             shielded_pool_root: None,
+            extensions: Vec::new(),
         }
     }
 

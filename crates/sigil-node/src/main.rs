@@ -5053,6 +5053,7 @@ fn build_block_at(
         // P0 helper (declared roots, stubbed crypto): never used at/after the fifth-root gate —
         // `precheck` refuses a gated header without the root, so this stays honest.
         shielded_pool_root: None,
+        extensions: Vec::new(),
     };
 
     Ok(Block { header, transition, events })

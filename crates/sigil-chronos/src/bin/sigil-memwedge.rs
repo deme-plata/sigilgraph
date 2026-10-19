@@ -130,6 +130,7 @@ fn realistic_header(height: u64) -> sigil_header::SigilBlockHeaderV0 {
         producer_sig: SignatureBytes(vec![0x55; 292]),
         topology_commitment: Some(seed),
         shielded_pool_root: None,
+        extensions: Vec::new(),
     }
 }
 

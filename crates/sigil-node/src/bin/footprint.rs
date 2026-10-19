@@ -131,6 +131,7 @@ fn realistic_block(height: u64) -> Block {
         // and QTFT topology_commitment rides along on every real block now.
         topology_commitment: Some(h32(height * 11 + 13)),
         shielded_pool_root: None,
+        extensions: Vec::new(),
     };
     Block { header, transition: StateTransition { at_height: height, mutations: vec![] }, events: vec![] }
 }

@@ -104,6 +104,7 @@ pub(crate) fn __test_chain(n: u64) -> Vec<Block> {
                 producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             };
             Block {
                 header,

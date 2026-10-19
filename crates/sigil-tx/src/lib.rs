@@ -588,6 +588,13 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+
+    /// A kind this binary does not know (2026-10-19, sigil-g3) — sent by a NEWER wallet or
+    /// node. It decodes into this variant instead of failing to decode, so every entry point
+    /// can refuse it by name ("this node is older than the transaction — upgrade") rather than
+    /// with a parse error. Never built or applied; never serialized by this binary.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Compact tag for indexing — matches [`SigilEvent::tag`] convention. The
@@ -623,6 +630,8 @@ impl SigilTx {
             SigilTx::OraclePush      { .. } => 22,
             SigilTx::OracleDelegate  { .. } => 23,
             SigilTx::GaugePush       { .. } => 24,
+            // never stored: an unknown kind is refused before anything indexes it
+            SigilTx::Unknown => u8::MAX,
         }
     }
 
@@ -655,6 +664,7 @@ impl SigilTx {
             SigilTx::OraclePush      { fee, .. } |
             SigilTx::OracleDelegate  { fee, .. } |
             SigilTx::GaugePush       { fee, .. } => *fee,
+            SigilTx::Unknown => 0,
         }
     }
 
@@ -694,6 +704,7 @@ impl SigilTx {
             SigilTx::OraclePush { authority, .. } => *authority,
             SigilTx::OracleDelegate { authority, .. } => *authority,
             SigilTx::GaugePush { authority, .. } => *authority,
+            SigilTx::Unknown => [0u8; 32],
         }
     }
 
@@ -870,6 +881,10 @@ impl SignedTx {
     /// Cheap pre-validation: scheme/sig-length sanity, sender == fee_payer.
     /// Does NOT verify the actual signature (deferred to flux-eternal-cypher).
     pub fn precheck(&self) -> Result<(), TxApplyError> {
+        // 2026-10-19: refuse an unknown kind before any other check reads its (absent) fields.
+        if matches!(self.tx, SigilTx::Unknown) {
+            return Err(TxApplyError::UnknownKind);
+        }
         // Shielded spends carry NEITHER a transparent payer NOR a wallet signature:
         // authorization is the STARK, which `commit_state_transition` verifies. Every
         // check below assumes a signing wallet, so they are skipped rather than fed a
@@ -1364,6 +1379,9 @@ pub fn verify_batch_parallel(txs: &[SignedTx]) -> Result<(), (usize, TxApplyErro
 /// HTTP status.
 #[derive(Debug, thiserror::Error)]
 pub enum TxApplyError {
+    /// 2026-10-19: a transaction kind this binary does not know ([`SigilTx::Unknown`]).
+    #[error("unknown transaction kind — this node is older than the transaction (upgrade the node)")]
+    UnknownKind,
     /// Insufficient balance to cover (amount + fee) on a Send/Swap/etc.
     #[error("insufficient balance: wallet has {have}, needs {need}")]
     InsufficientBalance {
@@ -2828,6 +2846,9 @@ fn apply_tx_inner(
             let _ = height;
             out.mutations.push(sigil_oracle::delegate_mutation(*feeder));
         }
+
+        // 2026-10-19: a kind this binary does not know changes nothing — refused by name.
+        SigilTx::Unknown => return Err(TxApplyError::UnknownKind),
     }
 
     Ok(out)
@@ -4813,5 +4834,27 @@ mod nation_welfare_tests {
         let back: SigilTx = serde_json::from_slice(&tx.encode()).unwrap();
         assert_eq!(back, tx);
         assert_eq!(tx.hash(), *blake3::hash(&tx.encode()).as_bytes());
+    }
+}
+
+/// 2026-10-19 (sigil-g3): a transaction kind this binary does not know decodes into
+/// `SigilTx::Unknown` and is refused by name, instead of failing as a parse error.
+#[cfg(test)]
+mod unknown_kind_tests {
+    use super::*;
+    #[test]
+    fn an_unknown_kind_decodes_and_is_refused_by_name() {
+        let tx: SigilTx = serde_json::from_str(r#"{"kind":"FutureThing","x":1}"#).expect("decodes as Unknown");
+        assert_eq!(tx, SigilTx::Unknown);
+        assert_eq!(tx.fee(), 0);
+        let st = SignedTx {
+            tx,
+            from_pubkey: [0u8; 32],
+            nonce: 0,
+            sig_scheme: SigScheme::SqiSign5,
+            sig: SignatureBytes(Vec::new()),
+            pubkey: PubKeyBytes(Vec::new()),
+        };
+        assert!(matches!(st.precheck(), Err(TxApplyError::UnknownKind)));
     }
 }

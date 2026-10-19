@@ -39,6 +39,12 @@ use serde::{de::DeserializeOwned, Serialize};
 pub const REC_MAGIC: u8 = 0xB5;
 pub const REC_VERSION_V1: u8 = 1;
 pub const REC_VERSION_V2: u8 = 2;
+// THE BODY-FORMAT RULE (2026-10-19, sigil-g3): the record version byte is the block BODY's
+// format version. A change an older node would decode wrongly or not at all — a new
+// `StateMutation` variant, a new field in the block — ships with a NEW record version (and a
+// header `version` row in sigil-header), never inside an existing one. An older node then
+// meets a version it does not know, which [`unsupported_record_version`] names, and says
+// "upgrade" instead of quietly treating the record as the end of the chain.
 /// `MAGIC | VERSION | height(8)` — the fixed part before the compressed body.
 pub const REC_HEADER: usize = 10;
 /// zstd level 3: measured 896 B/blk. Higher levels gain little on records this small and
@@ -70,6 +76,16 @@ pub fn kind_of(payload: &[u8]) -> Option<RecordKind> {
             REC_VERSION_V2 => Some(RecordKind::V2),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// The version byte of a block record this binary cannot decode because it was written by a
+/// NEWER node (2026-10-19). `None` for a record this binary understands, for legacy JSON and
+/// for bytes that are not a record at all (torn or junk) — only "newer format" is named.
+pub fn unsupported_record_version(payload: &[u8]) -> Option<u8> {
+    match payload.first()? {
+        &REC_MAGIC if payload.len() >= REC_HEADER && kind_of(payload).is_none() => Some(payload[1]),
         _ => None,
     }
 }
@@ -325,5 +341,24 @@ mod tests {
         assert!(pure::decode_record::<Block>(&rec[..rec.len() / 2]).is_none());
         assert!(decode_record::<Block>(b"\x00garbage").is_none());
         assert!(pure::decode_record::<Block>(b"{not json").is_none());
+    }
+}
+
+/// 2026-10-19: only "written by a newer node" is named; torn, junk and known records are not.
+#[cfg(test)]
+mod newer_format_tests {
+    use super::*;
+    #[test]
+    fn a_record_from_a_newer_node_is_named_and_nothing_else_is() {
+        let mut rec = vec![REC_MAGIC, 9];
+        rec.extend_from_slice(&7u64.to_le_bytes());
+        rec.extend_from_slice(b"body");
+        assert_eq!(unsupported_record_version(&rec), Some(9));
+        let mut known = rec.clone();
+        known[1] = REC_VERSION_V2;
+        assert_eq!(unsupported_record_version(&known), None, "a known version is not 'newer'");
+        assert_eq!(unsupported_record_version(&[REC_MAGIC, 9]), None, "torn framing is not a version");
+        assert_eq!(unsupported_record_version(b"{\"legacy\":1}"), None);
+        assert_eq!(unsupported_record_version(&[]), None);
     }
 }

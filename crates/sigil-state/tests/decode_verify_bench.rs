@@ -83,6 +83,7 @@ fn mk_header(height: u64, parent_hash: BlockHash, pad: usize) -> SigilBlockHeade
         // so `None` is what every real header carries — and what `hash()` strips.
         topology_commitment: None,
         shielded_pool_root: None,
+        extensions: Vec::new(),
     }
 }
 

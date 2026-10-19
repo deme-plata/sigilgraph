@@ -98,7 +98,10 @@ pub const GENESIS_TIMESTAMP_MS: u64 = 1787777640000;
 /// `SIGIL_GENESIS_v0.md` is "BLAKE3-committed into the genesis header" describe an intent
 /// that was never implemented; the AI-citizen table lives in this source file only.
 pub fn genesis_charter_commitment() -> [u8; 32] {
-    if NETWORK_ID == *b"sigil-g2" {
+    // 2026-10-19: the g3 family (g2's testnet successor and its rehearsal twin) commits no
+    // charter either — MAINNET_CHARTER.txt is the DRAFT contract of `sigil-m1`, and a testnet
+    // genesis must not claim to be bound by it.
+    if NETWORK_ID == *b"sigil-g2" || sigil_header::g3_family(&NETWORK_ID) {
         [0u8; 32]
     } else {
         sigil_charter::charter_hash()
@@ -207,6 +210,7 @@ pub fn build_genesis() -> Result<Block> {
         // Genesis has no prior window to commit to.
         topology_commitment: None,
         shielded_pool_root: None,
+        extensions: Vec::new(),
     };
 
     Ok(Block {

@@ -365,6 +365,37 @@ pub struct SigilBlockHeaderV0 {
     /// `signing_bytes()` digest while the field is `None`.
     #[serde(default)]
     pub shielded_pool_root: Option<[u8; 32]>,
+    /// EXTENSIONS (2026-10-19, sigil-g3): the one field future header data goes into, as
+    /// numbered entries, so the positional layouts below never need another legacy struct.
+    /// Empty on every network today. `hash()`/`signing_bytes()` strip the empty field's
+    /// JSON (`,"extensions":[]`), so every existing block hash is unchanged. What a `kind`
+    /// means — and from which height a node must understand it — is a consensus rule that
+    /// arrives with a header `version` bump ([`header_version_allowed`]); until then
+    /// [`SigilBlockHeaderV0::precheck`] refuses any extension at all.
+    #[serde(default)]
+    pub extensions: Vec<HeaderExtension>,
+}
+
+/// One numbered piece of header data (see [`SigilBlockHeaderV0::extensions`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderExtension {
+    pub kind: u16,
+    pub data: Vec<u8>,
+}
+
+/// The exact JSON fragment `serde_json` emits for an empty `extensions` (always the last
+/// field, so the fragment is unambiguous).
+const EMPTY_EXTENSIONS_JSON_FRAGMENT: &str = ",\"extensions\":[]";
+
+/// Which header versions a node accepts, and from which height (2026-10-19, sigil-g3).
+/// A future header change adds a row here and bumps `version` at that height: an older
+/// node then refuses the first new header plainly ("unsupported version — upgrade")
+/// instead of hashing it differently and silently parking. Today: version 0 everywhere.
+const HEADER_VERSIONS: &[(u16, u64)] = &[(HEADER_VERSION, 0)];
+
+/// May a header at `height` carry `version`? See [`HEADER_VERSIONS`].
+pub fn header_version_allowed(version: u16, height: u64) -> bool {
+    HEADER_VERSIONS.iter().any(|&(v, from)| v == version && height >= from)
 }
 
 /// The exact JSON fragment `serde_json` emits for a `None`
@@ -406,7 +437,20 @@ fn strip_null_shielded_pool_root_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
 /// fragments of the two height-gated optional fields removed while they are `None`.
 fn canonical_json_for_hashing(json: Vec<u8>, topology_none: bool, pool_root_none: bool) -> Vec<u8> {
     let json = if topology_none { strip_null_topology_commitment_for_hashing(json) } else { json };
-    if pool_root_none { strip_null_shielded_pool_root_for_hashing(json) } else { json }
+    let json = if pool_root_none { strip_null_shielded_pool_root_for_hashing(json) } else { json };
+    strip_empty_extensions_for_hashing(json)
+}
+
+/// Strip [`EMPTY_EXTENSIONS_JSON_FRAGMENT`] (2026-10-19): a header without extensions hashes
+/// exactly as it did before the field existed. Only the LAST occurrence is a candidate, and
+/// only when the JSON ends with it plus `}` — the field is the struct's last.
+fn strip_empty_extensions_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
+    let frag = EMPTY_EXTENSIONS_JSON_FRAGMENT.as_bytes();
+    if json.len() >= frag.len() + 1 && json.ends_with(b"}") && json[json.len() - 1 - frag.len()..json.len() - 1] == *frag {
+        let end = json.len() - 1;
+        json.drain(end - frag.len()..end);
+    }
+    json
 }
 /// From this height every header MUST carry `Some(shielded_pool_root)`; below it every
 /// header MUST carry `None` (both directions are refused by [`SigilBlockHeaderV0::precheck`]
@@ -579,6 +623,7 @@ impl From<SigilBlockHeaderV0Legacy> for SigilBlockHeaderV0 {
             tx_count: l.tx_count, fluxc_artifact_proof: l.fluxc_artifact_proof, sig_scheme: l.sig_scheme,
             producer: l.producer, producer_sig: l.producer_sig, topology_commitment: l.topology_commitment,
             shielded_pool_root: None,
+            extensions: Vec::new(),
         }
     }
 }
@@ -607,27 +652,70 @@ pub fn decode_legacy_header_page(body: &[u8]) -> Option<Vec<SigilBlockHeaderV0>>
     let v: Vec<SigilBlockHeaderV0Legacy> = bincode::deserialize(body).ok()?;
     Some(v.into_iter().map(SigilBlockHeaderV0::from).collect())
 }
-/// The body of a codec-5 page (inside `'V'` + zstd): `bincode(Vec<SigilBlockHeaderV0>)`.
-pub fn encode_v1_header_page(headers: &[SigilBlockHeaderV0]) -> Vec<u8> {
-    bincode::serialize(&headers.to_vec()).unwrap_or_default()
+/// The fifth-root positional layout: the legacy fields, then `shielded_pool_root` — and no
+/// `extensions`. Positional bincode writes a nested struct as its fields in order, so this
+/// is byte-identical to what every node, page and store wrote before 2026-10-19.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigilBlockHeaderV0FifthRoot {
+    pub base: SigilBlockHeaderV0Legacy,
+    pub shielded_pool_root: Option<[u8; 32]>,
 }
-/// Decode a codec-5 page body.
+impl From<&SigilBlockHeaderV0> for SigilBlockHeaderV0FifthRoot {
+    /// Drops `extensions` (empty on every network outside the g3 family).
+    fn from(h: &SigilBlockHeaderV0) -> Self {
+        Self { base: SigilBlockHeaderV0Legacy::from(h), shielded_pool_root: h.shielded_pool_root }
+    }
+}
+impl From<SigilBlockHeaderV0FifthRoot> for SigilBlockHeaderV0 {
+    fn from(f: SigilBlockHeaderV0FifthRoot) -> Self {
+        let mut h = SigilBlockHeaderV0::from(f.base);
+        h.shielded_pool_root = f.shielded_pool_root;
+        h
+    }
+}
+/// The body of a codec-5 page (inside `'V'` + zstd). Outside the g3 family it carries the
+/// fifth-root layout — byte-identical to every page ever served; on the g3 family (whose
+/// nodes and clients are all built from this layout) the full header with `extensions`.
+pub fn encode_v1_header_page(headers: &[SigilBlockHeaderV0]) -> Vec<u8> {
+    if IS_G3 {
+        bincode::serialize(&headers.to_vec()).unwrap_or_default()
+    } else {
+        let v: Vec<SigilBlockHeaderV0FifthRoot> = headers.iter().map(SigilBlockHeaderV0FifthRoot::from).collect();
+        bincode::serialize(&v).unwrap_or_default()
+    }
+}
+/// Decode a codec-5 page body (the layout [`encode_v1_header_page`] writes on this network).
 pub fn decode_v1_header_page(body: &[u8]) -> Option<Vec<SigilBlockHeaderV0>> {
-    bincode::deserialize::<Vec<SigilBlockHeaderV0>>(body).ok()
+    if IS_G3 {
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(body).ok()
+    } else {
+        let v: Vec<SigilBlockHeaderV0FifthRoot> = bincode::deserialize(body).ok()?;
+        Some(v.into_iter().map(SigilBlockHeaderV0::from).collect())
+    }
 }
 /// Decode ONE stored header record of either layout, distinguished by a tag byte the
 /// writer prepends: [`STORED_HEADER_TAG_V1`] + `bincode(full)`, or (no tag — every record
 /// written before 2026-09-25) `bincode(legacy)`. Unambiguous because a legacy record
 /// begins with `version: u16 = 0` (byte `0x00`) and the tag is `0x01`.
 pub const STORED_HEADER_TAG_V1: u8 = 0x01;
+/// 2026-10-19: tag of a record in the full layout (with `extensions`), written only on the
+/// g3 family. Outside it the writer keeps tag `0x01` and the fifth-root bytes.
+pub const STORED_HEADER_TAG_V2: u8 = 0x02;
 pub fn encode_stored_header(h: &SigilBlockHeaderV0) -> Vec<u8> {
-    let mut out = vec![STORED_HEADER_TAG_V1];
-    out.extend(bincode::serialize(h).unwrap_or_default());
-    out
+    if IS_G3 {
+        let mut out = vec![STORED_HEADER_TAG_V2];
+        out.extend(bincode::serialize(h).unwrap_or_default());
+        out
+    } else {
+        let mut out = vec![STORED_HEADER_TAG_V1];
+        out.extend(bincode::serialize(&SigilBlockHeaderV0FifthRoot::from(h)).unwrap_or_default());
+        out
+    }
 }
 pub fn decode_stored_header(bytes: &[u8]) -> Option<SigilBlockHeaderV0> {
     match bytes.first()? {
-        &STORED_HEADER_TAG_V1 => bincode::deserialize::<SigilBlockHeaderV0>(&bytes[1..]).ok(),
+        &STORED_HEADER_TAG_V2 => bincode::deserialize::<SigilBlockHeaderV0>(&bytes[1..]).ok(),
+        &STORED_HEADER_TAG_V1 => bincode::deserialize::<SigilBlockHeaderV0FifthRoot>(&bytes[1..]).ok().map(SigilBlockHeaderV0::from),
         _ => bincode::deserialize::<SigilBlockHeaderV0Legacy>(bytes).ok().map(SigilBlockHeaderV0::from),
     }
 }
@@ -689,7 +777,12 @@ impl SigilBlockHeaderV0 {
     /// signatures or VDF — those are wired separately when the relevant
     /// crates land.
     pub fn precheck(&self) -> Result<(), HeaderError> {
-        if self.version != HEADER_VERSION {
+        // 2026-10-19: no extension kind is defined yet, so none may appear (a future kind
+        // arrives with a version bump, and an old node refuses it right here).
+        if !self.extensions.is_empty() {
+            return Err(HeaderError::UnknownExtension { kind: self.extensions[0].kind });
+        }
+        if !header_version_allowed(self.version, self.height) {
             return Err(HeaderError::WrongVersion {
                 expected: HEADER_VERSION,
                 got: self.version,
@@ -830,6 +923,11 @@ pub enum HeaderError {
     #[error("wrong header version: expected {expected}, got {got}")]
     WrongVersion { expected: u16, got: u16 },
 
+    /// 2026-10-19: the header carries an extension this binary does not know — made by a
+    /// newer node (upgrade this one) or invalid. See [`SigilBlockHeaderV0::extensions`].
+    #[error("unknown header extension kind {kind} — this node is older than the block (upgrade)")]
+    UnknownExtension { kind: u16 },
+
     /// Header.network_id didn't match [`NETWORK_ID`].
     #[error("wrong network id: expected {expected:?}, got {got:?}")]
     WrongNetwork { expected: [u8; 8], got: [u8; 8] },
@@ -879,6 +977,56 @@ pub enum HeaderError {
 mod tests {
     use super::*;
 
+    /// 2026-10-19: an empty `extensions` changes no hash — the field's JSON is stripped.
+    #[test]
+    fn empty_extensions_leave_the_hash_unchanged() {
+        let h = fake_header();
+        let json = serde_json::to_vec(&h).unwrap();
+        assert!(std::str::from_utf8(&json).unwrap().ends_with(",\"extensions\":[]}"));
+        let without = canonical_json_for_hashing(json.clone(), h.topology_commitment.is_none(), h.shielded_pool_root.is_none());
+        assert!(!std::str::from_utf8(&without).unwrap().contains("extensions"), "stripped before hashing");
+        let mut with_ext = h.clone();
+        with_ext.extensions.push(HeaderExtension { kind: 1, data: vec![1, 2, 3] });
+        assert_ne!(with_ext.hash(), h.hash(), "a non-empty extension IS part of the hash");
+    }
+
+    /// 2026-10-19: no extension kind exists yet, so precheck refuses any.
+    #[test]
+    fn precheck_refuses_any_extension_until_a_kind_is_defined() {
+        let mut h = fake_header();
+        assert!(h.precheck().is_ok());
+        h.extensions.push(HeaderExtension { kind: 7, data: vec![] });
+        assert!(matches!(h.precheck(), Err(HeaderError::UnknownExtension { kind: 7 })));
+    }
+
+    /// 2026-10-19: the version table — version 0 everywhere today, nothing else.
+    #[test]
+    fn header_version_table() {
+        assert!(header_version_allowed(HEADER_VERSION, 0));
+        assert!(header_version_allowed(HEADER_VERSION, u64::MAX));
+        assert!(!header_version_allowed(HEADER_VERSION + 1, 0));
+    }
+
+    /// 2026-10-19: stored headers round-trip, and outside the g3 family the writer still
+    /// emits tag 0x01 with the fifth-root bytes — byte-identical to before.
+    #[test]
+    fn stored_header_layouts_round_trip() {
+        let h = fake_header();
+        let rec = encode_stored_header(&h);
+        assert_eq!(decode_stored_header(&rec).unwrap(), h);
+        if !IS_G3 {
+            assert_eq!(rec[0], STORED_HEADER_TAG_V1);
+            let mut old = vec![STORED_HEADER_TAG_V1];
+            old.extend(bincode::serialize(&SigilBlockHeaderV0FifthRoot::from(&h)).unwrap());
+            assert_eq!(rec, old, "non-g3 records are the fifth-root bytes");
+        }
+        let mut full = vec![STORED_HEADER_TAG_V2];
+        full.extend(bincode::serialize(&h).unwrap());
+        assert_eq!(decode_stored_header(&full).unwrap(), h, "a full-layout record decodes on every build");
+        let page = encode_v1_header_page(std::slice::from_ref(&h));
+        assert_eq!(decode_v1_header_page(&page).unwrap(), vec![h]);
+    }
+
     fn fake_header() -> SigilBlockHeaderV0 {
         let parent: [u8; 32] = [9u8; 32];
         let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
@@ -916,6 +1064,7 @@ mod tests {
             producer_sig: SignatureBytes(vec![0u8; 292]),
             topology_commitment: None,
             shielded_pool_root: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -1030,6 +1179,7 @@ mod tests {
             producer_sig: SignatureBytes(vec![0xAB; 64]),
             topology_commitment: Some([111u8; 32]),
             shielded_pool_root: None,
+            extensions: Vec::new(),
         };
 
         let hash_bytes = header.hash();
@@ -1179,9 +1329,11 @@ mod tests {
         let raw_s = std::str::from_utf8(&raw).unwrap();
         assert!(raw_s.contains(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT), "serde emits the null fragment (no skip_serializing_if)");
         // the pre-field canonical bytes: strip BOTH null fragments by hand
+        // 2026-10-19: the empty `extensions` field did not exist before either — strip it too.
         let legacy: Vec<u8> = raw_s
             .replacen(NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT, "", 1)
             .replacen(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT, "", 1)
+            .replacen(EMPTY_EXTENSIONS_JSON_FRAGMENT, "", 1)
             .into_bytes();
         assert!(!std::str::from_utf8(&legacy).unwrap().contains("shielded_pool_root"));
         let expected = *blake3::hash(&legacy).as_bytes();
@@ -1191,6 +1343,7 @@ mod tests {
         let legacy_signing: Vec<u8> = std::str::from_utf8(&serde_json::to_vec(&unsigned).unwrap()).unwrap()
             .replacen(NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT, "", 1)
             .replacen(NULL_SHIELDED_POOL_ROOT_JSON_FRAGMENT, "", 1)
+            .replacen(EMPTY_EXTENSIONS_JSON_FRAGMENT, "", 1)
             .into_bytes();
         assert_eq!(h.signing_bytes(), legacy_signing, "a None fifth root must not move the signed bytes");
     }
@@ -1279,11 +1432,12 @@ mod tests {
         let mut hs: Vec<SigilBlockHeaderV0> = (1u64..5).map(|i| { let mut h = fake_header(); h.height = i; h }).collect();
         hs[2].topology_commitment = Some([3u8; 32]);
         let legacy = encode_legacy_header_page(&hs);
-        // the pre-field bytes: full encoding with each element's trailing None byte removed
+        // the pre-field bytes: the fifth-root encoding (= the full layout before 2026-10-19's
+        // `extensions`) with each element's trailing None byte removed
         let mut expected = Vec::new();
         expected.extend(bincode::serialize(&(hs.len() as u64)).unwrap());
         for h in &hs {
-            let full = bincode::serialize(h).unwrap();
+            let full = bincode::serialize(&SigilBlockHeaderV0FifthRoot::from(h)).unwrap();
             assert_eq!(full[full.len() - 1], 0u8);
             expected.extend(&full[..full.len() - 1]);
         }

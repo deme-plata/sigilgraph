@@ -69,21 +69,47 @@ struct StoredBlockLegacy {
     synced_at: u64,
 }
 
+/// The fifth-root record layout (2026-09-25 → 2026-10-19): the header without `extensions`.
+/// Byte-identical to every tagged record written before the field existed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredBlockFifthRoot {
+    header: sigil_header::SigilBlockHeaderV0FifthRoot,
+    hash_hex: String,
+    synced_at: u64,
+}
+
 /// Tag of a record written in the fifth-root layout. Unambiguous: a legacy record begins
 /// with `version: u16 = 0` (byte `0x00`).
 const STORED_BLOCK_TAG_V1: u8 = 0x01;
+/// 2026-10-19: tag of a record with the full header (`extensions` included), written only by
+/// a g3-family build. Every other build keeps writing tag `0x01` with the fifth-root bytes, so
+/// an existing store (and an older binary reading it) sees exactly what it always did.
+const STORED_BLOCK_TAG_V2: u8 = 0x02;
 
-/// Encode a record in the fifth-root layout (tagged).
+/// Encode a record: the full layout on the g3 family, the fifth-root layout elsewhere.
 fn encode_stored_block(b: &StoredBlock) -> Result<Vec<u8>, bincode::Error> {
-    let mut out = vec![STORED_BLOCK_TAG_V1];
-    out.extend(bincode::serialize(b)?);
-    Ok(out)
+    if sigil_header::IS_G3 {
+        let mut out = vec![STORED_BLOCK_TAG_V2];
+        out.extend(bincode::serialize(b)?);
+        Ok(out)
+    } else {
+        let mut out = vec![STORED_BLOCK_TAG_V1];
+        out.extend(bincode::serialize(&StoredBlockFifthRoot {
+            header: sigil_header::SigilBlockHeaderV0FifthRoot::from(&b.header),
+            hash_hex: b.hash_hex.clone(),
+            synced_at: b.synced_at,
+        })?);
+        Ok(out)
+    }
 }
 
-/// Decode a record of EITHER layout.
+/// Decode a record of ANY layout.
 fn decode_stored_block(bytes: &[u8]) -> Option<StoredBlock> {
     match bytes.first()? {
-        &STORED_BLOCK_TAG_V1 => bincode::deserialize::<StoredBlock>(&bytes[1..]).ok(),
+        &STORED_BLOCK_TAG_V2 => bincode::deserialize::<StoredBlock>(&bytes[1..]).ok(),
+        &STORED_BLOCK_TAG_V1 => bincode::deserialize::<StoredBlockFifthRoot>(&bytes[1..]).ok().map(|f| StoredBlock {
+            header: f.header.into(), hash_hex: f.hash_hex, synced_at: f.synced_at,
+        }),
         _ => bincode::deserialize::<StoredBlockLegacy>(bytes).ok().map(|l| StoredBlock {
             header: l.header.into(), hash_hex: l.hash_hex, synced_at: l.synced_at,
         }),
@@ -1912,6 +1938,7 @@ mod tests {
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             }
         }
         let p = tmp("rollback-heal");
@@ -1972,6 +1999,7 @@ mod tests {
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             }
         }
         let p = tmp("scan-window");
@@ -2035,6 +2063,7 @@ mod tests {
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             }
         }
         let p = tmp("bulk-trusted-poison");
@@ -2122,6 +2151,7 @@ mod tests {
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             }
         }
         let p = tmp("bulk-trusted-poison-self-heals");
@@ -2198,6 +2228,7 @@ mod tests {
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             }
         }
         let p = tmp("bulk-trusted-no-clobber");
@@ -2257,6 +2288,7 @@ mod tests {
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
                 topology_commitment: None,
                 shielded_pool_root: None,
+                extensions: Vec::new(),
             }
         }
         let p = tmp("base1-anchor");

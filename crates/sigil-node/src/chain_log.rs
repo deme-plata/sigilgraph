@@ -107,7 +107,29 @@ pub fn encode_record(block: &Block) -> std::io::Result<Vec<u8>> {
 /// treats a failed decode as "stop the scan here", which is the correct behaviour for an
 /// append-only log whose tail may be a partial write after a crash.
 pub fn decode_record(payload: &[u8]) -> Option<Block> {
-    sigil_record::decode_record(payload)
+    let block = sigil_record::decode_record(payload);
+    if block.is_none() {
+        warn_if_newer_format(payload);
+    }
+    block
+}
+
+/// 2026-10-19: a record in a body format NEWER than this binary is not "the end of the log" —
+/// it is a chain this node can no longer follow. Say so, plainly and at most once a minute,
+/// wherever the record came from (gossip, backfill, replay); the caller's handling is unchanged.
+fn warn_if_newer_format(payload: &[u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    let Some(v) = sigil_record::unsupported_record_version(payload) else { return };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let last = LAST_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 60_000 && LAST_MS.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        eprintln!(
+            "⛔ block record in body format v{v}, newer than this binary understands (max v{}) — \
+             this node must be UPGRADED to keep following the chain",
+            sigil_record::REC_VERSION_V2
+        );
+    }
 }
 
 /// Height of a record, from its framing, without decompressing the body.

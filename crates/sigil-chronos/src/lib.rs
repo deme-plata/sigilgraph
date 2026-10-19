@@ -230,6 +230,7 @@ fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots, producer
         // No Braid in the deterministic sim's header path — informational field.
         topology_commitment: None,
         shielded_pool_root: pool_root,
+        extensions: Vec::new(),
     }
 }
 

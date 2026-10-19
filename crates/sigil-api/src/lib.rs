@@ -1085,7 +1085,10 @@ pub async fn shielded_leaves_handler(
     // exactly the pre-rotation behaviour. A wallet doing a full scan must walk every epoch
     // from 0 to `epoch` inclusive: a note sealed in an earlier generation is still spendable
     // and still needs to be found, and its ciphertext only exists in that epoch's archive.
-    let live = pool.epoch();
+    // 2026-10-19 (sigil-g3): once v1 is CLOSED the v7 epoch is THE live generation. On g3 both
+    // are numbered 0 and the v1 one is empty, so v7 must win; with v1 open (g2, r1) nothing changes.
+    let v1_open = pool.v1_live();
+    let live = if v1_open { pool.epoch() } else { pool.v7().map_or(pool.epoch(), |e| e.epoch()) };
     let want = q.epoch.unwrap_or(live);
     // 2026-09-13 (rocky-bps100-0912): borrow, do not clone. This handler used to
     // `.to_vec()` every note AND every delivery ciphertext (14k × 620 B ≈ 9 MB) under the
@@ -1094,7 +1097,7 @@ pub async fn shielded_leaves_handler(
     // prover that only needs commitments skip the ciphertexts entirely
     // (`?ciphertexts=0`: 32 B per note instead of ~650 B — the proof path never reads them).
     let v7_live = pool.v7().map(|e| e.epoch());
-    let (leaves_all, cts_all, anchor): (&[[u8; 32]], &[Option<String>], [u8; 32]) = if want == live {
+    let (leaves_all, cts_all, anchor): (&[[u8; 32]], &[Option<String>], [u8; 32]) = if v1_open && want == pool.epoch() {
         (pool.notes(), pool.ciphertexts(), pool.current_root())
     } else if Some(want) == v7_live {
         // the live v7 epoch (2026-10-12): not in the archive, numbered epoch+1
@@ -1192,10 +1195,17 @@ pub async fn shielded_tags_handler(
         Err(poisoned) => poisoned.into_inner(),
     };
     let pool = guard.shielded();
-    let live = pool.epoch();
+    // 2026-10-19 (sigil-g3): same epoch rule as `/v1/shielded/leaves` — with v1 closed the v7
+    // epoch is the live generation (both numbered 0 on g3); v7 notes are served from it.
+    let v1_open = pool.v1_live();
+    let v7_live = pool.v7().map(|e| e.epoch());
+    let live = if v1_open { pool.epoch() } else { v7_live.unwrap_or(pool.epoch()) };
     let want = q.epoch.unwrap_or(live);
-    let (total, cts_all): (usize, &[Option<String>]) = if want == live {
+    let (total, cts_all): (usize, &[Option<String>]) = if v1_open && want == pool.epoch() {
         (pool.notes().len(), pool.ciphertexts())
+    } else if Some(want) == v7_live {
+        let e = pool.v7().expect("v7_live");
+        (e.notes().len(), e.ciphertexts())
     } else {
         match pool.archive().get(want as usize) {
             Some(a) => (a.notes.len(), &a.ciphertexts[..]),

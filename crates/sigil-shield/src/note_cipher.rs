@@ -290,16 +290,24 @@ impl NotePlaintextV7 {
 }
 
 /// Seal a v7 note to a delivery key (`pk_enc`, hex X25519 — the same key a v1 address carries).
+///
+/// 2026-10-19 (sigil-g3): sealed WITH a view tag, like every v1 note since 10-16. Before this
+/// no v7 envelope carried one on any branch, so a v7 wallet had to trial-decrypt every note on
+/// the chain; on g3 an untagged v7 envelope is refused by the chain ([`is_tagged_envelope`]).
 pub fn seal_note_v7(plaintext: &NotePlaintextV7, pk_enc_hex: &str) -> Result<NoteCiphertext, CipherError> {
     let pk = flux_swarm_secret::parse_pubkey_hex(pk_enc_hex).map_err(|e| CipherError::BadEncKey(e.to_string()))?;
-    let env = flux_swarm_secret::seal(&plaintext.encode(), &pk);
-    let json = serde_json::to_string(&env).map_err(|_| CipherError::MalformedPlaintext)?;
-    Ok(NoteCiphertext(json))
+    seal_tagged(&plaintext.encode(), &pk)
 }
 
 /// Try to open a v7 ciphertext with our identity. `NotForUs` for anything not ours, and
 /// `MalformedPlaintext` for a v1/v2 envelope that IS ours (so a scanner can fall back).
 pub fn try_open_note_v7(ct: &NoteCiphertext, id: &flux_swarm_secret::SecretIdentity) -> Result<NotePlaintextV7, CipherError> {
+    // A tagged note that is not ours is ruled out before the AEAD, as in `try_open_note`.
+    if let Some(view) = tag_view(&ct.0) {
+        if !may_be_ours(&view, id) {
+            return Err(CipherError::NotForUs);
+        }
+    }
     let env: flux_swarm_secret::SealedEnvelope = serde_json::from_str(&ct.0).map_err(|_| CipherError::NotForUs)?;
     let pt = flux_swarm_secret::open(&env, id).map_err(|_| CipherError::NotForUs)?;
     NotePlaintextV7::decode(&pt)
@@ -437,6 +445,16 @@ pub fn tag_view(ct: &str) -> Option<TagView> {
         }
     };
     Some(TagView { eph_pk, vt })
+}
+
+/// The sigil-g3 chain rule (2026-10-19, Viktor: "chain rule"): is `ct` a sealed X25519
+/// envelope that carries a view tag? The chain cannot check the tag's VALUE — only the
+/// recipient can derive it — so it checks that one is there, is one byte, and that the rest
+/// parses as an envelope. A sender who writes a wrong tag only hides the note from its own
+/// recipient, which it could do by writing garbage anyway.
+pub fn is_tagged_envelope(ct: &str) -> bool {
+    matches!(tag_view(ct), Some(TagView { vt: Some(_), .. }))
+        && serde_json::from_str::<flux_swarm_secret::SealedEnvelope>(ct).is_ok()
 }
 
 /// Could this note be ours? `false` only for a TAGGED note whose tag is not the one our
@@ -728,5 +746,55 @@ mod tests {
         assert!(tag_view("not json").is_none());
         assert!(tag_view(r#"{"eph_pk":"00","ct":""}"#).is_none(), "short key refused");
         assert!(tag_view(&format!(r#"{{"eph_pk":"{}","vt":"abcd"}}"#, "00".repeat(32))).is_none(), "2-byte tag refused");
+    }
+}
+
+/// sigil-g3 (2026-10-19): every v7 envelope carries a view tag, and the chain rule's check.
+#[cfg(test)]
+mod v7_view_tag_tests {
+    use super::*;
+
+    fn blinding() -> crate::note_v7::Digest4 {
+        let mut w = [0u8; 32];
+        w[0] = 7;
+        w[8] = 9;
+        w[16] = 11;
+        w[24] = 13;
+        crate::note_v7::Digest4::from_wire(&w).expect("canonical limbs")
+    }
+
+    #[test]
+    fn a_v7_note_is_sealed_with_a_view_tag_and_passes_the_chain_rule() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let pt = NotePlaintextV7::new(4_242, blinding());
+        let ct = seal_note_v7(&pt, &bob.public_hex()).expect("seal");
+        let view = tag_view(&ct.0).expect("an X25519 envelope");
+        assert!(view.vt.is_some(), "every v7 envelope must carry a view tag");
+        assert!(may_be_ours(&view, &bob), "the tag must match the recipient's key");
+        assert!(is_tagged_envelope(&ct.0), "a tagged v7 envelope passes the g3 chain rule");
+        let got = try_open_note_v7(&ct, &bob).expect("bob opens his note");
+        assert_eq!(got.value, pt.value);
+        assert_eq!(got.blinding.to_wire(), pt.blinding.to_wire());
+    }
+
+    #[test]
+    fn a_stranger_is_ruled_out_and_cannot_open_it() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let eve = enc_identity_from_seed(&[0xE7; 32]);
+        let ct = seal_note_v7(&NotePlaintextV7::new(1, blinding()), &bob.public_hex()).expect("seal");
+        assert!(matches!(try_open_note_v7(&ct, &eve), Err(CipherError::NotForUs)));
+    }
+
+    #[test]
+    fn the_chain_rule_refuses_untagged_envelopes_and_junk() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let pk = flux_swarm_secret::parse_pubkey_hex(&bob.public_hex()).unwrap();
+        let untagged = serde_json::to_string(&flux_swarm_secret::seal(b"note", &pk)).unwrap();
+        assert!(!is_tagged_envelope(&untagged), "an envelope without a tag is refused on g3");
+        assert!(!is_tagged_envelope("not json"));
+        assert!(!is_tagged_envelope(r#"{"eph_pk":"00","vt":"ab"}"#), "a tag on a non-envelope is refused");
+        let tagged = seal_note_v7(&NotePlaintextV7::new(5, blinding()), &bob.public_hex()).unwrap().0;
+        let two_byte_tag = tagged.replacen("\"vt\":\"", "\"vt\":\"00", 1);
+        assert!(!is_tagged_envelope(&two_byte_tag), "a tag must be exactly one byte");
     }
 }

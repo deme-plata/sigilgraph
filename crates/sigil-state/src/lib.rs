@@ -857,6 +857,13 @@ pub enum StateMutation {
         nullifier: [u8; 32],
         cm_outs: Vec<[u8; 32]>,
         proof: Vec<u8>,
+        /// Per-change-output delivery ciphertext, same order as `cm_outs` (2026-10-19,
+        /// sigil-g3). Withdrawals had none, so their change note could only be remembered
+        /// by the wallet that made it — never found again from the seed. On g3 every note
+        /// must carry a view-tagged envelope (the chain rule), so this is required there.
+        /// `#[serde(default)]` keeps every recorded unshield deserialising.
+        #[serde(default)]
+        note_ciphertexts: Vec<Option<String>>,
     },
 
     /// P5-C: typed delta for a DEX swap. Carries enough context for the
@@ -1326,7 +1333,12 @@ pub fn commit_state_transition_with_master_schedule(
     // at the same block, and a spend in this block against a now-sealed v1 anchor still
     // settles (its generation is read from the archive). Idempotent after the first block.
     if sigil_header::v7_pool_active(expected_height) && !state.shielded.v7_active() {
-        state.shielded.activate_v7();
+        // sigil-g3 family (2026-10-19): the genesis block opens v7 as the ONLY generation.
+        if sigil_header::IS_G3 {
+            state.shielded.activate_v7_only();
+        } else {
+            state.shielded.activate_v7();
+        }
     }
     for m in &transition.mutations {
         match m.clone() {
@@ -1506,7 +1518,7 @@ pub fn commit_state_transition_with_master_schedule(
                 state.shielded.remember_anchor_dirty();
             }
 
-            StateMutation::Unshield { to, amount, anchor, nullifier, cm_outs, proof } => {
+            StateMutation::Unshield { to, amount, anchor, nullifier, cm_outs, proof, note_ciphertexts } => {
                 // Same ramp rule as Shield — the exit is the other half of the
                 // correlation attack and has to be equally coarse.
                 if !shielded::is_denomination(amount) {
@@ -1536,8 +1548,9 @@ pub fn commit_state_transition_with_master_schedule(
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
                 state.shielded.unlock_value_in(generation, amount)?;
                 state.shielded.spend_nullifier_in_epoch(spend_epoch, nullifier)?;
-                for cm in &cm_outs {
-                    state.shielded.append_note_in(generation, *cm, None)?;
+                for (i, cm) in cm_outs.iter().enumerate() {
+                    let ct = note_ciphertexts.get(i).cloned().flatten();
+                    state.shielded.append_note_in(generation, *cm, ct)?;
                 }
                 let cur = state.balance_of(&to, &NATIVE);
                 let next = cur

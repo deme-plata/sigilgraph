@@ -220,6 +220,10 @@ pub enum SigilTx {
         proof: Vec<u8>,
         #[serde(with = "sigil_state::u128_str")]
         fee: u128,
+        /// Per-change-output delivery ciphertext, same order as `cm_outs` (2026-10-19,
+        /// sigil-g3: required there by the chain rule). Not a STARK public input.
+        #[serde(default)]
+        note_ciphertexts: Vec<Option<String>>,
     },
 
     /// Move tokens from one wallet to another.
@@ -1981,7 +1985,7 @@ fn apply_tx_inner(
             out.events.push(evt);
         }
 
-        SigilTx::Unshield { to, amount, anchor, nullifier, cm_outs, proof, fee: _ } => {
+        SigilTx::Unshield { to, amount, anchor, nullifier, cm_outs, proof, fee: _, note_ciphertexts } => {
             if state.shielded().is_spent(nullifier) {
                 return Err(TxApplyError::ShieldedRejected("nullifier already spent"));
             }
@@ -1992,6 +1996,7 @@ fn apply_tx_inner(
                 nullifier: *nullifier,
                 cm_outs: cm_outs.clone(),
                 proof: proof.clone(),
+                note_ciphertexts: note_ciphertexts.clone(),
             });
         }
 

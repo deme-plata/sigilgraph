@@ -188,7 +188,8 @@ pub const GAUGE_CONTRACT: ContractId = [0x0D; 32];
 /// "commit GAUGE_LIVE_HEIGHT så vi kan aktivere det hele"). Chosen at tip 18,966,776 + ~183k
 /// (a safe margin over the deploy window at up to 110 blk/s). Both nodes MUST run this binary
 /// before this height, or they fork at it and cannot be rolled back (the 2026-09-10 rule).
-pub const GAUGE_LIVE_HEIGHT: u64 = 19_150_000;
+/// g3 family: live from genesis (it is live on g2 today) — see `sigil_header::live_from_genesis_on_g3`.
+pub const GAUGE_LIVE_HEIGHT: u64 = sigil_header::live_from_genesis_on_g3(19_150_000);
 /// Fixed-point scale of a gauge value: `value_e6 = round(value × 1e6)`.
 pub const GAUGE_SCALE: i128 = 1_000_000;
 /// Readings older than this (in blocks) are STALE for any consumer; at 8 blk/s idle the

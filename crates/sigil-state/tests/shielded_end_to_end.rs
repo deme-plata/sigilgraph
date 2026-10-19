@@ -316,6 +316,7 @@ fn unproven_unshield_is_refused() {
             nullifier: [0x5A; 32], // a nullifier for no note the caller owns
             cm_outs: vec![[0u8; 32], [0u8; 32]],
             proof: vec![0u8; 32], // garbage
+            note_ciphertexts: vec![],
         }],
     )
     .expect_err("SECURITY: an unshield without a valid proof must be refused");
@@ -344,6 +345,7 @@ fn proven_unshield_returns_value_transparently() {
             nullifier: nf,
             cm_outs,
             proof,
+            note_ciphertexts: vec![],
         }],
     )
     .expect("an honest, proven unshield must be accepted");
@@ -376,6 +378,7 @@ fn unshield_cannot_overdraw_the_pool() {
             nullifier: nf,
             cm_outs,
             proof,
+            note_ciphertexts: vec![],
         }],
     )
     .expect_err("SECURITY: withdrawing more than the proof commits to would mint");

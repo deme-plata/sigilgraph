@@ -67,7 +67,8 @@ pub const MASTER_MINING_FEE_BPS_V2: u128 = 750;
 /// v7.5.0 client release rolls to auto-updating installs first — a block
 /// containing an unknown tx variant is undecodable by old clients, so the
 /// gate doubles as the decoder-skew grace window.
-pub const WELFARE_FROM_HEIGHT: u64 = 900_000;
+/// g3 family: live from genesis (it is live on g2 today) — see `sigil_header::live_from_genesis_on_g3`.
+pub const WELFARE_FROM_HEIGHT: u64 = sigil_header::live_from_genesis_on_g3(900_000);
 
 /// Minimum blocks between two claims by the same citizen. ~200k blocks is
 /// roughly a day at the measured 2.7 blk/s live rate (≈20 h; ≈67 h at the

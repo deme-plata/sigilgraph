@@ -341,7 +341,13 @@ pub fn build_block_body_for_with_schedule(
         // Same pool-ceiling guard as `shielded_credit`: a full pool must degrade to a
         // transparent credit, never to an unpayable block. `None` here takes the existing
         // unregistered path, which pays transparently.
-        let producer_shield = if work.shielded().len() >= sigil_state::shielded::POOL_CAPACITY {
+        // sigil-g3 (2026-10-19): no shielded coinbase at all. It mints a 64-bit (v1) note, which
+        // a v7-only pool refuses (`CoinbaseUnsupportedInV7`) — and a refused coinbase refuses the
+        // whole block, so a registered producer would have stalled the new chain at its first
+        // block. The reward is paid transparently, as every other cut already is (dust gate).
+        let producer_shield = if sigil_header::IS_G3
+            || work.shielded().len() >= sigil_state::shielded::POOL_CAPACITY
+        {
             None
         } else {
             work.shielded().shielded_address(&producer)

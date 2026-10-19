@@ -289,7 +289,7 @@ fn apply_shielded_op(shielded: &ShieldedBridge, op: ShieldedOp) -> Result<[u8; 3
         ShieldedOp::Unshield(r) => {
             let proof = hex::decode(r.proof.trim_start_matches("0x")).map_err(|_| ())?;
             shielded
-                .submit_unshield(&r.to, r.amount, &r.anchor, &r.nullifier, &r.cm_outs, proof, r.fee)
+                .submit_unshield(&r.to, r.amount, &r.anchor, &r.nullifier, &r.cm_outs, proof, r.fee, &r.note_ciphertexts)
                 .map_err(|_| ())
         }
     }

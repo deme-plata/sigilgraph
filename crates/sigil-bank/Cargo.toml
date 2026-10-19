@@ -22,6 +22,7 @@ description = "SIGIL bank layer — protocol-fee policy (master wallet, mining +
 #     captures the full eventual design.
 
 [dependencies]
+sigil-header = { path = "../sigil-header" }
 serde        = { workspace = true }
 thiserror    = { workspace = true }
 # T6: fold_events (mandate.rs) reconstructs MandateBook from the chain's own

@@ -533,6 +533,9 @@ impl BridgeVault {
                     cm_outs: bundle.cm_outs,
                     proof: bundle.proof,
                     fee: 0,
+                    // v1-only vault: no change envelopes. It cannot run on a v7-only chain
+                    // (sigil-g3) until it is ported to v7 — see sigil-g3-reset/PLAN.md.
+                    note_ciphertexts: Vec::new(),
                 },
             });
         }

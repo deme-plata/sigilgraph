@@ -101,7 +101,8 @@ pub const SUPPLY_SLOT: SlotId = [0x01; 32];
 /// the OLD binary simply never emits the new shape (safe), while a follower
 /// on the old binary would fork on the first USDS block (not safe), which is
 /// why the order matters.
-pub const USDS_LIVE_HEIGHT: u64 = 6_400_000;
+/// g3 family: live from genesis (it is live on g2 today) — see `sigil_header::live_from_genesis_on_g3`.
+pub const USDS_LIVE_HEIGHT: u64 = sigil_header::live_from_genesis_on_g3(6_400_000);
 
 /// Is the USDS feature set active at `height`?
 pub fn usds_active(height: u64) -> bool {

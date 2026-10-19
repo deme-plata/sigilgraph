@@ -901,6 +901,7 @@ fn unshield_submit(
     }
     match st.shielded.submit_unshield(
         &req.to, req.amount, &req.anchor, &req.nullifier, &req.cm_outs, proof, req.fee,
+        &req.note_ciphertexts,
     ) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),

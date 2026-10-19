@@ -244,6 +244,17 @@ pub enum ShieldedError {
     /// epoch, so the format's weakness can reach nothing that was not already there.
     #[error("deposits into the v1 (64-bit) pool are closed: deposit with a v7 note (update the wallet)")]
     V1DepositsClosed,
+    /// sigil-g3 chain rule (2026-10-19): a v7 note without a sealed, view-tagged delivery
+    /// envelope. Every note on g3 must be findable from its 34-byte tag view.
+    #[error("every note on this chain must carry a sealed envelope with a view tag (update the wallet)")]
+    UntaggedEnvelope,
+}
+
+/// The sigil-g3 chain rule as a pure function (2026-10-19): with `require_tag` (the g3
+/// family) a v7 note is admitted only with a sealed, view-tagged envelope; elsewhere any
+/// envelope, or none, is admitted as before.
+pub fn v7_envelope_ok(require_tag: bool, ciphertext: Option<&str>) -> bool {
+    !require_tag || ciphertext.is_some_and(sigil_shield::note_cipher::is_tagged_envelope)
 }
 
 /// The shielded pool: append-only note commitments plus the spent-nullifier set.
@@ -782,6 +793,25 @@ impl ShieldedPool {
         self.anchors_dirty = true;
     }
 
+    /// sigil-g3 (2026-10-19): open the 256-bit generation as the ONLY one. v1 is closed
+    /// before it ever holds a note or publishes an anchor, so no 64-bit deposit, spend
+    /// output or anchor can exist on this chain: `generation_for_new_note` refuses
+    /// v1-shaped commitments, `append_note_in(V1)` refuses on `v1_closed`, and no v1 root is
+    /// ever pushed as an anchor. The v7 epoch is number 0 — its archive index when it seals,
+    /// the invariant `rotate_v7` checks. Idempotent; driven by the genesis height gate.
+    pub(crate) fn activate_v7_only(&mut self) {
+        if self.v7.is_some() {
+            return;
+        }
+        debug_assert!(
+            self.notes.is_empty() && self.archive.is_empty() && self.epoch == 0,
+            "a v7-only pool must start empty"
+        );
+        self.v1_closed = true;
+        self.v7 = Some(LiveEpochV7 { epoch: 0, ..Default::default() });
+        self.anchors_dirty = true;
+    }
+
     /// Has the v7 generation been opened on this pool?
     pub fn v7_active(&self) -> bool {
         self.v7.is_some()
@@ -1116,6 +1146,12 @@ impl ShieldedPool {
                 let leaf = Digest4::from_wire(&cm).map_err(|_| ShieldedError::NonCanonicalCommitment(cm))?;
                 if is_v1_shaped(&cm) {
                     return Err(ShieldedError::NonCanonicalCommitment(cm));
+                }
+                // sigil-g3 CHAIN RULE (2026-10-19, Viktor: "chain rule"): every v7 note carries
+                // a sealed envelope with a view tag. Here, at the one chokepoint every deposit
+                // and every spend output passes through, so no path can mint an untagged note.
+                if !v7_envelope_ok(sigil_header::IS_G3, ciphertext.as_deref()) {
+                    return Err(ShieldedError::UntaggedEnvelope);
                 }
                 if self.v7.as_ref().unwrap().notes.len() >= POOL_CAPACITY {
                     self.rotate_v7();
@@ -2059,5 +2095,95 @@ mod v7_tests {
             p.append_note_in(PoolGeneration::V1, cm, None).unwrap();
         }
         assert_eq!(p.len(), 3);
+    }
+}
+
+/// sigil-g3 (2026-10-19): a pool that is v7 from its first block, and the chain rule.
+#[cfg(test)]
+mod g3_tests {
+    use super::*;
+    use sigil_shield::note_cipher::{enc_identity_from_seed, seal_note_v7, NotePlaintextV7};
+    use sigil_shield::note_v7::NoteV7;
+
+    fn v1_wire(i: u64) -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&i.to_le_bytes());
+        b
+    }
+    fn v7_cm(i: u64) -> [u8; 32] {
+        NoteV7::new(1_000 + i, [i, 2, 3, 4], [5, 6, 7, i]).unwrap().commitment().to_wire()
+    }
+    fn tagged_envelope() -> String {
+        let id = enc_identity_from_seed(&[0x33; 32]);
+        let mut w = [0u8; 32];
+        w[0] = 1;
+        w[8] = 2;
+        w[16] = 3;
+        w[24] = 4;
+        let pt = NotePlaintextV7::new(7, sigil_shield::note_v7::Digest4::from_wire(&w).unwrap());
+        seal_note_v7(&pt, &id.public_hex()).unwrap().0
+    }
+    fn untagged_envelope() -> String {
+        let t = tagged_envelope();
+        format!("{}}}", &t[..t.rfind(",\"vt\"").expect("tagged")])
+    }
+
+    #[test]
+    fn a_v7_only_pool_never_has_a_v1_generation() {
+        let mut p = ShieldedPool::new();
+        p.activate_v7_only();
+        assert!(p.v7_active());
+        assert!(!p.v1_live(), "v1 is closed before it ever holds a note");
+        assert_eq!(p.v7().unwrap().epoch(), 0, "the v7 epoch is number 0");
+        assert!(matches!(p.append_note(v1_wire(1)), Err(ShieldedError::V1DepositsClosed)));
+        assert!(matches!(p.append_note_in(PoolGeneration::V1, v1_wire(2), None), Err(ShieldedError::V1Closed)));
+        let pos = p.append_note_with_delivery(v7_cm(1), Some(tagged_envelope())).unwrap();
+        assert_eq!(pos, 0);
+        p.refresh_anchor();
+        let r7 = p.current_root_v7().unwrap();
+        assert_eq!(p.generation_of_anchor(&r7), Some(PoolGeneration::V7));
+        let v1_root = p.current_root_fast();
+        assert!(!p.is_known_anchor(&v1_root), "a closed v1 never publishes an anchor");
+        assert_eq!(p.generation_of_anchor(&v1_root), None, "so no proof can be anchored to it");
+    }
+
+    #[test]
+    fn a_v7_only_pool_seals_into_archive_index_zero() {
+        let mut p = ShieldedPool::new();
+        p.activate_v7_only();
+        p.append_note_with_delivery(v7_cm(3), Some(tagged_envelope())).unwrap();
+        p.rotate_v7();
+        assert_eq!(p.archive().len(), 1);
+        assert_eq!(p.archive()[0].generation, PoolGeneration::V7);
+        assert_eq!(p.v7().unwrap().epoch(), 1, "the next v7 epoch is number 1");
+        let sealed = p.archive()[0].root;
+        assert_eq!(p.generation_of_anchor(&sealed), Some(PoolGeneration::V7));
+    }
+
+    #[test]
+    fn the_chain_rule_admits_only_tagged_envelopes_when_required() {
+        assert!(v7_envelope_ok(false, None), "outside g3 nothing changes");
+        assert!(v7_envelope_ok(false, Some("anything")));
+        assert!(!v7_envelope_ok(true, None), "g3: a note without an envelope is refused");
+        assert!(!v7_envelope_ok(true, Some(&untagged_envelope())), "g3: an untagged envelope is refused");
+        assert!(!v7_envelope_ok(true, Some("junk")));
+        assert!(v7_envelope_ok(true, Some(&tagged_envelope())), "g3: a tagged envelope is admitted");
+    }
+
+    /// Runs its body only in a g3-family build (`SIGIL_NETWORK=sigil-r3`): the rule enforced
+    /// at the chokepoint itself, not just in the pure function.
+    #[test]
+    fn g3_build_enforces_the_rule_at_the_append_chokepoint() {
+        if !sigil_header::IS_G3 {
+            return;
+        }
+        let mut p = ShieldedPool::new();
+        p.activate_v7_only();
+        assert!(matches!(p.append_note_with_delivery(v7_cm(4), None), Err(ShieldedError::UntaggedEnvelope)));
+        assert!(matches!(
+            p.append_note_with_delivery(v7_cm(5), Some(untagged_envelope())),
+            Err(ShieldedError::UntaggedEnvelope)
+        ));
+        assert_eq!(p.append_note_with_delivery(v7_cm(6), Some(tagged_envelope())).unwrap(), 0);
     }
 }

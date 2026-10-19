@@ -205,6 +205,10 @@ pub enum ShieldedSubmitError {
     /// hashes every ciphertext forever; this is the only thing stopping a sender from
     /// attaching kilobytes of junk to each output.
     CiphertextTooLong { got: usize, limit: usize },
+    /// sigil-g3 (2026-10-19, chain rule): a deposit or an output without a sealed,
+    /// view-tagged delivery envelope. The chain refuses such a note
+    /// (`sigil_state::shielded::ShieldedError::UntaggedEnvelope`); the door says so at once.
+    UntaggedEnvelope,
     /// An input nullifier is ALREADY in the chain's spent set, in the epoch the proof's
     /// anchor belongs to. Refused at the door (2026-09-25) because until then the door
     /// only consulted its own queue: a wallet that picked a spent note got `ok:true`, a
@@ -324,6 +328,8 @@ impl ShieldedSubmitError {
                 "note_ciphertexts must be empty or have exactly {expected} entries (one per \
                  output), got {got}"
             ),
+            Self::UntaggedEnvelope => "every note on this chain must carry a sealed envelope with a \
+                view tag — update the wallet (nothing was queued)".into(),
             Self::CiphertextTooLong { got, limit } => format!(
                 "a note ciphertext is {got} bytes; the limit is {limit} (a sealed note with a \
                  full {}-byte memo is well under it)",
@@ -744,6 +750,10 @@ impl ShieldedBridge {
                 return Err(ShieldedSubmitError::CiphertextTooLong { got: ct.len(), limit });
             }
         }
+        // sigil-g3 chain rule, said at the door: a deposit must carry a view-tagged envelope.
+        if sigil_header::IS_G3 && !note_ciphertext.is_some_and(sigil_shield::note_cipher::is_tagged_envelope) {
+            return Err(ShieldedSubmitError::UntaggedEnvelope);
+        }
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
@@ -836,20 +846,7 @@ impl ShieldedBridge {
             extra.push(tag);
         }
         let outs = self.decode_outs(cm_outs)?;
-        if !note_ciphertexts.is_empty() && note_ciphertexts.len() != outs.len() {
-            return Err(ShieldedSubmitError::WrongCiphertextCount {
-                expected: outs.len(),
-                got: note_ciphertexts.len(),
-            });
-        }
-        for ct in note_ciphertexts.iter().flatten() {
-            if ct.len() > sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN {
-                return Err(ShieldedSubmitError::CiphertextTooLong {
-                    got: ct.len(),
-                    limit: sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN,
-                });
-            }
-        }
+        check_output_envelopes(outs.len(), note_ciphertexts)?;
         self.reject_if_queued(&nf)?;
         for e in &extra {
             self.reject_if_queued(e)?;
@@ -900,6 +897,7 @@ impl ShieldedBridge {
         cm_outs: &[String],
         proof: Vec<u8>,
         fee: u128,
+        note_ciphertexts: &[Option<String>],
     ) -> Result<[u8; 32], ShieldedSubmitError> {
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
@@ -909,6 +907,8 @@ impl ShieldedBridge {
         let anchor_b = hex32(anchor, "anchor")?;
         let nf = hex32(nullifier, "nullifier")?;
         let outs = self.decode_outs(cm_outs)?;
+        // 2026-10-19: the change outputs carry delivery envelopes too — same rules as a send.
+        check_output_envelopes(outs.len(), note_ciphertexts)?;
         self.reject_if_queued(&nf)?;
         // The withdrawn amount sits in the circuit's public-value slot.
         self.precheck_proof(&anchor_b, &nf, amount, &outs, &proof)?;
@@ -922,11 +922,13 @@ impl ShieldedBridge {
             cm_outs: outs,
             proof,
             fee,
+            note_ciphertexts: note_ciphertexts.to_vec(),
         };
         let id = self.enqueue(tx, Some(nf));
         self.fire_relay_hook(id, ShieldedOp::Unshield(UnshieldRequest {
             to: to.to_string(), amount, anchor: anchor.to_string(), nullifier: nullifier.to_string(),
             cm_outs: cm_outs.to_vec(), proof: proof_hex, fee,
+            note_ciphertexts: note_ciphertexts.to_vec(),
         }));
         Ok(id)
     }
@@ -1341,6 +1343,32 @@ pub struct UnshieldRequest {
     pub proof: String,
     #[serde(default, with = "sigil_state::u128_str")]
     pub fee: u128,
+    /// Per-change-output envelope, same rules as [`ShieldedSendRequest::note_ciphertexts`]
+    /// (2026-10-19; required on sigil-g3). `default` only — the bincode relay rule.
+    #[serde(default)]
+    pub note_ciphertexts: Vec<Option<String>>,
+}
+
+/// The delivery-envelope rules every proof-carrying spend shares (send AND unshield):
+/// empty or one entry per output, none larger than an honest sealed note, and — on the
+/// sigil-g3 family (chain rule, 2026-10-19) — exactly one view-tagged envelope per output.
+fn check_output_envelopes(outs: usize, note_ciphertexts: &[Option<String>]) -> Result<(), ShieldedSubmitError> {
+    if !note_ciphertexts.is_empty() && note_ciphertexts.len() != outs {
+        return Err(ShieldedSubmitError::WrongCiphertextCount { expected: outs, got: note_ciphertexts.len() });
+    }
+    let limit = sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN;
+    for ct in note_ciphertexts.iter().flatten() {
+        if ct.len() > limit {
+            return Err(ShieldedSubmitError::CiphertextTooLong { got: ct.len(), limit });
+        }
+    }
+    if sigil_header::IS_G3
+        && (note_ciphertexts.len() != outs
+            || !note_ciphertexts.iter().all(|c| c.as_deref().is_some_and(sigil_shield::note_cipher::is_tagged_envelope)))
+    {
+        return Err(ShieldedSubmitError::UntaggedEnvelope);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

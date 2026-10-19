@@ -25,6 +25,22 @@ pub const NETWORK_ID: [u8; 8] = network_id_bytes(NETWORK_ID_STR);
 /// String form of [`NETWORK_ID`].
 pub const NETWORK_ID_STR: &str = env!("SIGIL_NET_ID");
 
+/// The `sigil-g3` family (2026-10-19, Viktor: "sigil-g3, clean start, chain rule"): the reset of
+/// g2, and `sigil-r3`, its rehearsal twin that runs the identical rules on the docker test chain
+/// so the launch binary is rehearsed without a second chain ever calling itself g3.
+pub const fn g3_family(net: &[u8; 8]) -> bool {
+    bytes8_eq(net, b"sigil-g3") || bytes8_eq(net, b"sigil-r3")
+}
+/// Is this binary built for the g3 family? See [`g3_family`].
+pub const IS_G3: bool = g3_family(&NETWORK_ID);
+
+/// The activation height of a switch that is ON in today's g2 (`g2_height` is where g2 turned
+/// it on): 0 on the g3 family, so the reset chain starts with everything g2 runs today, and
+/// unchanged everywhere else, so g2/r1/m1 replay their history byte-identically.
+pub const fn live_from_genesis_on_g3(g2_height: u64) -> u64 {
+    if IS_G3 { 0 } else { g2_height }
+}
+
 const fn network_id_bytes(s: &str) -> [u8; 8] {
     let b = s.as_bytes();
     assert!(b.len() == 8, "network id must be exactly 8 bytes");
@@ -399,7 +415,7 @@ fn canonical_json_for_hashing(json: Vec<u8>, topology_none: bool, pool_root_none
 /// so every `sigil-top` client can auto-update before the first gated block is minted.
 /// A producer cannot be rolled back out of its own blocks: if this must move, move it
 /// BEFORE the tip reaches it, never after.
-pub const SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT: u64 = 27_000_000;
+pub const SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT: u64 = live_from_genesis_on_g3(27_000_000);
 thread_local! {
     // THREAD-LOCAL on purpose: a simulation lowers the gate on ITS thread only, so parallel
     // test threads (the chronos library, the tourbillon and frontier soaks) never see each
@@ -437,7 +453,15 @@ pub fn shielded_pool_root_required_with(height: u64, activation: u64) -> bool {
 /// BEFORE the tip reaches it, never after.
 pub const V7_POOL_ACTIVATION_HEIGHT: u64 = v7_activation_for(&NETWORK_ID);
 const fn v7_activation_for(net: &[u8; 8]) -> u64 {
-    if bytes8_eq(net, b"sigil-r1") { 1_000 } else { u64::MAX }
+    // g3 family: the genesis block itself opens v7 — and ONLY v7 (see
+    // `ShieldedPool::activate_v7_only`); no 64-bit note ever exists on it.
+    if g3_family(net) {
+        0
+    } else if bytes8_eq(net, b"sigil-r1") {
+        1_000
+    } else {
+        u64::MAX
+    }
 }
 const fn bytes8_eq(a: &[u8; 8], b: &[u8; 8]) -> bool {
     let mut i = 0;
@@ -796,7 +820,7 @@ impl SigilBlockHeaderV0 {
 /// enforcement becomes mandatory. External miners are permanently exempt
 /// (SqiSign5 stays precheck-only forever), so this activation cannot break
 /// their blocks regardless of when it's reached.
-pub const H1_PRODUCER_SIG_ACTIVATION_HEIGHT: u64 = 8_000_000;
+pub const H1_PRODUCER_SIG_ACTIVATION_HEIGHT: u64 = live_from_genesis_on_g3(8_000_000);
 
 /// Header-layer validation errors. Crypto-layer errors live in the relevant
 /// crates (flux-sqisign, flux-vdf, flux-zk-stark).

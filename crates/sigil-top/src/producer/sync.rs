@@ -110,7 +110,11 @@ const DEFAULT_SNAPSHOT_URL: &str = "http://89.149.241.126:18183/snapshot";
 /// snapshot fetch and showed "full node: refused". `sigil-snapshot-mirror.timer` copies the
 /// node's snapshot here every 20 min. The mirror needs no trust of its own: the snapshot is
 /// SQIsign-signed and checked against the pinned key below, whichever URL served it.
-const MIRROR_SNAPSHOT_URL: &str = "https://sigilgraph.org/downloads/sigil-g2-snapshot.bin";
+const MIRROR_SNAPSHOT_URL: &str = if sigil_header::IS_G3 {
+    "https://sigilgraph.org/downloads/sigil-g3-snapshot.bin"
+} else {
+    "https://sigilgraph.org/downloads/sigil-g2-snapshot.bin"
+};
 /// The g2 node's snapshot signing key (SQIsign L5, `snapshot-sqisign.pk` generated
 /// 2026-08-29 with the g2 genesis; read from the node's aether dir and checked against the
 /// key embedded in the served snapshot on 2026-09-17). Pinned here so a fresh install
@@ -154,6 +158,22 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// Fetch + verify + restore a signed state snapshot from `url`. Returns `None` on
 /// ANY failure (network, verification, or decode) — never hands back a partially
 /// trusted chain.
+/// The snapshot signer THIS binary trusts by default. g3 (2026-10-19): none yet — the g3 node
+/// creates its key at its first snapshot (H=100,000), and a g3 node must never trust g2's key.
+fn pinned_snapshot_signer() -> Option<&'static str> {
+    if sigil_header::IS_G3 { None } else { Some(DEFAULT_SNAPSHOT_SIGNER_PK_HEX) }
+}
+
+/// Snapshot boot or genesis-up? `SIGIL_TOP_SNAPSHOT=0|1` decides; unset = snapshot on g2 (a 46 M-block
+/// chain), genesis-up on g3 (a young chain replays from block 0 in seconds and needs no snapshot key).
+fn snapshot_wanted(env: Option<&str>) -> bool {
+    match env {
+        Some("0") => false,
+        Some("1") => true,
+        _ => !sigil_header::IS_G3,
+    }
+}
+
 async fn fetch_snapshot(url: &str) -> Option<ChainTip> {
     let expected_pk = match std::env::var(SIGNER_PK_ENV) {
         Ok(h) => {
@@ -164,10 +184,13 @@ async fn fetch_snapshot(url: &str) -> Option<ChainTip> {
             }
             pk
         }
-        Err(_) => hex_decode(DEFAULT_SNAPSHOT_SIGNER_PK_HEX),
+        Err(_) => pinned_snapshot_signer().and_then(hex_decode),
     };
     // Never fetch unpinned: a snapshot is 48 MB of state this node will PRODUCE on top of.
-    let expected_pk = expected_pk?;
+    let Some(expected_pk) = expected_pk else {
+        crate::tlog!("[producer-sync] no snapshot signer is pinned for this network — refusing an unpinned snapshot (set {SIGNER_PK_ENV})");
+        return None;
+    };
 
     // ~109 MB: 120 s needed ~0.9 MB/s, which a home line can miss. A firewalled URL must
     // still fail fast so the next one gets its turn — hence the separate connect timeout.
@@ -414,7 +437,7 @@ pub async fn sync_chain(net: &flux_p2p::NetworkManager) -> Option<ChainTip> {
     // the snapshot is now authenticated by default, and the tail from its height to the
     // tip is still replayed block by block through `chain.apply`. `SIGIL_TOP_SNAPSHOT=0`
     // keeps the genesis-up path for anyone who wants to pay for it.
-    let want_snapshot = !matches!(std::env::var("SIGIL_TOP_SNAPSHOT").as_deref(), Ok("0"));
+    let want_snapshot = snapshot_wanted(std::env::var("SIGIL_TOP_SNAPSHOT").ok().as_deref());
     let mut chain = if want_snapshot {
         let urls: Vec<String> = match std::env::var(SNAPSHOT_URL_ENV) {
             Ok(u) if !u.trim().is_empty() => vec![u.trim().to_string()],
@@ -507,6 +530,21 @@ mod tests {
 
     /// The pinned default signer must be the 129-byte SQIsign key the node embeds in its
     /// snapshot — a typo here would make every fresh install refuse to boot.
+    #[test]
+    fn g3_starts_genesis_up_and_never_trusts_the_g2_snapshot_key() {
+        assert!(!snapshot_wanted(Some("0")));
+        assert!(snapshot_wanted(Some("1")));
+        if sigil_header::IS_G3 {
+            assert!(!snapshot_wanted(None), "a g3 full node starts genesis-up by default");
+            assert!(pinned_snapshot_signer().is_none(), "a g3 binary must not trust the g2 snapshot key");
+            assert!(MIRROR_SNAPSHOT_URL.ends_with("sigil-g3-snapshot.bin"));
+        } else {
+            assert!(snapshot_wanted(None));
+            assert_eq!(pinned_snapshot_signer(), Some(DEFAULT_SNAPSHOT_SIGNER_PK_HEX));
+            assert!(MIRROR_SNAPSHOT_URL.ends_with("sigil-g2-snapshot.bin"));
+        }
+    }
+
     #[test]
     fn default_snapshot_signer_is_a_sqisign_pubkey() {
         let pk = hex_decode(DEFAULT_SNAPSHOT_SIGNER_PK_HEX).expect("valid hex");

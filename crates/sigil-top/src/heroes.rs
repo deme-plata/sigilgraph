@@ -290,7 +290,7 @@ pub(crate) fn render_node_card(app: &App) -> Paragraph<'static> {
         ]),
         Line::from(vec![ dim("producer "), Span::styled(producer, Style::default().fg(C_CYAN)) ]),
         Line::from(vec![
-            dim("reward  "), Span::styled("5", Style::default().fg(C_GREEN)), dim(" SIGIL/blk"),
+            dim("reward  "), Span::styled(reward_text(st.reward_sig), Style::default().fg(C_GREEN)), dim(" SIGIL/blk"),
             dim("   uptime "), Span::raw(fmt_uptime(st.uptime_secs)),
         ]),
     ];
@@ -372,6 +372,12 @@ pub(crate) fn render_supply(app: &App) -> Paragraph<'static> {
 /// rewards keep their precision ("2.5", "1.25").
 fn fmt_reward(r: f64) -> String {
     if (r.fract()).abs() < f64::EPSILON { format!("{:.0}", r) } else { format!("{}", r) }
+}
+
+/// The MEASURED reward per block from the feed (supply delta ÷ height delta), or "—" before the
+/// feed has one. Was a hardcoded "5" until 2026-10-19 (real g3 value ≈ 0.01).
+pub(crate) fn reward_text(r: f64) -> String {
+    if r > 0.0 { fmt_reward(r) } else { "—".to_string() }
 }
 
 

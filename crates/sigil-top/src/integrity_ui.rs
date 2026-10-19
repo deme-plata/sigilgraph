@@ -467,7 +467,7 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
         l3.push(Span::styled(format!("{name} {mark} "), Style::default().fg(col)));
         l3.push(dim(format!("{}  ", group(n.height))));
     }
-    if l3.is_empty() { l3.push(dim("comparing our hash against Epsilon, happysrv, node3 at equal height…")); }
+    if l3.is_empty() { l3.push(dim("comparing our hash against the producer and its followers at equal height…")); }
 
     let l4 = if let Some((node, h, ours, theirs)) = s.last_mismatch.as_ref() {
         Line::from(vec![

@@ -468,7 +468,7 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
     let wallet_bal = fmt_glyphs(app.wallet_balance, 2);
     let tlines = vec![
         Line::from(vec![
-            dim("reward "), Span::styled("5 SIGIL/blk".to_string(), Style::default().fg(C_GREEN)),
+            dim("reward "), Span::styled(format!("{} SIGIL/blk", crate::heroes::reward_text(app.st.reward_sig)), Style::default().fg(C_GREEN)),
             dim("   network graph: Node tab [1]"),
         ]),
         Line::from(vec![

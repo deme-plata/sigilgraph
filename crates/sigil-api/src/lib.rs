@@ -977,6 +977,10 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
     let pool = guard.shielded();
     Json(serde_json::json!({
         "ok": true,
+        // 2026-10-19 (sigil-g3): which chain this is. A wallet keeps notes per chain, and a reset
+        // (g2 → g3) must start its note book fresh instead of showing the old chain's notes as
+        // "on the way" forever. Absent on older nodes (= sigil-g2). Not consensus.
+        "network": sigil_header::NETWORK_ID_STR,
         "anchor": hex::encode(pool.current_root()),
         "notes": pool.len(),
         "nullifiers": pool.nullifier_count(),

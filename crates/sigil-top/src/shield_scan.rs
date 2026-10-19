@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use sigil_shield::note_cipher::{enc_identity_from_seed, may_be_ours, NoteCiphertext, TagView};
 use sigil_shield::note_v1::to_wire;
 use sigil_shield::wallet::{NoteStore, ShieldedAccount};
+use sigil_shield::wallet_v7::{scoped_nullifier_v7, AccountV7, NoteStoreV7};
 
 use crate::shield_setup::ShieldedSnapshot;
 
@@ -147,6 +148,8 @@ struct Generation {
     /// The commitment at position `scanned - 1`, checked before reading on: if it moved, the
     /// URL now serves a different chain and everything starts over.
     last_leaf: Option<[u8; 32]>,
+    /// sigil-g3: a 256-bit (v7) generation — its own opener and spent-key family.
+    v7: bool,
 }
 
 #[derive(Debug)]
@@ -166,6 +169,7 @@ pub(crate) struct ShieldedScanner {
     base: String,
     seed: [u8; 32],
     account: ShieldedAccount,
+    account7: AccountV7,
     gens: Vec<Generation>,
     spent: BTreeSet<[u8; 32]>,
     spent_count: Option<u64>,
@@ -181,6 +185,7 @@ impl ShieldedScanner {
             base: node_url.trim_end_matches('/').to_string(),
             seed,
             account: ShieldedAccount::from_seed(seed),
+            account7: AccountV7::from_seed(seed),
             gens: Vec::new(),
             spent: BTreeSet::new(),
             spent_count: None,
@@ -246,29 +251,41 @@ impl ShieldedScanner {
             ..Default::default()
         };
 
+        // sigil-g3: the v7 generation, when the node has opened one — numbered ABOVE the v1
+        // epochs (on g3: v1 epoch 0 sealed empty, v7 epoch 1), so the scan reaches up to it.
+        let v7_epoch = a.get("v7").and_then(|v| v.get("epoch")).and_then(|v| v.as_u64()).map(|x| x as usize);
+        let top = live.max(v7_epoch.unwrap_or(0));
+        snap.v7_epoch = v7_epoch.map(|x| x as u32);
+        snap.v7_notes = a.get("v7").and_then(|v| v.get("notes")).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
         // A different chain (re-genesis, another network behind the same URL): start over. Fewer
         // generations than we already hold, or a sealed generation whose permanent anchor
         // changed, can only mean that.
-        let foreign = self.gens.len() > live + 1
+        let foreign = self.gens.len() > top + 1
             || self.gens.iter().enumerate().any(|(e, g)| {
                 g.anchor.as_ref().is_some_and(|mine| sealed.get(&e) != Some(mine))
             });
         if foreign {
             self.reset();
         }
-        while self.gens.len() <= live {
+        while self.gens.len() <= top {
             self.gens.push(Generation::default());
         }
+        if let Some(v) = v7_epoch {
+            self.gens[v].v7 = true;
+        }
 
-        for e in 0..=live {
+        for e in 0..=top {
             if self.gens[e].complete {
                 continue;
             }
             self.scan_generation(e as u32, get)?;
-            if e < live {
+            // Sealed = listed as sealed by the node (was `e < live`, which is the same thing
+            // on a v1-only chain; with v7 above the v1 number the live v7 epoch is not sealed).
+            if let Some(anchor) = sealed.get(&e) {
                 let g = &mut self.gens[e];
                 g.complete = true;
-                g.anchor = sealed.get(&e).cloned();
+                g.anchor = Some(anchor.clone());
             }
         }
 
@@ -286,11 +303,18 @@ impl ShieldedScanner {
         for (e, g) in self.gens.iter().enumerate() {
             for (&pos, &value) in &g.notes {
                 snap.owned += 1;
-                let raw = to_wire(self.account.nullifier_at(pos));
-                if self.spent.contains(&sigil_state::shielded::scoped_nullifier(e as u32, raw)) {
+                let key = if g.v7 {
+                    scoped_nullifier_v7(e as u32, self.account7.nullifier_at(pos).to_wire())
+                } else {
+                    sigil_state::shielded::scoped_nullifier(e as u32, to_wire(self.account.nullifier_at(pos)))
+                };
+                if self.spent.contains(&key) {
                     snap.spent += 1;
                 } else {
                     snap.balance += value as u128;
+                    if g.v7 {
+                        snap.v7_balance += value as u128;
+                    }
                 }
             }
         }
@@ -450,15 +474,27 @@ impl ShieldedScanner {
             .unwrap_or_default();
         // Trial decryption IS the ownership proof; then locate each note by its commitment within
         // the page it arrived in (a payment's outputs are adjacent), never across generations.
+        // sigil-g3: a v7 page opens with the v7 account (the delivery key is the same X25519 one).
+        if page.get("generation").and_then(|v| v.as_str()) == Some("v7") {
+            self.gens[e as usize].v7 = true;
+        }
         let id = enc_identity_from_seed(&self.seed);
-        let mut store = NoteStore::new();
-        store.scan_ciphertexts(&id, &cts);
-        store.scan_owned(&self.account, &leaves);
+        let found: Vec<(Option<u64>, u64)> = if self.gens[e as usize].v7 {
+            let mut store = NoteStoreV7::new();
+            store.scan_ciphertexts(&self.account7.enc_identity(), &cts);
+            store.scan_owned(&self.account7, &leaves);
+            store.notes.iter().map(|n| (n.position, n.value)).collect()
+        } else {
+            let mut store = NoteStore::new();
+            store.scan_ciphertexts(&id, &cts);
+            store.scan_owned(&self.account, &leaves);
+            store.notes.iter().map(|n| (n.position, n.value)).collect()
+        };
         let g = &mut self.gens[e as usize];
-        for n in &store.notes {
-            match n.position {
+        for (pos, value) in found {
+            match pos {
                 Some(p) => {
-                    g.notes.insert(from + p, n.value);
+                    g.notes.insert(from + p, value);
                 }
                 None => self.unlocated += 1,
             }
@@ -481,6 +517,8 @@ mod tests {
         nullifiers: Vec<[u8; 32]>,
         tags: bool,
         log: Vec<String>,
+        /// sigil-g3 shape: this generation is v7 (and the last); every v1 one before it is sealed.
+        v7_gen: Option<usize>,
     }
 
     struct Who {
@@ -525,6 +563,22 @@ mod tests {
             self.nullifiers.push(scoped_nullifier(e as u32, raw));
         }
 
+        /// A v7 note for `to` (a tagged v7 envelope, as every g3 note carries) at the end of `e`.
+        fn pay7(&mut self, e: usize, to: &Who, index: u64, value: u64) -> u64 {
+            let a = AccountV7::from_seed(to.seed);
+            let cm = a.note(index, value).unwrap().commitment().to_wire();
+            let ct = sigil_shield::wallet_v7::seal_output_v7(value, a.blinding(index), &a.pk_enc_hex(), "").unwrap().0;
+            let g = &mut self.gens[e];
+            g.0.push(cm);
+            g.1.push(Some(ct));
+            (g.0.len() - 1) as u64
+        }
+
+        fn spend7(&mut self, e: usize, owner: &Who, pos: u64) {
+            let a = AccountV7::from_seed(owner.seed);
+            self.nullifiers.push(scoped_nullifier_v7(e as u32, a.nullifier_at(pos).to_wire()));
+        }
+
         fn get(&mut self, url: &str) -> Option<Fetched> {
             self.log.push(url.to_string());
             let (path, query) = url.split_once('?').unwrap_or((url, ""));
@@ -536,12 +590,16 @@ mod tests {
             };
             let live = self.gens.len() - 1;
             let body = match path.strip_prefix("http://fake").unwrap() {
+                // sigil-g3 shape: the v1 number is one below the v7 epoch and v1 is closed
                 "/v1/shielded/anchor" => serde_json::json!({
-                    "ok": true, "epoch": live, "notes": self.gens[live].0.len(), "capacity": 32768,
+                    "ok": true, "epoch": self.v7_gen.map_or(live, |v| v.saturating_sub(1)),
+                    "notes": if self.v7_gen.is_some() { 0 } else { self.gens[live].0.len() }, "capacity": 32768,
                     "nullifiers": self.nullifiers.len(), "registered": 2, "value_locked": "0",
                     "sealed_epochs": (0..live).map(|i| serde_json::json!({
                         "epoch": i, "notes": self.gens[i].0.len(), "anchor": self.anchors[i]
                     })).collect::<Vec<_>>(),
+                    "v1_live": self.v7_gen.is_none(),
+                    "v7": self.v7_gen.map(|v| serde_json::json!({ "epoch": v, "notes": self.gens[v].0.len() })),
                 })
                 .to_string()
                 .into_bytes(),
@@ -564,6 +622,7 @@ mod tests {
                     serde_json::json!({
                         "ok": true, "epoch": e, "live_epoch": live, "from": from, "total": total,
                         "anchor": "00", "sealed": e != live,
+                        "generation": if Some(e) == self.v7_gen { "v7" } else { "v1" },
                         "leaves": leaves[from as usize..to as usize].iter().map(hex::encode).collect::<Vec<_>>(),
                         "ciphertexts": cts,
                     })
@@ -664,6 +723,36 @@ mod tests {
         node.spend(2, &alice, c1);
         let _ = c0;
         (node, alice, 100 + 20 + 9)
+    }
+
+    /// sigil-g3 (2026-10-19): v1 epoch 0 sealed EMPTY at genesis, v7 = epoch 1 with tagged
+    /// envelopes; Alice's v7 notes among a stranger's, one spent. The 10.4.38 scanner (v1 only)
+    /// read 0 here; it must read exactly the unspent v7 value, fetching envelopes by tag.
+    #[test]
+    fn g3_shape_the_v7_generation_is_scanned_and_netted() {
+        let (alice, bob) = (who(0xA1), who(0xB2));
+        let mut node = FakeNode::new(2);
+        node.v7_gen = Some(1);
+        node.tags = true;
+        let p1 = node.pay7(1, &alice, 0, 500);
+        for i in 0..20 {
+            node.pay7(1, &bob, i, 9_999);
+        }
+        node.pay7(1, &alice, 1, 70);
+        node.spend7(1, &alice, p1);
+        let mut s = ShieldedScanner::new("http://fake", alice.seed);
+        let snap = cycle(&mut s, &mut node);
+        assert_eq!(snap.v7_epoch, Some(1));
+        assert_eq!((snap.owned, snap.spent), (2, 1), "both of Alice's v7 notes found, one netted as spent");
+        assert_eq!(snap.balance, 70);
+        assert_eq!(snap.v7_balance, 70);
+        assert_eq!(s.unlocated, 0);
+        assert!(snap.view_tags, "envelopes fetched by view tag");
+        // second cycle: nothing new, nothing re-read
+        let before = node.reads(1).len();
+        let again = cycle(&mut s, &mut node);
+        assert_eq!(again.balance, 70);
+        assert_eq!(node.reads(1).len(), before, "a quiet second cycle fetches no envelopes");
     }
 
     #[test]
@@ -881,6 +970,11 @@ mod against_the_real_node {
 
     #[test]
     fn the_scanner_reads_the_real_node_routes_with_and_without_view_tags() {
+        // This drives the real routes with v1 (64-bit) deposits; the sigil-g3 family has no v1
+        // pool (closed at genesis) — its v7 path is `g3_shape_the_v7_generation_is_scanned_and_netted`.
+        if sigil_header::IS_G3 {
+            return;
+        }
         let state = Arc::new(RwLock::new(SigilState::new()));
         let mut want = deposit(&state, 0..2000, 1, true);
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();

@@ -406,7 +406,7 @@ mod tests {
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
-            shielded_pool_root: None,
+            shielded_pool_root: sigil_header::shielded_pool_root_required(height).then_some([0u8; 32]), // g3: required from genesis
             extensions: Vec::new(),
         }
     }

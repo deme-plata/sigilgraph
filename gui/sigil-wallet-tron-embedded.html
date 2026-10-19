@@ -994,6 +994,21 @@ body.view-desktop .desktop{display:flex}
     // 2026-10-19 (sigil-g3): a v1 generation that is closed AND never held a note (g3 closes it at
     // genesis) has nothing to scan — and asking for "the live epoch" there returns the v7 leaves.
     var v1Gone=!!(anchor && anchor.v1_live===false && anchor.notes===0 && !((anchor.sealed_epochs||[]).length));
+    // 2026-10-19 (sigil-g3): a chain reset (g2 → g3) starts this browser's note book at zero — the
+    // old chain's notes would otherwise sit "pending" forever. Chain state is archived under
+    // `<key>@<oldNet>` (best effort) and removed; the wallet itself stays.
+    try{
+      var _net=(anchor && anchor.network) || 'sigil-g2', _mine=localStorage.getItem('sigil-network') || 'sigil-g2';
+      if(_mine!==_net){
+        var _pre=['sigil-shielded-notes-','sigil-shielded-noteidx-','sigil-sealed-scan-','sigil-refused-notes-','sigil-history-','sigil-balhist-','sigil-autoshield-','sigil-activity-','sigil-p2p-balance'];
+        var _keys=[]; for(var _i=0;_i<localStorage.length;_i++){ var _k=localStorage.key(_i);
+          if(_k && _k.indexOf('@')<0 && _k!=='sigil-history-prefs' && _pre.some(function(x){ return _k.indexOf(x)===0; })) _keys.push(_k); }
+        _keys.forEach(function(k){ try{ localStorage.setItem(k+'@'+_mine, localStorage.getItem(k)); }catch(_){} localStorage.removeItem(k); });
+        _shieldCache.epochs=Object.create(null); _shieldCache.spent=null; _shieldCache.spentSeen=0;
+        console.log('[sigil] chain changed '+_mine+' -> '+_net+': '+_keys.length+' local record(s) archived; starting at zero');
+      }
+      if(localStorage.getItem('sigil-network')!==_net) localStorage.setItem('sigil-network', _net);
+    }catch(_){}
 
     // The spent set is small next to the leaf list, but still worth not re-pulling
     // when nothing has been spent since last time.

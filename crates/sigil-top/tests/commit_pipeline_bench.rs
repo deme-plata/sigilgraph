@@ -173,7 +173,8 @@ fn mk_header(height: u64, parent_hash: BlockHash, pad: usize) -> SigilBlockHeade
         producer: [0u8; 32],
         producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
         topology_commitment: None,
-        shielded_pool_root: None,
+        // required from genesis on the sigil-g3 family; None on g2 below its gate
+        shielded_pool_root: sigil_header::shielded_pool_root_required(height).then_some([0u8; 32]),
         extensions: Vec::new(),
     }
 }

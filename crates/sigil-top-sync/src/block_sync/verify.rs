@@ -662,7 +662,7 @@ mod fast_path_tests {
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
-            shielded_pool_root: None,
+            shielded_pool_root: sigil_header::shielded_pool_root_required(height).then_some([0u8; 32]), // g3: required from genesis
             extensions: Vec::new(),
         }
     }
@@ -828,13 +828,16 @@ mod fast_path_tests {
         h_frame.extend_from_slice(&body);
         let got_h = decode_backfill_headers(&h_frame);
         assert_eq!(got_h.len(), 8);
-        assert_eq!(got_h, chain, "'H' decode is byte-exact");
+        // What a legacy page can carry: the headers without the fifth root (sigil-g3 fixtures carry
+        // one from genesis; on g2 below its gate there is none, so this IS `chain`).
+        let legacy_view: Vec<_> = chain.iter().cloned().map(|mut h| { h.shielded_pool_root = None; h }).collect();
+        assert_eq!(got_h, legacy_view, "'H' decode is byte-exact");
 
         // 'Z' zstd(bincode) codec — C encoder, our pure-Rust decode path.
         let mut z_frame = vec![b'Z'];
         z_frame.extend_from_slice(&zstd::encode_all(&body[..], 1).unwrap());
         let got_z = decode_backfill_headers(&z_frame);
-        assert_eq!(got_z, chain, "'Z' decode round-trips to the same headers");
+        assert_eq!(got_z, legacy_view, "'Z' decode round-trips to the same headers");
 
         // 'V' codec-5 page: the FULL layout — a gated header keeps its fifth root, and the
         // same header through a legacy page loses it (by design: that client must update).
@@ -847,15 +850,26 @@ mod fast_path_tests {
         z_lossy.extend_from_slice(&zstd::encode_all(&sigil_header::encode_legacy_header_page(&gated)[..], 1).unwrap());
         assert!(decode_backfill_headers(&z_lossy)[5].shielded_pool_root.is_none());
 
-        // decode_verify_backfill keeps all well-formed headers...
-        assert_eq!(decode_verify_backfill(&z_frame).len(), 8);
+        // decode_verify_backfill keeps all well-formed headers... — through the page a node of THIS
+        // network serves: on the sigil-g3 family the 'V' layout (a legacy page drops the root g3
+        // requires from genesis, so precheck would rightly refuse every header); on g2 the 'Z' page.
+        let frame_of = |hs: &[sigil_header::SigilBlockHeaderV0]| -> Vec<u8> {
+            if sigil_header::IS_G3 {
+                let mut f = vec![sigil_header::HEADER_PAGE_TAG_V1];
+                f.extend_from_slice(&zstd::encode_all(&sigil_header::encode_v1_header_page(hs)[..], 1).unwrap());
+                f
+            } else {
+                let mut f = vec![b'Z'];
+                f.extend_from_slice(&zstd::encode_all(&sigil_header::encode_legacy_header_page(hs)[..], 1).unwrap());
+                f
+            }
+        };
+        assert_eq!(decode_verify_backfill(&frame_of(&chain)).len(), 8);
 
         // ...and DROPS one whose vdf_input binding is broken (precheck fail).
         let mut bad = chain.clone();
         bad[2].vdf_input = [0u8; 32]; // breaks vdf_input == BLAKE3(parent || nonce)
-        let mut z_bad = vec![b'Z'];
-        z_bad.extend_from_slice(&zstd::encode_all(&sigil_header::encode_legacy_header_page(&bad)[..], 1).unwrap());
-        assert_eq!(decode_verify_backfill(&z_bad).len(), 7, "precheck-failing header is filtered out");
+        assert_eq!(decode_verify_backfill(&frame_of(&bad)).len(), 7, "precheck-failing header is filtered out");
 
         // unparseable → empty, never panics.
         assert!(decode_backfill_headers(b"not a frame at all").is_empty());

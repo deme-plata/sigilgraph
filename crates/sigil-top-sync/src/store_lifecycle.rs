@@ -87,25 +87,62 @@ pub fn is_foreign_chain_break(reason: &str) -> bool {
 pub fn reset_store_on_network_change(path: &str) {
     let current = String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string();
     let netid_path = format!("{path}.netid");
-    let reason = match std::fs::read_to_string(&netid_path) {
+    let prev = std::fs::read_to_string(&netid_path).ok().map(|s| s.trim().to_string());
+    let reason = match &prev {
         // Same chain — leave the archive completely alone. This is the normal path and it
         // must stay cheap: one small file read per launch.
-        Ok(prev) if prev.trim() == current => return,
-        Ok(prev) => format!("network changed: store holds '{}', this build is '{current}'", prev.trim()),
-        Err(_) => format!("store predates the network-id marker; cannot prove it is '{current}'"),
+        Some(p) if *p == current => return,
+        Some(p) => format!("network changed: store holds '{p}', this build is '{current}'"),
+        None => format!("store predates the network-id marker; cannot prove it is '{current}'"),
     };
-    // A store that does not exist yet needs no wipe — just record the chain it will hold.
+    // A store that does not exist yet needs no reset — just record the chain it will hold.
     let exists = std::path::Path::new(path).exists();
     if exists {
-        eprintln!(
-            "  ⛓ RESET: {reason} — clearing the local chain store and re-syncing from genesis."
-        );
-        let _ = std::fs::remove_dir_all(path);
-        let _ = std::fs::remove_file(path);
-        for sfx in ["-wal", "-shm", ".wal", ".shm"] {
-            let _ = std::fs::remove_file(format!("{path}{sfx}"));
+        // sigil-g3 (2026-10-19): MOVED ASIDE, not deleted — the old chain's archive belongs to
+        // the user (Viktor's node held a 12 GB, 44 M-block g2 store). The REAL location is used:
+        // when the path is a symlink into a big array, the old store is renamed THERE and the new
+        // one grows there too, never beside the link on a small root disk (2026-10-16: a store
+        // re-created on / filled it twice in one night).
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let label = match &prev {
+            Some(p) if p.starts_with("sigil-") => p.clone(),
+            Some(_) => "foreign".to_string(),
+            None => "pre-netid".to_string(),
+        };
+        let name = real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sigil-top-blocks.db".into());
+        let mut kept = real.with_file_name(format!("{name}.{label}"));
+        if kept.exists() {
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            kept = real.with_file_name(format!("{name}.{label}-{ts}"));
         }
-        // The one-shot heal marker refers to a store that no longer exists. Dropping it
+        let was_dir = real.is_dir();
+        match std::fs::rename(&real, &kept) {
+            Ok(()) => {
+                for sfx in ["-wal", "-shm", ".wal", ".shm"] {
+                    let _ = std::fs::rename(format!("{}{sfx}", real.display()), format!("{}{sfx}", kept.display()));
+                }
+                // A symlinked path must not dangle: the store engine creates its directory at
+                // `path`, and through a dangling link that fails.
+                if was_dir {
+                    let _ = std::fs::create_dir_all(&real);
+                }
+                eprintln!(
+                    "  ⛓ RESET: {reason} — the old chain's store is KEPT as {} (delete it when you no longer need it); syncing this chain from genesis.",
+                    kept.display()
+                );
+            }
+            Err(e) => {
+                // Cannot move it (permissions, a read-only parent): the pre-g3 behaviour, so the
+                // node is never stuck on another chain's blocks.
+                eprintln!("  ⛓ RESET: {reason} — could not move the old store aside ({e}); clearing it and re-syncing from genesis.");
+                let _ = std::fs::remove_dir_all(path);
+                let _ = std::fs::remove_file(path);
+                for sfx in ["-wal", "-shm", ".wal", ".shm"] {
+                    let _ = std::fs::remove_file(format!("{path}{sfx}"));
+                }
+            }
+        }
+        // The one-shot heal marker refers to a store that is no longer at this path. Dropping it
         // keeps the two mechanisms from disagreeing about what is on disk.
         let _ = std::fs::remove_file(format!("{path}.healver"));
     }
@@ -438,9 +475,44 @@ mod foreign_store_tests {
         // …until a verify break proves otherwise:
         mark_store_foreign(&path);
         reset_store_on_network_change(&path);
-        assert!(!store.exists(), "the foreign store must be cleared");
+        // sigil-g3: moved aside (never deleted), and an empty store directory is ready at `path`
+        let kept = dir.join("blocks.db.foreign");
+        assert_eq!(std::fs::read(kept.join("data")).unwrap(), b"blocks of another chain", "the old store is kept, intact");
+        assert!(store.is_dir() && std::fs::read_dir(&store).unwrap().next().is_none(), "a fresh, empty store dir");
         assert_eq!(std::fs::read_to_string(format!("{path}.netid")).unwrap().trim(), current);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sigil-g3 (2026-10-19): a chain reset keeps the old chain's store, named after it, at its
+    /// REAL location — through a symlink (Viktor's node: ~/sigil-top-blocks.db -> the 80 TB
+    /// array), the link keeps pointing where it did, so the new store grows on the array too.
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_reset_keeps_the_old_store_beside_its_real_location() {
+        let base = std::env::temp_dir().join(format!("sigil-reset-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (array, home) = (base.join("array"), base.join("home"));
+        std::fs::create_dir_all(array.join("sigil-top-blocks.db")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(array.join("sigil-top-blocks.db").join("data"), b"g2 blocks").unwrap();
+        let link = home.join("sigil-top-blocks.db");
+        std::os::unix::fs::symlink(array.join("sigil-top-blocks.db"), &link).unwrap();
+        let path = link.to_string_lossy().to_string();
+        std::fs::write(format!("{path}.netid"), "sigil-g2").unwrap();
+        reset_store_on_network_change(&path);
+        let current = String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string();
+        if current == "sigil-g2" {
+            // same chain: untouched
+            assert_eq!(std::fs::read(array.join("sigil-top-blocks.db").join("data")).unwrap(), b"g2 blocks");
+        } else {
+            let real_array = std::fs::canonicalize(&array).unwrap();
+            assert_eq!(std::fs::read(real_array.join("sigil-top-blocks.db.sigil-g2").join("data")).unwrap(), b"g2 blocks", "kept, on the array");
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+            assert_eq!(std::fs::canonicalize(&link).unwrap(), real_array.join("sigil-top-blocks.db"), "pointing where it did");
+            assert!(!home.join("sigil-top-blocks.db.sigil-g2").exists(), "nothing landed beside the link on the small disk");
+            assert_eq!(std::fs::read_to_string(format!("{path}.netid")).unwrap().trim(), current);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 10.4.36: a fallback store lands beside the primary's REAL location, never in the

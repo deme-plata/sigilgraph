@@ -2283,8 +2283,10 @@ mod tests {
     /// the page's own flow instead of dead-ending.
     #[test]
     fn without_a_local_seed_pay_is_a_404_so_the_browser_falls_back() {
-        if std::env::var("SIGIL_MINE_SEED").is_ok() {
-            return; // a real seed in the environment; this assertion isn't the one to make
+        // A real seed — in the environment OR (since 10.4.38) in this install's wallet file — means
+        // this machine CAN pay; the 404 contract is for a machine that cannot.
+        if std::env::var("SIGIL_MINE_SEED").is_ok() || crate::miner_seed().is_some() {
+            return;
         }
         let (status, body) = pay::handle(
             "/api/v1/pay",

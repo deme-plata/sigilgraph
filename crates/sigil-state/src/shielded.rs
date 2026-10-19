@@ -1080,6 +1080,11 @@ impl ShieldedPool {
         for a in self.archive.iter() {
             out.extend(a.notes.iter().filter(|c| c.starts_with(prefix)).copied());
         }
+        // 2026-10-19 (g3): the v7 tree too — has_ever_held and the index include it; without it every
+        // bucket on a v7-only pool came back empty.
+        if let Some(e) = self.v7.as_ref() {
+            out.extend(e.notes.iter().filter(|c| c.starts_with(prefix)).copied());
+        }
         out.sort();
         out.dedup();
         out
@@ -2201,6 +2206,27 @@ mod g3_tests {
     fn untagged_envelope() -> String {
         let t = tagged_envelope();
         format!("{}}}", &t[..t.rfind(",\"vt\"").expect("tagged")])
+    }
+
+    /// 2026-10-19 (found live on g3): a v7 note is in its prefix bucket, by the scan AND by the index,
+    /// and every bucket member is a commitment the pool has held. The g2 port scanned v1 only.
+    #[test]
+    fn a_v7_note_is_in_its_prefix_bucket() {
+        let mut p = ShieldedPool::new();
+        p.activate_v7_only();
+        let cms: Vec<[u8; 32]> = (0..24).map(v7_cm).collect();
+        for cm in &cms {
+            p.append_note_in(PoolGeneration::V7, *cm, Some(tagged_envelope())).unwrap();
+        }
+        let scanned: Vec<Vec<[u8; 32]>> = cms.iter().map(|cm| p.commitments_with_prefix(&cm[..1])).collect();
+        for (cm, bucket) in cms.iter().zip(&scanned) {
+            assert!(bucket.contains(cm), "a v7 note must be in its own bucket");
+            assert!(bucket.iter().all(|c| p.has_ever_held(c) && c[0] == cm[0]));
+        }
+        p.ensure_commitment_index();
+        for (cm, bucket) in cms.iter().zip(&scanned) {
+            assert_eq!(&p.commitments_with_prefix(&cm[..1]), bucket, "index and scan agree");
+        }
     }
 
     #[test]

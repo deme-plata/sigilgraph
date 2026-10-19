@@ -750,16 +750,17 @@ impl ShieldedBridge {
                 return Err(ShieldedSubmitError::CiphertextTooLong { got: ct.len(), limit });
             }
         }
-        // sigil-g3 chain rule, said at the door: a deposit must carry a view-tagged envelope.
-        if sigil_header::IS_G3 && !note_ciphertext.is_some_and(sigil_shield::note_cipher::is_tagged_envelope) {
-            return Err(ShieldedSubmitError::UntaggedEnvelope);
-        }
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
         check_denomination(amount)?;
         let from_b = hex32(from, "from")?;
         let cm_b = hex32(cm, "cm")?;
+        // sigil-g3 chain rule, said at the door: a deposit must carry a view-tagged envelope.
+        // After the cheap shape checks (the most specific error wins), before the signature.
+        if sigil_header::IS_G3 && !note_ciphertext.is_some_and(sigil_shield::note_cipher::is_tagged_envelope) {
+            return Err(ShieldedSubmitError::UntaggedEnvelope);
+        }
         // Cheap shape validation above, signature/replay checks last — same door-guard
         // ordering the rest of this module already uses (see module docs).
         let msg = format!("sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={req_nonce}");
@@ -1373,6 +1374,18 @@ fn check_output_envelopes(outs: usize, note_ciphertexts: &[Option<String>]) -> R
 
 #[cfg(test)]
 mod tests {
+    /// sigil-g3 chain rule: every deposit and spend output carries a view-tagged envelope. Tests
+    /// that exercise the door's OTHER rules attach a well-formed one on the g3 family (and none
+    /// on g2, exactly as before) — 2026-10-19.
+    fn g3_envelope() -> Option<String> {
+        sigil_header::IS_G3.then(|| {
+            let a = sigil_shield::wallet_v7::AccountV7::from_seed([7u8; 32]);
+            sigil_shield::wallet_v7::seal_output_v7(1, a.blinding(0), &a.pk_enc_hex(), "").unwrap().0
+        })
+    }
+    fn g3_envelopes(n: usize) -> Vec<Option<String>> {
+        if sigil_header::IS_G3 { vec![g3_envelope(); n] } else { Vec::new() }
+    }
     use super::*;
 
     /// A fixed window onto the pool, for door tests.
@@ -1450,12 +1463,12 @@ mod tests {
         let cms: Vec<String> = outs.iter().map(|o| hex::encode(o.commitment().to_wire())).collect();
 
         let b = ShieldedBridge::new();
-        let refused = b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof.clone(), &[]);
+        let refused = b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof.clone(), &g3_envelopes(2));
         assert!(matches!(refused, Err(ShieldedSubmitError::ProofRejected(_))), "no view ⇒ v1 verifier ⇒ refused: {refused:?}");
         b.set_pool_view(FixedView(Some(PoolGeneration::V1), true));
-        assert!(matches!(b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof.clone(), &[]), Err(ShieldedSubmitError::ProofRejected(_))));
+        assert!(matches!(b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof.clone(), &g3_envelopes(2)), Err(ShieldedSubmitError::ProofRejected(_))));
         b.set_pool_view(FixedView(Some(PoolGeneration::V7), true));
-        b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof, &[]).expect("a v7 spend passes the door when its anchor is v7");
+        b.submit_shielded_send(&anchor, &nf, &[], &cms, fee, proof, &g3_envelopes(2)).expect("a v7 spend passes the door when its anchor is v7");
     }
 
 
@@ -1712,15 +1725,15 @@ mod tests {
     fn shield_rejects_zero_and_bad_hex() {
         let b = ShieldedBridge::new();
         assert_eq!(
-            b.submit_shield("aa", 0, "bb", 0, "", 1).unwrap_err(),
+            b.submit_shield_with_delivery("aa", 0, "bb", 0, "", 1, g3_envelope().as_deref()).unwrap_err(),
             ShieldedSubmitError::ZeroAmount
         );
         assert!(matches!(
-            b.submit_shield("zz", 1_000, &"11".repeat(32), 0, "", 1).unwrap_err(),
+            b.submit_shield_with_delivery("zz", 1_000, &"11".repeat(32), 0, "", 1, g3_envelope().as_deref()).unwrap_err(),
             ShieldedSubmitError::BadHex("from")
         ));
         assert!(matches!(
-            b.submit_shield(&"aa".repeat(32), 1_000, "beef", 0, "", 1).unwrap_err(),
+            b.submit_shield_with_delivery(&"aa".repeat(32), 1_000, "beef", 0, "", 1, g3_envelope().as_deref()).unwrap_err(),
             ShieldedSubmitError::BadLength { field: "cm", .. }
         ));
     }
@@ -1736,14 +1749,14 @@ mod tests {
         let (attacker_sk, _attacker) = signer();
         // No signature at all.
         assert_eq!(
-            b.submit_shield(&owner, 10_000, &"bb".repeat(32), 1, "", 1).unwrap_err(),
+            b.submit_shield_with_delivery(&owner, 10_000, &"bb".repeat(32), 1, "", 1, g3_envelope().as_deref()).unwrap_err(),
             ShieldedSubmitError::SignatureInvalid
         );
         // Signed by someone who is NOT the named wallet — the actual attack this fix
         // closes: knowing `owner`'s address is not the same as owning it.
         let forged = sign_shield(&attacker_sk, &owner, 10_000, &"bb".repeat(32), 1, 1);
         assert_eq!(
-            b.submit_shield(&owner, 10_000, &"bb".repeat(32), 1, &forged, 1).unwrap_err(),
+            b.submit_shield_with_delivery(&owner, 10_000, &"bb".repeat(32), 1, &forged, 1, g3_envelope().as_deref()).unwrap_err(),
             ShieldedSubmitError::SignatureInvalid
         );
     }
@@ -1754,7 +1767,7 @@ mod tests {
         let (sk, from) = signer();
         let cm = "bb".repeat(32);
         let sig = sign_shield(&sk, &from, 10_000, &cm, 1, 1);
-        let h = b.submit_shield(&from, 10_000, &cm, 1, &sig, 1).expect("queued");
+        let h = b.submit_shield_with_delivery(&from, 10_000, &cm, 1, &sig, 1, g3_envelope().as_deref()).expect("queued");
         assert_eq!(b.pending_len(), 1);
         assert_eq!(b.snapshot_for_mint().len(), 1, "re-embedded until confirmed");
         assert_eq!(b.pending_len(), 1, "snapshot must NOT be destructive");
@@ -1768,11 +1781,11 @@ mod tests {
         let (sk, from) = signer();
         let cm = "bb".repeat(32);
         let sig = sign_shield(&sk, &from, 10_000, &cm, 1, 5);
-        b.submit_shield(&from, 10_000, &cm, 1, &sig, 5).expect("first use of nonce 5");
+        b.submit_shield_with_delivery(&from, 10_000, &cm, 1, &sig, 5, g3_envelope().as_deref()).expect("first use of nonce 5");
         // Same nonce again, even with a validly re-signed message, must be refused.
         let sig2 = sign_shield(&sk, &from, 10_000, &cm, 1, 5);
         assert_eq!(
-            b.submit_shield(&from, 10_000, &cm, 1, &sig2, 5).unwrap_err(),
+            b.submit_shield_with_delivery(&from, 10_000, &cm, 1, &sig2, 5, g3_envelope().as_deref()).unwrap_err(),
             ShieldedSubmitError::ReplayedNonce
         );
     }
@@ -1830,7 +1843,7 @@ mod tests {
         let err = b
             .submit_shielded_send(
                 &"aa".repeat(32), &"bb".repeat(32), &[], &outs,
-                sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64], &[],
+                sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64], &g3_envelopes(2),
             )
             .unwrap_err();
         assert!(matches!(err, ShieldedSubmitError::ProofRejected(_)), "got {err:?}");
@@ -1888,7 +1901,7 @@ mod tests {
         let (sk, from) = signer();
         let cm = "cc".repeat(32);
         let sig = sign_shield(&sk, &from, 5_000, &cm, 2, 9);
-        let h = b.submit_shield(&from, 5_000, &cm, 2, &sig, 9).expect("queued");
+        let h = b.submit_shield_with_delivery(&from, 5_000, &cm, 2, &sig, 9, g3_envelope().as_deref()).expect("queued");
 
         let (id, op) = captured.lock().unwrap().take().expect("relay hook must fire on success");
         assert_eq!(id, h, "hook id must match the submit's own returned id");
@@ -1916,7 +1929,7 @@ mod tests {
         b.set_relay_hook(move |_id, _op| { *fired2.lock().unwrap() = true; });
 
         let (_sk, from) = signer();
-        let _ = b.submit_shield(&from, 5_000, &"dd".repeat(32), 0, "", 1); // no signature -> refused
+        let _ = b.submit_shield_with_delivery(&from, 5_000, &"dd".repeat(32), 0, "", 1, g3_envelope().as_deref()); // no signature -> refused
         assert!(!*fired.lock().unwrap(), "hook must not fire for a rejected submit");
     }
 
@@ -1932,7 +1945,7 @@ mod tests {
         let (sk, from) = signer();
         let cm = "cc".repeat(32);
         let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
-        let h = b.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+        let h = b.submit_shield_with_delivery(&from, 100, &cm, 0, &sig, 1, g3_envelope().as_deref()).expect("queued");
 
         // Tick 1: not on the spine yet → offered.
         let t1 = b.snapshot_for_mint_excluding(|_| false);
@@ -1969,7 +1982,7 @@ mod tests {
         let (sk, from) = signer();
         let cm = "cc".repeat(32);
         let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
-        let h = b.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+        let h = b.submit_shield_with_delivery(&from, 100, &cm, 0, &sig, 1, g3_envelope().as_deref()).expect("queued");
         assert_eq!(b.retire_settled(|_| false), 0, "not settled yet → nothing retired");
         assert_eq!(b.pending_len(), 1);
         assert_eq!(b.retire_settled(|_| true), 1);
@@ -2021,7 +2034,7 @@ mod tests {
         let b = ShieldedBridge::new();
         let cm = "cc".repeat(32);
         let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
-        b.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+        b.submit_shield_with_delivery(&from, 100, &cm, 0, &sig, 1, g3_envelope().as_deref()).expect("queued");
         let shield_tx = b.snapshot_for_mint()[0].tx.clone();
         assert!(!already_in_pool(state.shielded(), &shield_tx), "before landing: not in the pool");
 
@@ -2119,7 +2132,7 @@ mod tests {
         let (sk, from) = signer();
         let cm = "cc".repeat(32);
         let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
-        bridge.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+        bridge.submit_shield_with_delivery(&from, 100, &cm, 0, &sig, 1, g3_envelope().as_deref()).expect("queued");
 
         // Funded WELL beyond the single 100-unit shield amount — deliberately, so that a
         // second (buggy, pre-fix) application would have had every OTHER opportunity to
@@ -2174,7 +2187,9 @@ mod tests {
         apply_one(&mut state, 2, &candidate_1[0]).expect("the first landing must succeed");
         assert_eq!(state.balance_of(&wallet_id, &NATIVE), 99_900, "debited once");
         assert_eq!(state.shielded().value_locked(), 100, "locked once");
-        assert_eq!(state.shielded().len(), 1, "one note");
+        // notes in BOTH generations (the note lands in the v7 tree on the sigil-g3 family)
+        let notes = |s: &SigilState| s.shielded().len() + s.shielded().v7().map_or(0, |e| e.len());
+        assert_eq!(notes(&state), 1, "one note");
 
         // HEIGHT 3: candidate 2's block — a SEPARATE, already-minted, honestly-produced
         // block from the producer's very next tick — lands next. THE BUG: before the
@@ -2192,7 +2207,7 @@ mod tests {
         );
         assert_eq!(state.balance_of(&wallet_id, &NATIVE), 99_900, "no phantom second debit");
         assert_eq!(state.shielded().value_locked(), 100, "no phantom locked-value inflation");
-        assert_eq!(state.shielded().len(), 1, "no duplicate note");
+        assert_eq!(notes(&state), 1, "no duplicate note");
 
         // THE OTHER HALF OF THE FIX (`dag.rs`'s `confirm_applied` wiring, 2026-08-24):
         // once candidate 1 actually lands, the queue must stop offering the tx at all —

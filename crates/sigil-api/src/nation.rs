@@ -699,7 +699,8 @@ mod tests {
         assert_eq!(d.treasury_glyphs, "123");
         assert_eq!(d.activation_height, wf::WELFARE_FROM_HEIGHT);
         assert_eq!(d.welfare_bps, wf::WELFARE_MINING_FEE_BPS as u64);
-        assert!(!d.active, "no tip yet → height 0 → inactive");
+        // no tip yet → height 0: inactive on g2; live from genesis on the sigil-g3 family
+        assert_eq!(d.active, wf::WELFARE_FROM_HEIGHT == 0, "no tip yet → height 0");
     }
 
     #[tokio::test]

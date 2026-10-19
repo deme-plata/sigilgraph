@@ -183,8 +183,10 @@ mod tests {
 
     #[test]
     fn split_identical_below_activation() {
+        // sigil-g3 family: live from genesis (gate 0) — there is no height below it.
+        let Some(below) = WELFARE_FROM_HEIGHT.checked_sub(1) else { return };
         let legacy = split_mining_reward(1_000_000, MASTER).unwrap();
-        let at = split_mining_reward_at(1_000_000, MASTER, WELFARE_FROM_HEIGHT - 1).unwrap();
+        let at = split_mining_reward_at(1_000_000, MASTER, below).unwrap();
         assert_eq!(legacy, at, "pre-activation blocks must replay byte-identically");
         assert_eq!(at.welfare_share, 0);
     }
@@ -244,7 +246,10 @@ mod tests {
     #[test]
     fn claim_eligibility_windows() {
         // Inactive before the feature height, even for a never-claimer.
-        assert!(!claim_eligible(0, WELFARE_FROM_HEIGHT - 1));
+        // sigil-g3 family: live from genesis (gate 0) — there is no height below it.
+        if let Some(below) = WELFARE_FROM_HEIGHT.checked_sub(1) {
+            assert!(!claim_eligible(0, below));
+        }
         // Never claimed → eligible at activation.
         assert!(claim_eligible(0, WELFARE_FROM_HEIGHT));
         // Just claimed → locked out for the interval.

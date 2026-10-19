@@ -547,6 +547,24 @@ fn main() -> ExitCode {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // 2026-10-19 (g3 rehearsal): a SIGIL_NETWORK=sigil-r3 build came up as sigil-g2 — the fluxc
+    // compile cache keys units by source + flags, not by env!() inputs, and restored the g2
+    // sigil-header. The network is fixed at BUILD time, so the binary itself is the only
+    // witness: `network-id` prints what it was really compiled as (no DB, no network), and
+    // SIGIL_EXPECT_NETWORK makes `start` refuse any other id before it opens anything.
+    let compiled = (sigil_header::NETWORK_ID_STR, sigil_net::NETWORK_ID_STR);
+    if args.get(1).map(String::as_str) == Some("network-id") {
+        println!("header={} net={} g3_rules={}", compiled.0, compiled.1, sigil_header::IS_G3);
+        return if compiled.0 == compiled.1 { ExitCode::SUCCESS } else { ExitCode::from(1) };
+    }
+    if let Ok(want) = std::env::var("SIGIL_EXPECT_NETWORK") {
+        if want != compiled.0 || want != compiled.1 {
+            eprintln!("🛑 sigil-node: refusing to start — SIGIL_EXPECT_NETWORK={want} but this binary was built as \
+                       header={} net={}. Rebuild for the network you mean.", compiled.0, compiled.1);
+            return ExitCode::from(2);
+        }
+    }
+
     // v0.36.1 snapshot subcommands, dispatched here ahead of Cli::parse —
     // cli.rs is owned by a parallel work lane this cycle, so the two new
     // verbs live in main.rs (fold into the Cli enum at the next cli.rs touch).
@@ -926,7 +944,7 @@ fn run_start() -> Result<()> {
             let genesis = build_genesis().map_err(|e| anyhow!("build_genesis: {}", e))?;
             let genesis_hash = genesis.hash();
             let graw = chain_log::encode_record(&genesis).unwrap_or_default();
-            chain.apply(genesis).map_err(|e| anyhow!("genesis apply: {}", e))?;
+            chain.apply(genesis).map_err(|e| anyhow!("genesis apply: {:#}", e))?;
             let _ = chain_log.append_bytes(&graw);
             eprintln!("✓ chain initialised at H=0 — genesis hash {}",
                 hex_short_block(&genesis_hash));

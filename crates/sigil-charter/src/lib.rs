@@ -110,7 +110,17 @@ const _: () = assert!(param_u128("max_supply_glyphs") == sigil_state::MAX_SUPPLY
 const _: () = assert!(param_u128("seconds_per_halving") == sigil_emission::controller::SECONDS_PER_HALVING as u128, "charter: seconds_per_halving");
 const _: () = assert!(param_u128("max_reward_per_block_glyphs") == sigil_emission::controller::ABSOLUTE_MAX_REWARD_PER_BLOCK, "charter: max_reward_per_block_glyphs");
 const _: () = assert!(param_u128("dev_fee_bps_initial") == sigil_bank::MASTER_MINING_FEE_BPS, "charter: dev_fee_bps_initial");
-const _: () = assert!(param_u128("welfare_from_height") == welfare::WELFARE_FROM_HEIGHT as u128, "charter: welfare_from_height");
+// sigil-g3 family (2026-10-19): switches already live on g2 are live from genesis there, so the
+// welfare split starts at block 0 by design — checked as exactly that, never skipped. Every
+// other network (g2, r1, m1) stays bound to the charter's height.
+const _: () = assert!(
+    if sigil_header::IS_G3 {
+        welfare::WELFARE_FROM_HEIGHT == 0
+    } else {
+        param_u128("welfare_from_height") == welfare::WELFARE_FROM_HEIGHT as u128
+    },
+    "charter: welfare_from_height"
+);
 const _: () = assert!(param_u128("dev_fee_bps") == welfare::MASTER_MINING_FEE_BPS_V2, "charter: dev_fee_bps");
 const _: () = assert!(param_u128("welfare_bps") == welfare::WELFARE_MINING_FEE_BPS, "charter: welfare_bps");
 const _: () = assert!(param_u128("commons_bps") == sigil_bank::COMMONS_MINING_FEE_BPS, "charter: commons_bps");

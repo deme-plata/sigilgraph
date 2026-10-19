@@ -794,11 +794,19 @@ impl ShieldedPool {
     }
 
     /// sigil-g3 (2026-10-19): open the 256-bit generation as the ONLY one. v1 is closed
-    /// before it ever holds a note or publishes an anchor, so no 64-bit deposit, spend
-    /// output or anchor can exist on this chain: `generation_for_new_note` refuses
-    /// v1-shaped commitments, `append_note_in(V1)` refuses on `v1_closed`, and no v1 root is
-    /// ever pushed as an anchor. The v7 epoch is number 0 — its archive index when it seals,
-    /// the invariant `rotate_v7` checks. Idempotent; driven by the genesis height gate.
+    /// before it ever holds a note, so no 64-bit deposit, spend output or note can exist on
+    /// this chain: `generation_for_new_note` refuses v1-shaped commitments and
+    /// `append_note_in(V1)` refuses on `v1_closed`.
+    ///
+    /// Numbering = r1's shape with v1 closed from the start: v7 opens as epoch `epoch + 1` = 1
+    /// (as [`activate_v7`](Self::activate_v7) numbers it) and the EMPTY v1 epoch 0 is sealed at
+    /// once — `rotate_epoch` with v7 present archives it at index 0 and closes v1 without bumping
+    /// `epoch`, so v7 later seals into index 1 (`rotate_v7`'s invariant). The first cut numbered
+    /// v7 epoch 0, and the r3 rehearsal showed why that is wrong: two generations under one
+    /// number made every client that keys its scan state by epoch (the web page, the Android
+    /// leaf cache) scan v7 leaves as v1, mark them seen, and miss every note older than the
+    /// wallet. Distinct numbers = the shape every v7 client was proven on. Idempotent; driven
+    /// by the genesis height gate.
     pub(crate) fn activate_v7_only(&mut self) {
         if self.v7.is_some() {
             return;
@@ -807,8 +815,9 @@ impl ShieldedPool {
             self.notes.is_empty() && self.archive.is_empty() && self.epoch == 0,
             "a v7-only pool must start empty"
         );
-        self.v1_closed = true;
-        self.v7 = Some(LiveEpochV7 { epoch: 0, ..Default::default() });
+        self.v7 = Some(LiveEpochV7 { epoch: self.epoch + 1, ..Default::default() });
+        self.rotate_epoch();
+        debug_assert!(self.v1_closed && self.archive.len() == 1 && self.epoch == 0);
         self.anchors_dirty = true;
     }
 
@@ -1827,7 +1836,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod v7_tests {
+pub(crate) mod v7_tests {
     use super::*;
     use sigil_shield::note_v7::NoteV7;
 
@@ -1842,12 +1851,25 @@ mod v7_tests {
     fn v7_cm(i: u64) -> [u8; 32] {
         v7_note(i).commitment().to_wire()
     }
+    /// These tests pin the TWO-generation design (v7 opened beside a live v1 — r1, and g2 the day
+    /// v7 is scheduled there). The sigil-g3 family never runs it: v1 is closed at genesis and every
+    /// v7 note must carry a tagged envelope; `g3_tests` pins that shape instead (2026-10-19).
+    pub(crate) fn dual_generation_only(test: &str) -> bool {
+        if sigil_header::IS_G3 {
+            eprintln!("{test}: skipped on the g3 family (v1 never opens beside v7; see g3_tests)");
+            return true;
+        }
+        false
+    }
 
     /// ACTIVATION opens v7 BESIDE v1: v1 keeps its epoch number, its root and its ability to
     /// take spend outputs; v7 gets epoch+1 and the empty Rescue root; both roots are anchors
     /// that resolve to their own generation; value is counted per generation.
     #[test]
     fn activation_opens_v7_beside_a_live_v1() {
+        if dual_generation_only("activation_opens_v7_beside_a_live_v1") {
+            return;
+        }
         let mut p = ShieldedPool::new();
         for i in 0..3 {
             p.append_note(v1_wire(i)).unwrap();
@@ -1892,6 +1914,9 @@ mod v7_tests {
     /// seals v1 FIRST (closing it) and then itself, so archive index == epoch number holds.
     #[test]
     fn v7_epoch_refuses_bad_shapes_and_seals_v1_before_itself() {
+        if dual_generation_only("v7_epoch_refuses_bad_shapes_and_seals_v1_before_itself") {
+            return;
+        }
         let mut p = ShieldedPool::new();
         p.append_note(v1_wire(1)).unwrap();
         p.activate_v7();
@@ -1924,6 +1949,9 @@ mod v7_tests {
     /// v1 fills after activation ⇒ it closes (no further v1 epoch), v7 untouched.
     #[test]
     fn v1_filling_after_activation_closes_it() {
+        if dual_generation_only("v1_filling_after_activation_closes_it") {
+            return;
+        }
         let mut p = ShieldedPool::new();
         p.activate_v7();
         for i in 0..POOL_CAPACITY as u64 {
@@ -1942,6 +1970,9 @@ mod v7_tests {
     /// root, digest, roots and generation data.
     #[test]
     fn snapshot_round_trip_preserves_generation_and_roots() {
+        if dual_generation_only("snapshot_round_trip_preserves_generation_and_roots") {
+            return;
+        }
         let mut a = ShieldedPool::new();
         a.append_note(v1_wire(1)).unwrap();
         a.activate_v7();
@@ -2029,6 +2060,9 @@ mod v7_tests {
     #[test]
     #[cfg_attr(debug_assertions, ignore)]
     fn settlement_routes_by_anchor_generation() {
+        if dual_generation_only("settlement_routes_by_anchor_generation") {
+            return;
+        }
         use sigil_shield::membership::CompressTree;
         use sigil_shield::mimc::compress2;
         use sigil_shield::note_v1::{padding_leaf as pad1, to_wire};
@@ -2134,29 +2168,33 @@ mod g3_tests {
         p.activate_v7_only();
         assert!(p.v7_active());
         assert!(!p.v1_live(), "v1 is closed before it ever holds a note");
-        assert_eq!(p.v7().unwrap().epoch(), 0, "the v7 epoch is number 0");
+        assert_eq!(p.epoch(), 0, "v1 keeps epoch number 0 …");
+        assert_eq!(p.v7().unwrap().epoch(), 1, "… and v7 is epoch 1: no two generations share a number");
+        assert_eq!(p.archive().len(), 1, "the empty v1 epoch 0 is sealed at genesis");
+        assert_eq!(p.archive()[0].generation, PoolGeneration::V1);
+        assert_eq!(p.archive()[0].notes.len(), 0, "and holds no note");
         assert!(matches!(p.append_note(v1_wire(1)), Err(ShieldedError::V1DepositsClosed)));
-        assert!(matches!(p.append_note_in(PoolGeneration::V1, v1_wire(2), None), Err(ShieldedError::V1Closed)));
+        assert!(
+            matches!(p.append_note_in(PoolGeneration::V1, v1_wire(2), None), Err(ShieldedError::V1Closed)),
+            "no v1 output can ever land — so nothing anchored to the empty v1 root can settle"
+        );
         let pos = p.append_note_with_delivery(v7_cm(1), Some(tagged_envelope())).unwrap();
         assert_eq!(pos, 0);
         p.refresh_anchor();
         let r7 = p.current_root_v7().unwrap();
         assert_eq!(p.generation_of_anchor(&r7), Some(PoolGeneration::V7));
-        let v1_root = p.current_root_fast();
-        assert!(!p.is_known_anchor(&v1_root), "a closed v1 never publishes an anchor");
-        assert_eq!(p.generation_of_anchor(&v1_root), None, "so no proof can be anchored to it");
     }
 
     #[test]
-    fn a_v7_only_pool_seals_into_archive_index_zero() {
+    fn a_v7_only_pool_seals_into_archive_index_one() {
         let mut p = ShieldedPool::new();
         p.activate_v7_only();
         p.append_note_with_delivery(v7_cm(3), Some(tagged_envelope())).unwrap();
         p.rotate_v7();
-        assert_eq!(p.archive().len(), 1);
-        assert_eq!(p.archive()[0].generation, PoolGeneration::V7);
-        assert_eq!(p.v7().unwrap().epoch(), 1, "the next v7 epoch is number 1");
-        let sealed = p.archive()[0].root;
+        assert_eq!(p.archive().len(), 2, "[v1 epoch 0 (empty), v7 epoch 1]");
+        assert_eq!(p.archive()[1].generation, PoolGeneration::V7);
+        assert_eq!(p.v7().unwrap().epoch(), 2, "the next v7 epoch is number 2 = its archive index");
+        let sealed = p.archive()[1].root;
         assert_eq!(p.generation_of_anchor(&sealed), Some(PoolGeneration::V7));
     }
 

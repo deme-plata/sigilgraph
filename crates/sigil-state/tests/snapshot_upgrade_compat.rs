@@ -79,7 +79,8 @@ fn current_snapshot_round_trips() {
             at_height: 1,
             mutations: vec![
                 StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 1_000 },
-                StateMutation::Shield { from: ALICE, amount: 1_000, cm: [9u8; 32], note_ciphertext: None },
+                // sigil-g3 family: every note carries a view-tagged envelope (chain rule); none on g2
+                StateMutation::Shield { from: ALICE, amount: 1_000, cm: [9u8; 32], note_ciphertext: g3_envelope() },
             ],
         },
         1,
@@ -88,7 +89,9 @@ fn current_snapshot_round_trips() {
 
     let bytes = rmp_serde::to_vec(&state).expect("encode");
     let back: SigilState = rmp_serde::from_slice(&bytes).expect("decode");
-    assert_eq!(back.shielded().len(), 1, "the note must survive");
+    // notes in BOTH generations (the note lands in the v7 tree on the sigil-g3 family)
+    let notes = |s: &SigilState| s.shielded().len() + s.shielded().v7().map_or(0, |e| e.len());
+    assert_eq!(notes(&back), 1, "the note must survive");
     assert_eq!(back.shielded().value_locked(), 1_000);
     assert_eq!(back.roots(), state.roots());
 }
@@ -114,4 +117,13 @@ fn shielded_field_is_still_last_in_the_encoding() {
          a field was appended after it and pre-shielded snapshots will misalign — see the \
          MUST STAY LAST comment on SigilState::shielded"
     );
+}
+
+/// A well-formed view-tagged envelope on the sigil-g3 family (where the chain requires one on
+/// every note), `None` elsewhere — exactly the fixture this file used before (2026-10-19).
+fn g3_envelope() -> Option<String> {
+    sigil_header::IS_G3.then(|| {
+        let a = sigil_shield::wallet_v7::AccountV7::from_seed([7u8; 32]);
+        sigil_shield::wallet_v7::seal_output_v7(1, a.blinding(0), &a.pk_enc_hex(), "").unwrap().0
+    })
 }

@@ -82,7 +82,8 @@ fn mk_header(height: u64, parent_hash: BlockHash, pad: usize) -> SigilBlockHeade
         // Dormant on this chain (TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT is u64::MAX),
         // so `None` is what every real header carries — and what `hash()` strips.
         topology_commitment: None,
-        shielded_pool_root: None,
+        // required from genesis on the sigil-g3 family (2026-10-19); None on g2 below its gate
+        shielded_pool_root: sigil_header::shielded_pool_root_required(height).then_some([0u8; 32]),
         extensions: Vec::new(),
     }
 }

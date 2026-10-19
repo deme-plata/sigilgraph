@@ -986,6 +986,17 @@ mod tests {
         }
     }
 
+    /// The master's NET mining fee at `h`: 500 bps before the welfare split, 750 − 200 after.
+    /// On the sigil-g3 family the split is live from genesis, so height 1 is already "after".
+    fn master_net_bps(h: u64) -> u128 {
+        use sigil_bank::welfare as wf;
+        if h >= wf::WELFARE_FROM_HEIGHT {
+            wf::MASTER_MINING_FEE_BPS_V2 - wf::WELFARE_MINING_FEE_BPS
+        } else {
+            sigil_bank::MASTER_MINING_FEE_BPS
+        }
+    }
+
     #[test]
     fn split_coinbase_takes_dev_fee_when_master_is_set() {
         let mut st = SigilState::new();
@@ -1004,12 +1015,13 @@ mod tests {
         let winner_bal = after.balance_of(&winner, &NATIVE);
         let master_bal = after.balance_of(&master, &NATIVE);
         let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
-        assert_eq!(master_bal, reward * 500 / 10_000, "master gets exactly the mining dev fee");
+        assert_eq!(master_bal, reward * master_net_bps(1) / 10_000, "master gets exactly the mining dev fee");
         assert_eq!(commons_bal, reward * 120 / 10_000, "commons gets exactly the mining tithe");
         assert!(winner_bal < reward, "winner does NOT get the full reward once a master exists");
-        // EXACT CONSERVATION: no unit created or destroyed by the split.
+        // EXACT CONSERVATION: no unit created or destroyed by the split (the welfare wallet's share
+        // is 0 before the split's height, and 200 bps from it — from genesis on the g3 family).
         assert_eq!(
-            total_native_delta(&st, &after, &[winner, master, sigil_bank::COMMONS_WALLET]),
+            total_native_delta(&st, &after, &[winner, master, sigil_bank::COMMONS_WALLET, sigil_bank::welfare::WELFARE_WALLET]),
             reward
         );
     }
@@ -1042,15 +1054,18 @@ mod tests {
             "master nets 750 − 200 = 550 bps"
         );
         assert_eq!(commons_bal, reward * 120 / 10_000, "commons tithe unchanged by welfare");
-        // The miner absorbs exactly the 250 bps dev-fee raise vs pre-activation.
-        let muts_legacy = split_coinbase_mutations(&st, 1, reward, winner, &shares);
-        let mut legacy = st.clone();
-        sigil_state::commit_state_transition(&mut legacy, &StateTransition { at_height: 1, mutations: muts_legacy }, 1).unwrap();
-        assert_eq!(
-            legacy.balance_of(&winner, &NATIVE) - after.balance_of(&winner, &NATIVE),
-            reward * (wf::MASTER_MINING_FEE_BPS_V2 - sigil_bank::MASTER_MINING_FEE_BPS) / 10_000,
-            "the miner's take drops by exactly the fee raise, nothing more"
-        );
+        // The miner absorbs exactly the 250 bps dev-fee raise vs pre-activation (no pre-activation
+        // height exists on the sigil-g3 family: the split is live from genesis).
+        if wf::WELFARE_FROM_HEIGHT > 1 {
+            let muts_legacy = split_coinbase_mutations(&st, 1, reward, winner, &shares);
+            let mut legacy = st.clone();
+            sigil_state::commit_state_transition(&mut legacy, &StateTransition { at_height: 1, mutations: muts_legacy }, 1).unwrap();
+            assert_eq!(
+                legacy.balance_of(&winner, &NATIVE) - after.balance_of(&winner, &NATIVE),
+                reward * (wf::MASTER_MINING_FEE_BPS_V2 - sigil_bank::MASTER_MINING_FEE_BPS) / 10_000,
+                "the miner's take drops by exactly the fee raise, nothing more"
+            );
+        }
         // EXACT CONSERVATION across all four credited wallets.
         assert_eq!(
             total_native_delta(&st, &after, &[winner, master, sigil_bank::COMMONS_WALLET, wf::WELFARE_WALLET]),
@@ -1074,9 +1089,9 @@ mod tests {
         let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
         assert_eq!(commons_bal, reward * 120 / 10_000, "commons tithe still applies to self-mined blocks");
         assert_eq!(
-            total_native_delta(&st, &after, &[master, sigil_bank::COMMONS_WALLET]),
+            total_native_delta(&st, &after, &[master, sigil_bank::COMMONS_WALLET, sigil_bank::welfare::WELFARE_WALLET]),
             reward,
-            "master + commons must sum to exactly the reward (no double count, no leak)"
+            "master + commons (+ welfare once the split is live) must sum to exactly the reward (no double count, no leak)"
         );
     }
 
@@ -1105,7 +1120,7 @@ mod tests {
         // the reward is accounted for across all four wallets, nothing minted
         // or destroyed by rounding.
         assert_eq!(
-            total_native_delta(&st, &after, &[winner, other, master, sigil_bank::COMMONS_WALLET]),
+            total_native_delta(&st, &after, &[winner, other, master, sigil_bank::COMMONS_WALLET, sigil_bank::welfare::WELFARE_WALLET]),
             reward
         );
     }
@@ -1803,6 +1818,12 @@ mod tests {
                 }],
             };
             let roots = roots_after(state, &tr, height);
+            // the fifth root, by the same rule as `mint.rs` (required from genesis on the g3 family)
+            let pool_root = {
+                let mut c = state.clone();
+                let _ = sigil_state::commit_state_transition(&mut c, &tr, height);
+                c.shielded_pool_root()
+            };
             let nonce = SqiSignature::from_array([0u8; SQISIGN_L5_LEN]);
             let mut hsh = blake3::Hasher::new();
             hsh.update(&parent);
@@ -1820,7 +1841,7 @@ mod tests {
                 sig_scheme: SigScheme::SqiSign5, producer: [0u8; 32],
                 producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
                 topology_commitment: None,
-                shielded_pool_root: None,
+                shielded_pool_root: sigil_header::shielded_pool_root_required(height).then_some(pool_root),
                 extensions: Vec::new(),
             };
             Block { header, transition: tr, events: vec![] }

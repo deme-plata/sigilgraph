@@ -1014,6 +1014,9 @@ mod tests {
         let h = fake_header();
         let rec = encode_stored_header(&h);
         assert_eq!(decode_stored_header(&rec).unwrap(), h);
+        if IS_G3 {
+            assert_eq!(rec[0], STORED_HEADER_TAG_V2, "the g3 family writes the full layout");
+        }
         if !IS_G3 {
             assert_eq!(rec[0], STORED_HEADER_TAG_V1);
             let mut old = vec![STORED_HEADER_TAG_V1];
@@ -1063,7 +1066,9 @@ mod tests {
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; 292]),
             topology_commitment: None,
-            shielded_pool_root: None,
+            // a root exactly when the gate requires one: None on g2 (height 1 is far below its
+            // gate), present on the sigil-g3 family (required from genesis) — 2026-10-19
+            shielded_pool_root: shielded_pool_root_required(1).then_some([0u8; 32]),
             extensions: Vec::new(),
         }
     }
@@ -1323,7 +1328,8 @@ mod tests {
     /// field produced (the fragment is emitted by serde and stripped before hashing).
     #[test]
     fn hash_and_signing_bytes_are_unaffected_by_a_none_shielded_pool_root() {
-        let h = fake_header();
+        let mut h = fake_header();
+        h.shielded_pool_root = None; // the None case is this test's subject (fake_header carries one on g3)
         assert!(h.shielded_pool_root.is_none() && h.topology_commitment.is_none());
         let raw = serde_json::to_vec(&h).unwrap();
         let raw_s = std::str::from_utf8(&raw).unwrap();
@@ -1374,7 +1380,8 @@ mod tests {
     /// backfill) decodes to `None`.
     #[test]
     fn bincode_is_not_cross_version_but_named_formats_are() {
-        let h = fake_header();
+        let mut h = fake_header();
+        h.shielded_pool_root = None; // the None case is this test's subject (fake_header carries one on g3)
         let full = bincode::serialize(&h).unwrap();
         assert_eq!(full[full.len() - 1], 0u8, "trailing byte is the None discriminant of the last field");
         let legacy = &full[..full.len() - 1];
@@ -1410,15 +1417,25 @@ mod tests {
             check_shielded_pool_root_gate(999, true, act),
             Err(HeaderError::ShieldedPoolRootPremature { height: 999, activation: 1_000 })
         ));
-        assert!(!shielded_pool_root_required_with(SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT - 1, SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT));
+        // On the g3 family the gate is 0: there is no height below it (2026-10-19).
+        if let Some(below) = SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT.checked_sub(1) {
+            assert!(!shielded_pool_root_required_with(below, SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT));
+        }
         assert!(shielded_pool_root_required_with(SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT, SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT));
-        // precheck itself: fake_header is height 1, far below the compiled-in gate
+        // precheck itself at fake_header's height 1: far below the gate on g2, at/above it on
+        // the sigil-g3 family (gate 0) — both sides of the rule, on both networks.
         let mut h = fake_header();
         assert!(h.precheck().is_ok());
-        h.shielded_pool_root = Some([1u8; 32]);
-        assert!(matches!(h.precheck(), Err(HeaderError::ShieldedPoolRootPremature { .. })));
+        if shielded_pool_root_required(1) {
+            h.shielded_pool_root = None;
+            assert!(matches!(h.precheck(), Err(HeaderError::ShieldedPoolRootMissing { .. })));
+        } else {
+            h.shielded_pool_root = Some([1u8; 32]);
+            assert!(matches!(h.precheck(), Err(HeaderError::ShieldedPoolRootPremature { .. })));
+        }
         let mut g = fake_header();
         g.height = SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT;
+        g.shielded_pool_root = None;
         assert!(matches!(g.precheck(), Err(HeaderError::ShieldedPoolRootMissing { .. })));
         g.shielded_pool_root = Some([1u8; 32]);
         assert!(g.precheck().is_ok());
@@ -1429,6 +1446,12 @@ mod tests {
     /// whose root is `None`. And the two decoders are each other's inverse.
     #[test]
     fn legacy_page_is_byte_identical_to_the_pre_field_encoding() {
+        // The legacy codecs exist for clients deployed before the fifth root. The sigil-g3
+        // family has none (a new chain, every client built from the full layout), so this pin
+        // is g2's; `stored_header_layouts_round_trip` covers g3's layout (2026-10-19).
+        if IS_G3 {
+            return;
+        }
         let mut hs: Vec<SigilBlockHeaderV0> = (1u64..5).map(|i| { let mut h = fake_header(); h.height = i; h }).collect();
         hs[2].topology_commitment = Some([3u8; 32]);
         let legacy = encode_legacy_header_page(&hs);

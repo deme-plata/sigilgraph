@@ -588,7 +588,10 @@ mod tests {
 
     #[test]
     fn activation_height_is_a_step() {
-        assert!(!usds_active(USDS_LIVE_HEIGHT - 1));
+        // sigil-g3 family: live from genesis (gate 0) — there is no height below it.
+        if let Some(below) = USDS_LIVE_HEIGHT.checked_sub(1) {
+            assert!(!usds_active(below));
+        }
         assert!(usds_active(USDS_LIVE_HEIGHT));
     }
 

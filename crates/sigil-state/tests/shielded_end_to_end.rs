@@ -136,6 +136,9 @@ fn prove_spend(
 /// THE HAPPY PATH: a real proof, verified by the chokepoint, mutating real state.
 #[test]
 fn shield_then_spend_is_accepted_and_mutates_state() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
 
     // The pool's own root must equal the one the prover builds — if these ever diverge,
@@ -179,6 +182,9 @@ fn shield_then_spend_is_accepted_and_mutates_state() {
 /// proof is genuinely valid — validity is not freshness.
 #[test]
 fn replaying_a_nullifier_is_refused() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     let fee = e(SHIELDED_FEE as u64);
     let outs = [(e(OUT_A), e(777)), (e(OUT_B), e(888))];
@@ -213,6 +219,9 @@ fn replaying_a_nullifier_is_refused() {
 /// a note of any value. The chokepoint must refuse the anchor before it even proves.
 #[test]
 fn unknown_anchor_is_refused() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, _anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     let fee = e(SHIELDED_FEE as u64);
     let outs = [(e(OUT_A), e(777)), (e(OUT_B), e(888))];
@@ -239,6 +248,9 @@ fn unknown_anchor_is_refused() {
 /// TAMPERED PROOF: flipping a byte must not survive verification.
 #[test]
 fn tampered_proof_is_refused() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     let fee = e(SHIELDED_FEE as u64);
     let outs = [(e(OUT_A), e(777)), (e(OUT_B), e(888))];
@@ -265,6 +277,9 @@ fn tampered_proof_is_refused() {
 /// v2 circuit exists, checked here at the layer that actually moves money.
 #[test]
 fn inflated_output_commitments_are_refused_at_the_chokepoint() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     let fee = e(SHIELDED_FEE as u64);
     let honest = [(e(OUT_A), e(777)), (e(OUT_B), e(888))];
@@ -305,6 +320,9 @@ fn inflated_output_commitments_are_refused_at_the_chokepoint() {
 /// only caps the theft at the pool's size, it does not prevent it.
 #[test]
 fn unproven_unshield_is_refused() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, _note, _pos, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     let err = apply(
         &mut state,
@@ -328,6 +346,9 @@ fn unproven_unshield_is_refused() {
 /// AN HONEST UNSHIELD round-trips: value leaves the pool and lands transparently.
 #[test]
 fn proven_unshield_returns_value_transparently() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
 
     // Withdraw 100 publicly, with two zero-value change notes.
@@ -358,6 +379,9 @@ fn proven_unshield_returns_value_transparently() {
 /// An unshield may never return more than the pool holds, even with a valid proof shape.
 #[test]
 fn unshield_cannot_overdraw_the_pool() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     // Prove a spend of the real note, then claim a LARGER withdrawal than it was worth.
     let amount = e(NOTE);
@@ -400,6 +424,9 @@ fn unshield_cannot_overdraw_the_pool() {
 /// restored anchor, which is the only proof that the restored pool is actually usable.
 #[test]
 fn shielded_pool_survives_the_snapshot_round_trip() {
+    if v1_pool_absent() {
+        return;
+    }
     let (state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
 
     let bytes = rmp_serde::to_vec(&state).expect("snapshot encode");
@@ -437,6 +464,9 @@ fn shielded_pool_survives_the_snapshot_round_trip() {
 /// crowd would be full of people wearing name tags.
 #[test]
 fn a_nonstandard_fee_is_refused() {
+    if v1_pool_absent() {
+        return;
+    }
     let (mut state, note, position, anchor) = shielded_fixture(NOTE, 4242, 0xDEAD);
     const ODD_FEE: u64 = 1_337; // distinctive, therefore identifying
     let odd = e(ODD_FEE);
@@ -464,6 +494,9 @@ fn a_nonstandard_fee_is_refused() {
 /// cheapest attack on the whole design, and a coarse ladder is what defeats it.
 #[test]
 fn an_unusual_shield_amount_is_refused() {
+    if v1_pool_absent() {
+        return;
+    }
     let mut state = SigilState::default();
     apply(
         &mut state,
@@ -506,6 +539,9 @@ fn an_unusual_shield_amount_is_refused() {
 /// not a privacy trade-off, it is a broken feature. This pins the fix.
 #[test]
 fn an_entire_accumulated_balance_can_be_shielded() {
+    if v1_pool_absent() {
+        return;
+    }
     use sigil_state::shielded::decompose;
     const REAL_BALANCE: u128 = 19_930_436_350_512; // the live master wallet, to the unit
 
@@ -556,6 +592,9 @@ fn an_entire_accumulated_balance_can_be_shielded() {
 /// rather than a transparent balance.
 #[test]
 fn a_registered_miner_is_paid_into_the_pool() {
+    if v1_pool_absent() {
+        return;
+    }
     use sigil_shield::note_v1::coinbase_commitment_wire;
 
     const MINER: [u8; 32] = [0x77; 32];
@@ -608,6 +647,9 @@ fn a_registered_miner_is_paid_into_the_pool() {
 /// to: the SAME `StateMutation::Shield` landing at height 2 and again at height 3.
 #[test]
 fn replaying_a_shield_at_a_later_height_is_refused_not_double_applied() {
+    if v1_pool_absent() {
+        return;
+    }
     let mut state = SigilState::default();
     apply(
         &mut state,
@@ -676,6 +718,9 @@ fn replaying_a_shield_at_a_later_height_is_refused_not_double_applied() {
 /// reproduces the exact leaf sitting in the pool.
 #[test]
 fn a_miner_can_open_its_shielded_reward_knowing_only_its_seed() {
+    if v1_pool_absent() {
+        return;
+    }
     const MINER: [u8; 32] = [0x99; 32];
     let seed = [0x99u8; 32];
 
@@ -731,4 +776,15 @@ fn a_miner_can_open_its_shielded_reward_knowing_only_its_seed() {
             &sigil_shield::note_cipher::NoteCiphertext(ct2), &stranger).is_err(),
         "a note must not open for anyone but its recipient"
     );
+}
+
+/// This suite drives the 64-bit (v1) pool: v1 deposits, v1 proofs, the v1 shielded coinbase.
+/// The sigil-g3 family has no v1 pool (closed at genesis, every note 256-bit) — its rules are
+/// pinned by `shielded::g3_tests`, `v7_tests` and the r3 rehearsal (2026-10-19).
+fn v1_pool_absent() -> bool {
+    if sigil_header::IS_G3 {
+        eprintln!("skipped on the g3 family: no v1 pool");
+        return true;
+    }
+    false
 }

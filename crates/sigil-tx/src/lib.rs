@@ -4435,7 +4435,10 @@ mod nation_welfare_tests {
     /// exists from USDS_LIVE_HEIGHT on — so the fixture runs there (it is the
     /// later of the two). The below-activation checks name the nation height
     /// explicitly.
-    const H: u64 = sigil_usds::USDS_LIVE_HEIGHT;
+    /// sigil-g3 family (2026-10-19): every switch is live from genesis (USDS_LIVE_HEIGHT = 0); the
+    /// fixture still acts at height >= 2 so the oracle push one block earlier is stamped at >= 1 —
+    /// a stamp of 0 reads as "never pushed" in `sigil_oracle::price_is_fresh`.
+    const H: u64 = if sigil_usds::USDS_LIVE_HEIGHT >= 2 { sigil_usds::USDS_LIVE_HEIGHT } else { 2 };
     const FEEDER: WalletId = [0xFE; 32];
 
     fn signed(tx: SigilTx) -> SignedTx {
@@ -4509,11 +4512,13 @@ mod nation_welfare_tests {
 
     #[test]
     fn nation_txs_refused_below_activation() {
+        // sigil-g3 family: this switch is live from genesis (gate 0) — there is no height below it.
+        let Some(below) = wf::WELFARE_FROM_HEIGHT.checked_sub(1) else { return };
         let s = nation_state(wf::WELFARE_STIPEND_GLYPHS);
         let att = signed(SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &att, wf::WELFARE_FROM_HEIGHT - 1), Err(TxApplyError::NationNotActive { .. })));
+        assert!(matches!(apply_tx_at(&s, &att, below), Err(TxApplyError::NationNotActive { .. })));
         let clm = signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &clm, wf::WELFARE_FROM_HEIGHT - 1), Err(TxApplyError::NationNotActive { .. })));
+        assert!(matches!(apply_tx_at(&s, &clm, below), Err(TxApplyError::NationNotActive { .. })));
         // The legacy no-height entry point refuses too (unwrap_or(0)).
         assert!(matches!(apply_tx(&s, &att), Err(TxApplyError::NationNotActive { .. })));
     }
@@ -4595,15 +4600,21 @@ mod nation_welfare_tests {
         // Rogue pusher refused — before USDS-live as "not the nation
         // authority", after it as "neither master nor feeder".
         let rogue = signed(SigilTx::OraclePush { authority: ALICE, price_usd_e8: 100, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &rogue, wf::WELFARE_FROM_HEIGHT).unwrap_err(), TxApplyError::NotNationAuthority));
+        // (the window between the two switches exists on g2 only; both are 0 on the g3 family)
+        if wf::WELFARE_FROM_HEIGHT < sigil_usds::USDS_LIVE_HEIGHT {
+            assert!(matches!(apply_tx_at(&s, &rogue, wf::WELFARE_FROM_HEIGHT).unwrap_err(), TxApplyError::NotNationAuthority));
+        }
         assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotOracleAuthority));
         // Zero price refused — it would re-brick every claim.
         let zero = signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 0, fee: 0 });
         assert!(matches!(apply_tx_at(&s, &zero, H).unwrap_err(), TxApplyError::ZeroOraclePrice));
         // Below activation refused, and the no-height entry point refuses too.
         let push = signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 300_000_000, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &push, wf::WELFARE_FROM_HEIGHT - 1), Err(TxApplyError::NationNotActive { .. })));
-        assert!(matches!(apply_tx(&s, &push), Err(TxApplyError::NationNotActive { .. })));
+        // sigil-g3 family: this switch is live from genesis (gate 0) — there is no height below it.
+        if let Some(below) = wf::WELFARE_FROM_HEIGHT.checked_sub(1) {
+            assert!(matches!(apply_tx_at(&s, &push, below), Err(TxApplyError::NationNotActive { .. })));
+            assert!(matches!(apply_tx(&s, &push), Err(TxApplyError::NationNotActive { .. })));
+        }
         // A valid push lands and read_price sees it (byte-identical encoding),
         // and — post USDS-live — carries its height stamp.
         apply_commit(&mut s, SigilTx::OraclePush { authority: MASTER, price_usd_e8: 300_000_000, fee: 0 }, H).unwrap();
@@ -4619,6 +4630,10 @@ mod nation_welfare_tests {
         // accepted (master only) and writes EXACTLY what every historical
         // push wrote — the price slot, no stamp. This is the shape every node
         // already computes for the blocks behind us; changing it would fork.
+        // sigil-g3 family: nation and USDS are both live from genesis — there is no window between.
+        if wf::WELFARE_FROM_HEIGHT + 11 >= sigil_usds::USDS_LIVE_HEIGHT {
+            return;
+        }
         let mut s = nation_state(0);
         let h = wf::WELFARE_FROM_HEIGHT + 10;
         let before = s.contract_slot(&sigil_oracle::ORACLE_CONTRACT, &sigil_oracle::PRICE_HEIGHT_SLOT);
@@ -4639,8 +4654,11 @@ mod nation_welfare_tests {
         let mut s = nation_state(0);
         // Delegation is refused before activation…
         let del = signed(SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &del, H - 1).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
-        assert!(matches!(apply_tx(&s, &del).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        // sigil-g3 family: this switch is live from genesis (gate 0) — there is no height below it.
+        if let Some(below) = sigil_usds::USDS_LIVE_HEIGHT.checked_sub(1) {
+            assert!(matches!(apply_tx_at(&s, &del, below).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+            assert!(matches!(apply_tx(&s, &del).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        }
         // …and only the master may delegate.
         let rogue = signed(SigilTx::OracleDelegate { authority: ALICE, feeder: FEEDER, fee: 0 });
         assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotNationAuthority));
@@ -4677,9 +4695,12 @@ mod nation_welfare_tests {
             StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 21 * sigil_usds::GLYPHS_PER_SIGIL },
         ] }, 0).unwrap();
         let mint = signed(SigilTx::UsdsMint { from: ALICE, sigil_amount: sigil_usds::GLYPHS_PER_SIGIL, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &mint, H - 1).unwrap_err(), TxApplyError::UsdsNotActive { height, activates_at }
-            if height == H - 1 && activates_at == sigil_usds::USDS_LIVE_HEIGHT));
-        assert!(matches!(apply_tx(&s, &mint).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        // sigil-g3 family: this switch is live from genesis (gate 0) — there is no height below it.
+        if let Some(below) = sigil_usds::USDS_LIVE_HEIGHT.checked_sub(1) {
+            assert!(matches!(apply_tx_at(&s, &mint, below).unwrap_err(), TxApplyError::UsdsNotActive { height, activates_at }
+                if height == below && activates_at == sigil_usds::USDS_LIVE_HEIGHT));
+            assert!(matches!(apply_tx(&s, &mint).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        }
         // At activation, with the fresh $2.00 fixture price, 1 SIGIL mints
         // $2.00 / 1.05 gross = 190_476_190 base, minus the protocol fee.
         apply_commit(&mut s, SigilTx::UsdsMint { from: ALICE, sigil_amount: sigil_usds::GLYPHS_PER_SIGIL, fee: 0 }, H).unwrap();
@@ -4711,8 +4732,11 @@ mod nation_welfare_tests {
         ] }, 0).unwrap();
         const BOB: WalletId = [0x22; 32];
         let xfer = signed(SigilTx::Send { from: ALICE, to: BOB, amount: 200, token: sigil_usds::USDS, fee: 10 });
-        assert!(matches!(apply_tx_at(&s, &xfer, H - 1).unwrap_err(), TxApplyError::TokenSendNotActive { height, activates_at }
-            if height == H - 1 && activates_at == sigil_usds::USDS_LIVE_HEIGHT));
+        // sigil-g3 family: this switch is live from genesis (gate 0) — there is no height below it.
+        if let Some(below) = sigil_usds::USDS_LIVE_HEIGHT.checked_sub(1) {
+            assert!(matches!(apply_tx_at(&s, &xfer, below).unwrap_err(), TxApplyError::TokenSendNotActive { height, activates_at }
+                if height == below && activates_at == sigil_usds::USDS_LIVE_HEIGHT));
+        }
         apply_commit(&mut s, SigilTx::Send { from: ALICE, to: BOB, amount: 200, token: sigil_usds::USDS, fee: 10 }, H).unwrap();
         assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), 300);
         assert_eq!(s.balance_of(&BOB, &sigil_usds::USDS), 200);
@@ -4737,12 +4761,19 @@ mod nation_welfare_tests {
         apply_commit(&mut s, SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 0 }, H).unwrap();
         let feed = feed_id("bio.k_bio");
         let push = |auth: WalletId, date: u32, v: i128| SigilTx::GaugePush { authority: auth, feed, value_e6: v, reading_date: date, attest_blake3: [0x4A; 32], fee: 0 };
+        // The override can only LOWER the gate, so the dormant phase exists only where the shipped
+        // gate is above the fixture (g2); on the sigil-g3 family the gauge is live from genesis.
+        let dormant_phase = sigil_oracle::GAUGE_LIVE_HEIGHT > H + 10;
         // DORMANT: refused at any height while the constant is u64::MAX
-        let e = apply_tx_at(&s, &signed(push(MASTER, 20260913, 1_688_887)), H + 5).unwrap_err();
-        assert!(matches!(e, TxApplyError::GaugeNotActive { .. }), "dormant at the shipped height until scheduled lower: {e}");
+        if dormant_phase {
+            let e = apply_tx_at(&s, &signed(push(MASTER, 20260913, 1_688_887)), H + 5).unwrap_err();
+            assert!(matches!(e, TxApplyError::GaugeNotActive { .. }), "dormant at the shipped height until scheduled lower: {e}");
+        }
         // The chronos seam schedules activation in-process; the live node never does.
         sigil_oracle::chronos_schedule_gauge_live_height(H + 10);
-        assert!(matches!(apply_tx_at(&s, &signed(push(MASTER, 20260913, 1)), H + 9).unwrap_err(), TxApplyError::GaugeNotActive { .. }));
+        if dormant_phase {
+            assert!(matches!(apply_tx_at(&s, &signed(push(MASTER, 20260913, 1)), H + 9).unwrap_err(), TxApplyError::GaugeNotActive { .. }));
+        }
         // Authority: a stranger is refused; the master and the feeder may push.
         assert!(matches!(apply_tx_at(&s, &signed(push(ALICE, 20260913, 1)), H + 10).unwrap_err(), TxApplyError::NotOracleAuthority));
         let r = apply_tx_at(&s, &signed(push(FEEDER, 20260913, 1_688_887)), H + 10).unwrap();
@@ -4783,11 +4814,14 @@ mod nation_welfare_tests {
         let mut s = nation_state(0);
         let boot = RockyCall::Bootstrap { owner: ALICE, initial_supply: 1_000 * rc::ONE_ROCKY };
         let call = |from: WalletId, c: &RockyCall| SigilTx::ContractCall { from, contract: rc::ROCKY_CONTRACT, method: c.selector(), calldata: c.encode(), gas_limit: 0, fee: 0 };
-        // dormant: the historical shape — one event, no state
-        let r = apply_tx_at(&s, &signed(call(MASTER, &boot)), H).unwrap();
-        assert_eq!(r.mutations.len(), 1);
-        assert!(matches!(r.events[0], SigilEvent::ContractCall { gas_used: 0, result_hash, .. } if result_hash == [0u8; 32]));
-        assert!(!rc::bootstrapped(&s));
+        // dormant: the historical shape — one event, no state (g2; the gauge gate is live from
+        // genesis on the sigil-g3 family, and the override can only lower it)
+        if sigil_oracle::GAUGE_LIVE_HEIGHT > H {
+            let r = apply_tx_at(&s, &signed(call(MASTER, &boot)), H).unwrap();
+            assert_eq!(r.mutations.len(), 1);
+            assert!(matches!(r.events[0], SigilEvent::ContractCall { gas_used: 0, result_hash, .. } if result_hash == [0u8; 32]));
+            assert!(!rc::bootstrapped(&s));
+        }
         sigil_oracle::chronos_schedule_gauge_live_height(H);
         // active: a stranger cannot bootstrap; the master can; the owner then transfers
         let e = apply_tx_at(&s, &signed(call(ALICE, &boot)), H).unwrap_err();

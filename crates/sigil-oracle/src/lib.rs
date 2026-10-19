@@ -348,8 +348,12 @@ mod gauge_tests {
     #[test]
     fn the_gate_is_dormant_until_scheduled_in_process() {
         // Activated 2026-09-15 at a committed height (was u64::MAX / dormant).
-        assert_eq!(GAUGE_LIVE_HEIGHT, 19_150_000, "the committed activation height — changing it is a consensus fork");
-        assert!(!gauge_active_at(GAUGE_LIVE_HEIGHT - 1, GAUGE_LIVE_HEIGHT) && gauge_active_at(GAUGE_LIVE_HEIGHT, GAUGE_LIVE_HEIGHT));
+        // g2: the committed 19,150,000; the sigil-g3 family: 0 (live from genesis).
+        assert_eq!(GAUGE_LIVE_HEIGHT, sigil_header::live_from_genesis_on_g3(19_150_000), "the committed activation height — changing it is a consensus fork");
+        if let Some(below) = GAUGE_LIVE_HEIGHT.checked_sub(1) {
+            assert!(!gauge_active_at(below, GAUGE_LIVE_HEIGHT));
+        }
+        assert!(gauge_active_at(GAUGE_LIVE_HEIGHT, GAUGE_LIVE_HEIGHT));
         assert!(gauge_active_at(10, 10) && !gauge_active_at(9, 10));
         assert!(plausible_reading_date(20260913) && !plausible_reading_date(20261341) && !plausible_reading_date(913));
     }

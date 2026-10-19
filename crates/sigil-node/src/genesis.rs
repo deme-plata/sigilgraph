@@ -209,7 +209,10 @@ pub fn build_genesis() -> Result<Block> {
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         // Genesis has no prior window to commit to.
         topology_commitment: None,
-        shielded_pool_root: None,
+        // sigil-g3 family (2026-10-19, found by the r3 rehearsal): the fifth root is required
+        // from block 0, genesis included — same rule as every minted block (`mint.rs`), over the
+        // staged genesis state. On g2 (activation 27M) this stays None, byte-identical.
+        shielded_pool_root: sigil_header::shielded_pool_root_required(0).then(|| staging.shielded_pool_root()),
         extensions: Vec::new(),
     };
 
@@ -243,6 +246,12 @@ mod tests {
     #[test]
     fn non_g2_genesis_commits_the_charter() {
         if NETWORK_ID == *b"sigil-g2" {
+            return;
+        }
+        // The sigil-g3 family commits NO charter: the draft binds mainnet, not a testnet
+        // (Viktor, 2026-10-19: "charter ok").
+        if sigil_header::IS_G3 {
+            assert_eq!(build_genesis().expect("genesis").header.fluxc_artifact_proof.artifact_blake3, [0u8; 32]);
             return;
         }
         let g = build_genesis().expect("genesis");

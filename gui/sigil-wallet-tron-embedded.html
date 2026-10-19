@@ -940,8 +940,10 @@ body.view-desktop .desktop{display:flex}
 
   function _seedHexOf(seed){ try{ if(typeof seed==='string') return seed; return Array.from(seed).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); }catch(_){ return ''; } }
   async function _scanEpochTail(e, live, seed, M, S, spent, gen){
-    var c=_shieldCache.epochs[e];
-    if(!c){ c={ scanned:0, mine:[], gross:0n, gen:gen||'v1' }; _shieldCache.epochs[e]=c; }
+    // 2026-10-19 (sigil-g3): the v7 record has its own key — on g3 v1 and v7 are both epoch 0.
+    var _ck=(gen==='v7'?'v7:':'')+e;
+    var c=_shieldCache.epochs[_ck];
+    if(!c){ c={ scanned:0, mine:[], gross:0n, gen:gen||'v1' }; _shieldCache.epochs[_ck]=c; }
     if(gen) c.gen=gen;
     // 2026-09-09: the first refresh fires ~200 ms BEFORE the WASM decoder finishes loading
     // (measured 3/3 fresh loads: wasm=false at 1.4 s, scanned=2482, mine=0). The old JS
@@ -1017,6 +1019,9 @@ body.view-desktop .desktop{display:flex}
     // 2026-10-13: the 256-bit generation, when the node has opened it (numbered live+1).
     var _pg=(anchor && window.__sigilPoolGenFrom) ? window.__sigilPoolGenFrom(anchor) : null;
     var v7ep=(_pg && _pg.v7) ? _pg.v7.epoch : null;
+    // 2026-10-19 (sigil-g3): a v1 generation that is closed AND never held a note (g3 closes it at
+    // genesis) has nothing to scan — and asking for "the live epoch" there returns the v7 leaves.
+    var v1Gone=!!(anchor && anchor.v1_live===false && anchor.notes===0 && !((anchor.sealed_epochs||[]).length));
 
     // The spent set is small next to the leaf list, but still worth not re-pulling
     // when nothing has been spent since last time.
@@ -1038,7 +1043,7 @@ body.view-desktop .desktop{display:flex}
     // background, one at a time, and the balance re-renders when they land.
     var tag=_scanCacheTag(seed, M);
     for(var pe=0; pe<live; pe++){ if(!_shieldCache.epochs[pe]){ var saved=_loadSealedEpoch(tag, pe); if(saved) _shieldCache.epochs[pe]=saved; } }
-    await _scanEpochTail(live, live, seed, M, S, spent);
+    if(!v1Gone) await _scanEpochTail(live, live, seed, M, S, spent);
     if(v7ep!==null) await _scanEpochTail(v7ep, live, seed, M, S, spent, 'v7');
     var sealedTotals={}; try{ (anchor.sealed_epochs||[]).forEach(function(se){ sealedTotals[se.epoch]=se.notes; }); }catch(_){}
     var pendingSealed=[];
@@ -1058,10 +1063,10 @@ body.view-desktop .desktop{display:flex}
     }
 
     var balance=0n, gross=0n, notes=0, sealed=0, v7notes=0;
-    var _eps=[]; for(var ei=0;ei<=live;ei++) _eps.push(ei); if(v7ep!==null && _eps.indexOf(v7ep)<0) _eps.push(v7ep);
-    for(var ex=0;ex<_eps.length;ex++){ var ee=_eps[ex];
-      var c=_shieldCache.epochs[ee]; if(!c) continue;
-      if(ee!==live && ee!==v7ep && c.scanned>0) sealed++;
+    var _eps=[]; if(!v1Gone){ for(var ei=0;ei<=live;ei++) _eps.push({key:ei, ep:ei}); } if(v7ep!==null) _eps.push({key:'v7:'+v7ep, ep:v7ep});
+    for(var ex=0;ex<_eps.length;ex++){ var ee=_eps[ex].ep;
+      var c=_shieldCache.epochs[_eps[ex].key]; if(!c) continue;
+      if(c.gen!=='v7' && ee!==live && c.scanned>0) sealed++;
       gross+=c.gross;
       for(var i=0;i<c.mine.length;i++){
         var n=c.mine[i], isSpent=false;
@@ -3617,7 +3622,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var Wc=window.sigilShieldWasm;
         if(Wc && Wc.sealNoteToSelf && req.change_index!==null && req.change_index!==undefined
            && Array.isArray(req.note_ciphertexts) && req.note_ciphertexts.length>1 && !req.note_ciphertexts[1]){
-          req.note_ciphertexts[1]=Wc.sealNoteToSelf(seedHex, req.change_index, String(req.change_value));
+          // 2026-10-19 (sigil-g3): a v7 change note needs the v7 envelope, or no v7 scanner opens it.
+          req.note_ciphertexts[1]=(V7 && Wc.sealNoteToSelfV7) ? Wc.sealNoteToSelfV7(seedHex, req.change_index, String(req.change_value))
+                                                  : Wc.sealNoteToSelf(seedHex, req.change_index, String(req.change_value));
         }
       }catch(e){ try{ console.warn('change not sealed to self:', e&&e.message||e); }catch(_){} }
 

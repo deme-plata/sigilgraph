@@ -2652,6 +2652,9 @@ mod v7_gate_tests {
     /// commits that block — and never on a thread that did not lower the gate.
     #[test]
     fn v7_activates_exactly_at_the_gate_and_is_idempotent() {
+        if crate::shielded::v7_tests::dual_generation_only("v7_activates_exactly_at_the_gate_and_is_idempotent") {
+            return;
+        }
         let mut state = SigilState::new();
         let empty = |h: u64| StateTransition { at_height: h, mutations: vec![] };
         sigil_header::override_v7_pool_activation_for_simulation(10);

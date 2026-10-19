@@ -167,6 +167,20 @@ LBIN="target/release/sigil-top"; WBIN="$WIN_TARGET_DIR/x86_64-pc-windows-gnu/rel
 [ -x "$LBIN" ] || { echo "✗ missing $LBIN"; exit 1; }
 [ -s "$WBIN" ] || { echo "✗ missing $WBIN"; exit 1; }
 "$LBIN" version 2>/dev/null | grep -q "v$VER" || { echo "✗ built binary is not v$VER"; exit 1; }
+# ── network guard (2026-10-19, g3 reset): the chain is fixed at BUILD time by SIGIL_NETWORK, and its
+# default is g2 — so without this a "g3 release" could silently ship g2 programs to every install.
+EXPECT_NET="${SIGIL_EXPECT_NETWORK:-${SIGIL_NETWORK:-sigil-g2}}"
+NID=$("$LBIN" network-id 2>/dev/null || true)
+case "$NID" in "header=$EXPECT_NET net=$EXPECT_NET "*) echo "  ✓ linux binary is $EXPECT_NET ($NID)";;
+  *) echo "✗ linux binary reports '$NID', expected $EXPECT_NET — NOT signing or publishing"; exit 1;; esac
+for TD in "$WIN_TARGET_DIR/x86_64-pc-windows-gnu/release" $([ "$WANT_ARM" = 1 ] && echo "$ARM_TARGET_DIR/aarch64-unknown-linux-musl/release"); do
+  for CR in sigil-header sigil-net; do
+    REC=$(ls -t "$TD"/build/$CR-*/output 2>/dev/null | head -1)
+    GOT=$(grep -h '^cargo:rustc-env=SIGIL_NET_ID=' "$REC" 2>/dev/null | cut -d= -f3)
+    [ "$GOT" = "$EXPECT_NET" ] || { echo "✗ $TD: newest $CR build record says '$GOT', expected $EXPECT_NET — NOT signing or publishing"; exit 1; }
+  done
+  echo "  ✓ $(basename "$(dirname "$TD")") build records: $EXPECT_NET"
+done
 ABIN="$ARM_TARGET_DIR/aarch64-unknown-linux-musl/release/sigil-top"
 if [ "$WANT_ARM" = 1 ]; then
   [ -s "$ABIN" ] || { echo "✗ missing $ABIN"; exit 1; }

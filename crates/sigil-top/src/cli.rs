@@ -22,6 +22,14 @@ pub(crate) fn dispatch(argv: &[String]) -> bool {
         // Print the same `v{VERSION}` the header shows, so that grep is
         // deterministic and users get a real version command.
         Some("version") | Some("--version") | Some("-V") => { println!("sigil-top v{VERSION}"); return true; }
+        // 2026-10-19: the chain this binary was BUILT for — compiled in, no node asked. Same format and
+        // exit code as `sigil-node network-id`; the release ceremony refuses to sign on a mismatch.
+        Some("network-id") => {
+            let (h, n) = (sigil_header::NETWORK_ID_STR, sigil_net::NETWORK_ID_STR);
+            println!("header={h} net={n} g3_rules={}", sigil_header::IS_G3);
+            if h != n { std::process::exit(1); }
+            return true;
+        }
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return true; }

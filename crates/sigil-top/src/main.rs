@@ -269,6 +269,9 @@ mod app; #[allow(unused_imports)] use app::*;
 mod tui_loop; #[allow(unused_imports)] use tui_loop::*;
 mod cli;
 mod top_core; #[allow(unused_imports)] use top_core::*;
+// 10.4.22: one wallet everywhere — the same recovery phrase as sigilgraph.org and the phone app.
+#[cfg(feature = "shield-register")]
+mod wallet_phrase;
 pub(crate) use startup_util::{boot_trace, persist_sync_mode, read_sync_mode};
 
 fn main() {
@@ -312,6 +315,10 @@ fn main() {
             if old.exists() { let _ = std::fs::remove_file(&old); }
         }
     }
+    // 10.4.22: Windows has no HOME — make the user's profile folder the home before anything reads it
+    // (keys used to land in C:\root\.flux, readable by every user of the PC). See wallet_phrase.rs.
+    #[cfg(feature = "shield-register")]
+    if argv.first().map(|s| s.as_str()) != Some("--selfcheck") { wallet_phrase::adopt_windows_home(); }
     if cli::dispatch(&argv) { return; }
     // 2026-08-24 (sync-then-produce bridge, operator-directed: "work on unifiyhing
     // the sigil top node so that i can produce blocks and actual is a real node ...
@@ -455,6 +462,12 @@ fn main() {
     // DEFAULT — the custom ratatui dashboard (Quillon-graph-node styled, multi-panel).
     // ratatui owns all box-drawing + layout, so alignment can never regress.
     let _ = cfg.tui; // --tui kept as an explicit alias; it's the default now
+    // 10.4.22: no wallet yet? ask (use my sigilgraph.org / phone wallet, or make one) before the TUI.
+    #[cfg(feature = "shield-register")]
+    wallet_phrase::first_run_choice();
+    // 10.4.22: no wallet yet? ask (use my sigilgraph.org / phone wallet, or make one) before the TUI.
+    #[cfg(feature = "shield-register")]
+    wallet_phrase::first_run_choice();
     boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
         boot_trace(&format!("run_tui returned Err: {e}"));

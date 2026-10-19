@@ -162,13 +162,73 @@ const PRIVATE_BROWSERS_MAC: &[(&str, &str)] = &[
     ("Microsoft Edge", "--inprivate"),
 ];
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const PRIVATE_BROWSERS_WIN: &[(&str, &str)] = &[
     ("chrome", "--incognito"),
     ("msedge", "--inprivate"),
     ("brave", "--incognito"),
     ("firefox", "-private-window"),
 ];
+
+/// Which of [`PRIVATE_BROWSERS_WIN`] a Windows URL-handler ProgId belongs to
+/// (`ChromeHTML`, `MSEdgeHTM`, `BraveHTML`, `FirefoxURL-308046B0AF4A39CB`, …).
+#[cfg(any(target_os = "windows", test))]
+fn windows_browser_for_progid(progid: &str) -> Option<&'static str> {
+    let p = progid.to_ascii_lowercase();
+    if p.contains("chrome") { Some("chrome") }
+    else if p.contains("msedge") || p.contains("edge") { Some("msedge") }
+    else if p.contains("brave") { Some("brave") }
+    else if p.contains("firefox") { Some("firefox") }
+    else { None }
+}
+
+/// Where each known browser installs on Windows, relative to `%ProgramFiles%`,
+/// `%ProgramFiles(x86)%` and `%LOCALAPPDATA%`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_browser_relpaths(bin: &str) -> &'static [&'static str] {
+    match bin {
+        "chrome" => &[r"Google\Chrome\Application\chrome.exe"],
+        "msedge" => &[r"Microsoft\Edge\Application\msedge.exe"],
+        "brave" => &[r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+        "firefox" => &[r"Mozilla Firefox\firefox.exe"],
+        _ => &[],
+    }
+}
+
+/// Installed browsers as `(exe, private flag)`, the user's default (per the registry's
+/// http UserChoice) first. Only paths that exist — so every entry can actually start.
+#[cfg(target_os = "windows")]
+fn windows_installed_browsers() -> Vec<(std::path::PathBuf, &'static str)> {
+    let default = Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice", "/v", "ProgId"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .find(|l| l.contains("ProgId"))
+                .and_then(|l| l.split_whitespace().last().map(str::to_string))
+        })
+        .and_then(|id| windows_browser_for_progid(&id));
+    let roots: Vec<std::path::PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+        .iter()
+        .filter_map(|v| std::env::var_os(v).map(std::path::PathBuf::from))
+        .collect();
+    let mut order: Vec<&(&str, &str)> = PRIVATE_BROWSERS_WIN.iter().collect();
+    if let Some(d) = default {
+        order.sort_by_key(|(bin, _)| *bin != d);
+    }
+    let mut out = Vec::new();
+    for (bin, flag) in order {
+        for rel in windows_browser_relpaths(bin) {
+            if let Some(exe) = roots.iter().map(|r| r.join(rel)).find(|p| p.is_file()) {
+                out.push((exe, *flag));
+                break;
+            }
+        }
+    }
+    out
+}
 
 /// Open a URL in a **private / incognito** window.
 ///
@@ -261,18 +321,15 @@ pub(crate) fn open_browser_private(url: &str) -> bool {
         }
         #[cfg(target_os = "windows")]
         {
-            for (bin, flag) in PRIVATE_BROWSERS_WIN {
-                if Command::new(bin).arg(flag).arg(&url).spawn().is_ok() {
-                    return;
-                }
-            }
-            // Not on PATH is normal on Windows; let the shell resolve the app.
-            for (bin, flag) in PRIVATE_BROWSERS_WIN {
-                if Command::new("cmd")
-                    .args(["/c", "start", "", bin, flag, &url])
-                    .spawn()
-                    .is_ok()
-                {
+            // 2026-10-09 (Viktor, Windows, v10.4.19: "[W] used to open the browser, now it only
+            // shows the link"). The old second loop ran `cmd /c start "" chrome --incognito <url>`
+            // and returned on success — but what succeeds there is starting `cmd`, ALWAYS, whether
+            // or not Chrome is installed. Without Chrome, Windows could not find it and nothing
+            // opened, and the loop never reached Edge/Firefox or the default handler. Spawn the
+            // real executable instead (a missing one fails, so the next is tried), the user's
+            // default browser first.
+            for (exe, flag) in windows_installed_browsers() {
+                if Command::new(&exe).arg(flag).arg(&url).spawn().is_ok() {
                     return;
                 }
             }
@@ -537,5 +594,20 @@ mod tests {
         assert_eq!(recorded.trim(), "https://example.invalid/?addr=test",
             "xdg-open must receive exactly the URL, no --incognito/--private-window flag");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod windows_browser_tests {
+    #[test]
+    fn windows_default_browser_progids_map_to_known_browsers() {
+        assert_eq!(super::windows_browser_for_progid("ChromeHTML"), Some("chrome"));
+        assert_eq!(super::windows_browser_for_progid("MSEdgeHTM"), Some("msedge"));
+        assert_eq!(super::windows_browser_for_progid("BraveHTML"), Some("brave"));
+        assert_eq!(super::windows_browser_for_progid("FirefoxURL-308046B0AF4A39CB"), Some("firefox"));
+        assert_eq!(super::windows_browser_for_progid("OperaStable"), None);
+        for (bin, _) in super::PRIVATE_BROWSERS_WIN {
+            assert!(!super::windows_browser_relpaths(bin).is_empty(), "{bin} has no install path");
+        }
     }
 }

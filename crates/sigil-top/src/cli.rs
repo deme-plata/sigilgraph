@@ -25,6 +25,9 @@ pub(crate) fn dispatch(argv: &[String]) -> bool {
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return true; }
+        // 10.4.22: `sigil-top wallet [show | phrase | import | new [--replace]]` — one wallet everywhere.
+        #[cfg(feature = "shield-register")]
+        Some("wallet") => { crate::wallet_phrase::run_cli(&argv[1..]); return true; }
         // Windows launch-at-login control: `sigil-top autostart on|off|status`. The TUI also
         // exposes this via the tray's "Start at login" checkbox.
         Some("autostart") => {

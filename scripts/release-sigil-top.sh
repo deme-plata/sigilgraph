@@ -175,8 +175,8 @@ case "$NID" in "header=$EXPECT_NET net=$EXPECT_NET "*) echo "  ✓ linux binary 
   *) echo "✗ linux binary reports '$NID', expected $EXPECT_NET — NOT signing or publishing"; exit 1;; esac
 for TD in "$WIN_TARGET_DIR/x86_64-pc-windows-gnu/release" $([ "$WANT_ARM" = 1 ] && echo "$ARM_TARGET_DIR/aarch64-unknown-linux-musl/release"); do
   for CR in sigil-header sigil-net; do
-    REC=$(ls -t "$TD"/build/$CR-*/output 2>/dev/null | head -1)
-    GOT=$(grep -h '^cargo:rustc-env=SIGIL_NET_ID=' "$REC" 2>/dev/null | cut -d= -f3)
+    REC=$(ls -t "$TD"/build/$CR-*/output 2>/dev/null | head -1 || true)
+    GOT=$(grep -h '^cargo:rustc-env=SIGIL_NET_ID=' "$REC" 2>/dev/null | cut -d= -f3 || true)
     [ "$GOT" = "$EXPECT_NET" ] || { echo "✗ $TD: newest $CR build record says '$GOT', expected $EXPECT_NET — NOT signing or publishing"; exit 1; }
   done
   echo "  ✓ $(basename "$(dirname "$TD")") build records: $EXPECT_NET"

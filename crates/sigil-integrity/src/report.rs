@@ -17,6 +17,9 @@ pub struct NodeStatus {
     pub lag_blocks: Option<i64>,
     pub agreements: u64,
     pub disagreements: u64,
+    /// 2026-10-20: live-roots mismatches that did not persist — `/v1/integrity` reads its height and its
+    /// roots separately, so these are read races, not disagreements (see [`ROOTS_PERSIST`]).
+    pub roots_races: u64,
     pub last_agree_height: Option<u64>,
     pub last_disagree: Option<Disagreement>,
     pub errors: u64,
@@ -58,7 +61,11 @@ pub struct Report {
     pub caveat: &'static str,
 }
 
-pub const CAVEAT: &str = "Verdicts are drawn only at EQUAL height and only from BLOCK HASHES (exact; a hash commits to the header's state roots). Live roots from /v1/integrity are read racily against the height and are reported as ROOTS-RACE, never as a fork. A hash mismatch that persists across ≥3 distinct heights is a fork. `lag_blocks` is that node's applied height against the highest applied height seen; a follower syncing from genesis lags by design.";
+/// Live-roots mismatches at this many matched heights in a row, with no agreement between them, are a real
+/// disagreement (ROOTS-DIVERGED); fewer are read races, counted in `roots_races` only.
+pub const ROOTS_PERSIST: usize = 3;
+
+pub const CAVEAT: &str = "Verdicts are drawn only at EQUAL height and only from BLOCK HASHES (exact; a hash commits to the header's state roots). Live roots from /v1/integrity are read racily against the height: a mismatch counts in `roots_races`, and only 3 matched heights in a row without an agreement between them count as a disagreement (ROOTS-DIVERGED) — never as a fork. A hash mismatch that persists across ≥3 distinct heights is a fork. `lag_blocks` is that node's applied height against the highest applied height seen; a follower syncing from genesis lags by design.";
 
 pub struct Tracker {
     pub nodes: BTreeMap<String, NodeStatus>,
@@ -66,6 +73,8 @@ pub struct Tracker {
     pub started_ms: u64,
     /// distinct heights at which `node` disagreed, most recent first — the fork rule counts these
     disagree_heights: BTreeMap<String, Vec<u64>>,
+    /// matched heights at which `node`'s live roots differed since its last roots agreement
+    roots_streak: BTreeMap<String, Vec<u64>>,
 }
 
 impl Tracker {
@@ -74,10 +83,50 @@ impl Tracker {
         for s in specs {
             nodes.insert(s.name.clone(), NodeStatus { url: s.url.clone(), transport: "poll".into(), ..Default::default() });
         }
-        Self { nodes, alarms: Vec::new(), started_ms: now_ms(), disagree_heights: BTreeMap::new() }
+        Self { nodes, alarms: Vec::new(), started_ms: now_ms(), disagree_heights: BTreeMap::new(), roots_streak: BTreeMap::new() }
+    }
+
+    /// 2026-10-20 (Viktor: "fix the integrity monitor false disagreements"): a live-roots mismatch is a READ
+    /// RACE until it persists. On g3 the monitor counted 3–10 "disagreements" per node, every one `roots`,
+    /// while all six chain.logs were byte-identical at each of those heights. A mismatch now counts in
+    /// `roots_races`; [`ROOTS_PERSIST`] matched heights in a row with no agreement between them count as one
+    /// disagreement and raise ROOTS-DIVERGED. An agreement resets the streak.
+    fn note_roots(&mut self, node: &str, height: u64, v: &Verdict) {
+        let mut diverged: Option<String> = None;
+        {
+            let streak = self.roots_streak.entry(node.to_string()).or_default();
+            let st = self.nodes.entry(node.to_string()).or_default();
+            match v {
+                Verdict::First => {}
+                Verdict::Agree { .. } => {
+                    st.agreements += 1;
+                    st.last_agree_height = Some(height.max(st.last_agree_height.unwrap_or(0)));
+                    streak.clear();
+                }
+                Verdict::Disagree { against } => {
+                    st.roots_races += 1;
+                    if !streak.contains(&height) {
+                        streak.push(height);
+                    }
+                    if streak.len() >= ROOTS_PERSIST {
+                        st.disagreements += 1;
+                        st.last_disagree = Some(Disagreement { height, what: "roots".into(), against: against.clone(), ts_ms: now_ms() });
+                        diverged = Some(format!("live roots differ from {} at {} matched heights in a row (latest {height}) — not a read race", against.join(","), streak.len()));
+                        streak.clear();
+                    }
+                }
+            }
+        }
+        if let Some(d) = diverged {
+            self.alarm("ROOTS-DIVERGED", node, &d);
+        }
     }
 
     pub fn note_verdict(&mut self, node: &str, height: u64, what: &str, v: &Verdict) {
+        if what == "roots" {
+            self.note_roots(node, height, v);
+            return;
+        }
         let mut pending: Option<(String, String)> = None;
         {
             let st = self.nodes.entry(node.to_string()).or_default();
@@ -94,22 +143,18 @@ impl Tracker {
                     // reads its height and its live roots separately, so at 8–110 blk/s the pair
                     // is routinely a block apart and "roots differ" fired FORK on all three nodes
                     // while their finalized spines agreed at 180/180 common heights. The hash is
-                    // exact at its height and commits to the roots; roots stay an inconclusive
-                    // side channel (kind ROOTS-RACE) that never counts toward the fork rule.
-                    if what == "roots" {
-                        pending = Some(("ROOTS-RACE".to_string(), format!("live roots at height {height} differ from {} — inconclusive (height/roots read racily); the hash rule decides", against.join(","))));
-                    } else {
-                        let hs = self.disagree_heights.entry(node.to_string()).or_default();
-                        if !hs.contains(&height) {
-                            hs.insert(0, height);
-                            hs.truncate(16);
-                        }
-                        pending = Some(if hs.len() >= 3 {
-                            ("FORK".to_string(), format!("{what} hash differs from {} at {} distinct heights (latest {height})", against.join(","), hs.len()))
-                        } else {
-                            ("MISMATCH".to_string(), format!("{what} hash at height {height} differs from {} — inconclusive until it repeats", against.join(",")))
-                        });
+                    // exact at its height and commits to the roots; roots are handled in
+                    // note_roots (2026-10-20) and never count toward the fork rule.
+                    let hs = self.disagree_heights.entry(node.to_string()).or_default();
+                    if !hs.contains(&height) {
+                        hs.insert(0, height);
+                        hs.truncate(16);
                     }
+                    pending = Some(if hs.len() >= 3 {
+                        ("FORK".to_string(), format!("{what} hash differs from {} at {} distinct heights (latest {height})", against.join(","), hs.len()))
+                    } else {
+                        ("MISMATCH".to_string(), format!("{what} hash at height {height} differs from {} — inconclusive until it repeats", against.join(",")))
+                    });
                 }
             }
         }
@@ -200,6 +245,24 @@ mod tests {
         }
         assert!(!t2.alarms.iter().any(|a| a.kind == "FORK"));
         assert!(t2.alarms.iter().any(|a| a.kind == "MISMATCH"));
+    }
+
+    #[test]
+    fn a_roots_race_is_not_a_disagreement_until_it_persists() {
+        let mut t = tr();
+        let d = Verdict::Disagree { against: vec!["a".into()] };
+        t.note_verdict("b", 10, "roots", &d);
+        t.note_verdict("b", 11, "roots", &Verdict::Agree { with: 1 }); // the race resolved
+        t.note_verdict("b", 12, "roots", &d);
+        t.note_verdict("b", 12, "roots", &d); // the same height again is not a second one
+        assert_eq!((t.nodes["b"].disagreements, t.nodes["b"].roots_races), (0, 3));
+        assert!(t.alarms.is_empty());
+        for h in [13u64, 14] {
+            t.note_verdict("b", h, "roots", &d);
+        }
+        assert_eq!(t.nodes["b"].disagreements, 1);
+        assert!(t.alarms.iter().any(|a| a.kind == "ROOTS-DIVERGED" && a.node == "b"));
+        assert!(!t.alarms.iter().any(|a| a.kind == "FORK"));
     }
 
     #[test]

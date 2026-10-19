@@ -171,8 +171,37 @@ static FULL_NODE_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// The g2 producer's hybrid ids, in `sigil-node`'s `SIGIL_TRUSTED_PRODUCER_ID_HEX` format
 /// (`hex[@from],…`): the key retired on 2026-09-15 (signed every checkpoint before block
 /// 18,874,368) and the rotated one (from there on). Same list happysrv and node3 carry.
-pub const DEFAULT_TRUSTED_PRODUCER_IDS: &str =
+pub const G2_TRUSTED_PRODUCER_IDS: &str =
     "ccb24eab7f4d975d9aac142837bcea8a4f8a559b6497c7fbe83b91118d78bb5b,0512706efc948876251f9c5010106dea11cf3cdc49d9193ce98a4d6e9f222fb4";
+
+/// The g3 producer's hybrid id: a NEW key made for the g3 launch (2026-10-19), never used on
+/// g2. blake3(sqisign_pk || ed25519_pk), the same rule `sigil-node` checks.
+pub const G3_TRUSTED_PRODUCER_IDS: &str =
+    "43effcd6eef0d42088b3c83c9acd7c45b51661abd8c7133cb4bf97b86207c745";
+
+/// What a downloaded node trusts when the operator set nothing: the producer of the chain this
+/// binary was built for. A g3 binary never trusts the g2 keys and the other way round.
+pub const DEFAULT_TRUSTED_PRODUCER_IDS: &str =
+    if sigil_header::IS_G3 { G3_TRUSTED_PRODUCER_IDS } else { G2_TRUSTED_PRODUCER_IDS };
+
+#[cfg(test)]
+mod trusted_id_tests {
+    use super::*;
+    #[test]
+    fn default_trusted_ids_follow_the_network() {
+        if sigil_header::IS_G3 {
+            assert_eq!(DEFAULT_TRUSTED_PRODUCER_IDS, G3_TRUSTED_PRODUCER_IDS);
+            assert!(!DEFAULT_TRUSTED_PRODUCER_IDS.contains("0512706e"));
+        } else {
+            assert_eq!(DEFAULT_TRUSTED_PRODUCER_IDS, G2_TRUSTED_PRODUCER_IDS);
+        }
+        for id in DEFAULT_TRUSTED_PRODUCER_IDS.split(',') {
+            let hex = id.split('@').next().unwrap();
+            assert_eq!(hex.len(), 64);
+            assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+    }
+}
 
 /// The operator asked for a full node (F key / persisted "full" / `SIGIL_TOP_PRODUCE=1`).
 pub fn request_full_node() {

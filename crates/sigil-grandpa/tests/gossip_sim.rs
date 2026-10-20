@@ -61,10 +61,27 @@ struct Harness {
     tips: HashMap<u8, (Hash, Number)>,
     errors: Arc<Mutex<Vec<String>>>,
     last_tick: Instant,
+    /// Every block grown: hash → (parent, number). What the network as a whole holds.
+    parents: HashMap<Hash, (Hash, Number)>,
+    /// D3 (2026-10-20): `(voter, hashes)` asks from each voter's block fetcher, served by
+    /// [`Harness::serve_fetches`] the way `sigil-node` answers a by-hash request.
+    fetch_q: Arc<Mutex<Vec<(usize, Vec<Hash>)>>>,
+    fetch_on: bool,
+    /// Blocks handed out by `serve_fetches`.
+    served: u64,
 }
+
+/// What one by-hash answer carries at most (`sigil-node/src/parent_fetch.rs`, `BY_HASH_MAX`).
+const BY_HASH_MAX: usize = 64;
 
 impl Harness {
     fn new() -> Self {
+        Self::with_fetch(false)
+    }
+
+    /// `fetch`: give every voter a block fetcher (D3); `false` = the pre-D3 node, which never
+    /// asks for the blocks its held votes name.
+    fn with_fetch(fetch: bool) -> Self {
         let bus = Arc::new(Bus::default());
         bus.0.lock().online = vec![true; 4];
         let voters = VoterSet::new((0..4u8).map(|i| (key(i).verifying_key().to_bytes(), 1))).unwrap();
@@ -82,6 +99,10 @@ impl Harness {
             tips: HashMap::new(),
             errors: Arc::new(Mutex::new(Vec::new())),
             last_tick: Instant::now(),
+            parents: HashMap::new(),
+            fetch_q: Arc::new(Mutex::new(Vec::new())),
+            fetch_on: fetch,
+            served: 0,
         };
         for i in 0..4usize {
             let b = bus.clone();
@@ -102,11 +123,62 @@ impl Harness {
             h.envs.push(env);
             h.guards.push(guard);
             h.aborts.push(None);
+            h.wire_fetch(i);
         }
         for i in 0..4 {
             h.start(i, false);
         }
         h
+    }
+
+    /// D3: voter `i`'s fetcher puts its asks on the harness queue (the node's: a channel to
+    /// its main loop, which sends a by-hash request to a peer).
+    fn wire_fetch(&self, i: usize) {
+        if !self.fetch_on {
+            return;
+        }
+        let q = self.fetch_q.clone();
+        self.envs[i].set_block_fetcher(Box::new(move |hs| q.lock().push((i, hs))));
+    }
+
+    /// Answer every queued ask like a peer answers a by-hash request: the asked blocks with
+    /// their ancestors, oldest first, at most [`BY_HASH_MAX`] per answer. (A real peer cannot
+    /// see what the asker holds; stopping at the asker's first known ancestor only saves this
+    /// harness work — the cap is what bounds a hop.) An offline voter's ask goes nowhere; its
+    /// fetcher asks again later.
+    fn serve_fetches(&mut self) {
+        let asks: Vec<(usize, Vec<Hash>)> = std::mem::take(&mut *self.fetch_q.lock());
+        let online = self.bus.0.lock().online.clone();
+        for (i, hashes) in asks {
+            if !online[i] {
+                continue;
+            }
+            let mut answer: Vec<(Hash, Hash, Number)> = Vec::new();
+            {
+                let tree = self.envs[i].tree.lock();
+                'asked: for h in hashes {
+                    let mut cur = h;
+                    let mut run = Vec::new();
+                    while let Some(&(p, n)) = self.parents.get(&cur) {
+                        if answer.len() + run.len() >= BY_HASH_MAX {
+                            answer.extend(run.into_iter().rev());
+                            break 'asked;
+                        }
+                        run.push((cur, p, n));
+                        if p == GENESIS || tree.contains(&p) {
+                            break;
+                        }
+                        cur = p;
+                    }
+                    answer.extend(run.into_iter().rev());
+                }
+            }
+            let mut tree = self.envs[i].tree.lock();
+            for (hh, p, n) in &answer {
+                tree.insert_or_park(*hh, *p, *n);
+            }
+            self.served += answer.len() as u64;
+        }
     }
 
     /// `from_guard`: restart the way the node will — above the newest round this voter ever
@@ -168,6 +240,7 @@ impl Harness {
         let (ph, pn) = *self.tips.get(&branch).unwrap_or(&parent);
         let b = (bh(branch, pn + 1), pn + 1);
         assert!(self.truth.insert(b.0, ph, b.1));
+        self.parents.insert(b.0, (ph, b.1));
         for &i in to {
             // Blocks arrive through the node's sync, not the vote gossip; parking handles order.
             self.envs[i].tree.lock().insert_or_park(b.0, ph, b.1);
@@ -205,6 +278,7 @@ impl Harness {
         ));
         self.nets[i] = net;
         self.envs[i] = env;
+        self.wire_fetch(i);
         if reannounce {
             self.envs[i].reannounce_recorded_votes(2);
         }
@@ -281,6 +355,7 @@ impl Harness {
             for _ in 0..4 {
                 self.pump();
                 self.pool.run_until_stalled();
+                self.serve_fetches();
             }
             self.pool.run_until(futures_timer::Delay::new(Duration::from_millis(5)));
         }
@@ -594,6 +669,7 @@ fn restart_like_node(h: &mut Harness, i: usize, dir: &std::path::Path, holds: &[
     let env = Arc::new(SigilEnv::new(tree, key(i as u8), GENESIS, SET_ID, net.clone(), h.guards[i].clone(), GOSSIP, fin, h.log.clone()));
     h.nets[i] = net.clone();
     h.envs[i] = env.clone();
+    h.wire_fetch(i);
     let (last_round, last_votes, last_base) = match net.completed() {
         Some((r, base, votes)) if r > 0 => {
             if env.tree.lock().contains(&base.0) {
@@ -666,12 +742,13 @@ struct S1Outcome {
 
 /// `hole`: after the restart, voter 1 no longer holds branch 4 (the branch voter 2 prevoted on
 /// in the round they were restarted in) — S1b, see the second test.
-fn s1_wedge(hole: bool) -> S1Outcome {
+/// `fetch`: the voters ask for the blocks their held messages name (D3, 2026-10-20).
+fn s1_wedge(hole: bool, fetch: bool) -> S1Outcome {
     sim_log_on();
-    let dir = std::env::temp_dir().join(format!("sigil-grandpa-s1-{}-{hole}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sigil-grandpa-s1-{}-{hole}-{fetch}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut h = Harness::new();
+    let mut h = Harness::with_fetch(fetch);
     for (i, n) in h.nets.iter().enumerate() {
         n.use_round_file(dir.join(format!("round-{i}.json")));
     }
@@ -796,8 +873,9 @@ fn s1_wedge(hole: bool) -> S1Outcome {
     let after = h.finalized();
     let tip = h.tips[&2].1;
     let rounds_after: Vec<u64> = h.nets.iter().map(|n| n.my_round()).collect();
-    eprintln!("S1(hole={hole}) step 5 after {:.1} s: tip H={tip}, finalized {before:?} → {after:?}, rounds {rounds_after:?}",
-        t2.elapsed().as_secs_f64());
+    eprintln!("S1(hole={hole}, fetch={fetch}) step 5 after {:.1} s: tip H={tip}, finalized {before:?} → {after:?}, rounds {rounds_after:?}; blocks asked {:?}, served {}",
+        t2.elapsed().as_secs_f64(),
+        h.envs.iter().map(|e| e.blocks_requested.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>(), h.served);
     for i in 0..4 {
         let r = h.nets[i].my_round();
         eprintln!("  voter {i} round {r} (completed {:?}), finalized {}: transport holds {:?}",
@@ -813,13 +891,10 @@ fn s1_wedge(hole: bool) -> S1Outcome {
 }
 
 /// S1 — the 10-17 wedge as the design specifies it: voters restarted after prevoting on different
-/// branches, and a fourth ~90 rounds behind that lacks the blocks of the catch-up round.
+/// branches, and a fourth ~90 rounds behind that lacks the blocks of the catch-up round. With D3
+/// (2026-10-20) the voters fetch those blocks, and all four must reach the tip again.
 ///
-/// IGNORED ON PURPOSE: the design (§6) says this control must FAIL on today's code and pass with
-/// D1–D3, so a normal `fluxc test` run stays green. Run it with
-/// `fluxc test -p sigil-grandpa --profile release-fast --test gossip_sim -- --ignored s1_`.
-///
-/// MEASURED 2026-10-18 (5 runs, 4 with the r1-shaped crash moment enforced): this does NOT
+/// Without D3 — MEASURED 2026-10-18 (5 runs, 4 with the r1-shaped crash moment enforced): this does NOT
 /// reproduce the r1 freeze. The three restarted voters resume "above round C with 6 of its votes"
 /// exactly as r1-r3 logged, repeat their round-C+1 prevotes on three branches, precommit the fork
 /// point, complete the round and finalize the growing branch again — every run to within 5-19
@@ -831,9 +906,8 @@ fn s1_wedge(hole: bool) -> S1Outcome {
 /// fork point), so every estimate IS the fork point. The quorum freeze needs a second voter that
 /// cannot place a vote's block: S1b.
 #[test]
-#[ignore = "S1 control: expected to fail until D3 (restart-liveness design 2026-10-17 §6)"]
 fn s1_restart_wedge_finality_resumes_to_the_tip() {
-    let o = s1_wedge(false);
+    let o = s1_wedge(false, true);
     let near = |f: &Number| *f + 40 >= o.tip;
     let quorum = o.after.iter().filter(|f| near(*f)).count();
     assert!(quorum >= 3, "QUORUM FROZEN: fork H={}, tip H={}, finalized {:?} -> {:?}, rounds {:?}",
@@ -860,14 +934,30 @@ fn s1_restart_wedge_finality_resumes_to_the_tip() {
 /// voter 1 pv only (r1: r1 pv+pc, r3 pv+pc, r2 pv only); voter 3 in round 5, finalized the fork
 /// point by commits, never caught up (r4: round 1442, finalized 7,452 by commits). Voter 1's
 /// finality tree lacks branch 4, so voter 2's prevote stays held and voter 1 never sees a GHOST.
+///
+/// With D3 (2026-10-20): voter 1 asks for branch 4 and voter 3 for the branches its catch-ups
+/// name; both must reach the tip again. The control below keeps the pre-D3 freeze on record.
 #[test]
-#[ignore = "S1b control: expected to fail until D3 (restart-liveness design 2026-10-17 §6)"]
 fn s1b_restart_wedge_with_a_missing_branch_finality_resumes_to_the_tip() {
-    let o = s1_wedge(true);
+    let o = s1_wedge(true, true);
     let near = |f: &Number| *f + 40 >= o.tip;
     let quorum = o.after.iter().filter(|f| near(*f)).count();
     assert!(quorum >= 3, "QUORUM FROZEN: fork H={}, tip H={}, finalized {:?} -> {:?}, rounds {:?}",
         o.fork_at, o.tip, o.before, o.after, o.rounds_after);
     assert!(o.after.iter().all(|f| near(f)), "voter(s) left behind: fork H={}, tip H={}, finalized {:?} -> {:?}, rounds {:?}",
         o.fork_at, o.tip, o.before, o.after, o.rounds_after);
+}
+
+/// S1b WITHOUT D3 — the control: the same wedge with no block fetcher must stay frozen (quorum
+/// pinned at the fork point). Kept so the fix is shown to be the fetch, not a change in the
+/// scenario. Slow and timing-dependent, so opt-in:
+/// `fluxc test -p sigil-grandpa --profile release-fast --test gossip_sim -- --ignored s1b_control`.
+#[test]
+#[ignore = "control (pre-D3 behaviour): slow, run explicitly"]
+fn s1b_control_without_block_fetch_stays_frozen() {
+    let o = s1_wedge(true, false);
+    let near = |f: &Number| *f + 40 >= o.tip;
+    let quorum = o.after.iter().filter(|f| near(*f)).count();
+    assert!(quorum < 3, "the pre-D3 wedge did NOT freeze this time: fork H={}, tip H={}, finalized {:?} -> {:?}",
+        o.fork_at, o.tip, o.before, o.after);
 }

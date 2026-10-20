@@ -35,8 +35,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 pub use finality_grandpa as fg;
@@ -85,6 +86,9 @@ pub struct SpineTree {
     /// Blocks whose parent has not arrived yet: missing parent → `(hash, number)`.
     parked: HashMap<Hash, Vec<(Hash, Number)>>,
     parked_count: usize,
+    /// The same, the other way round: parked block → the missing parent it waits on, so
+    /// [`SpineTree::missing_root`] walks a parked run down to the block to fetch.
+    parked_parent: HashMap<Hash, Hash>,
 }
 
 /// Most blocks parked waiting for a parent (a peer cannot grow this without bound).
@@ -99,7 +103,7 @@ impl SpineTree {
     pub fn with_root(root: Hash, number: Number) -> Self {
         let mut blocks = HashMap::new();
         blocks.insert(root, (None, number));
-        Self { blocks, children: HashMap::new(), parked: HashMap::new(), parked_count: 0 }
+        Self { blocks, children: HashMap::new(), parked: HashMap::new(), parked_count: 0, parked_parent: HashMap::new() }
     }
 
     /// Add `hash` at `number` under `parent`. Refused (false) if the parent is unknown or
@@ -113,6 +117,7 @@ impl SpineTree {
         while let Some(p) = stack.pop() {
             for (h, n) in self.parked.remove(&p).unwrap_or_default() {
                 self.parked_count = self.parked_count.saturating_sub(1);
+                self.parked_parent.remove(&h);
                 if self.insert_one(h, p, n) {
                     stack.push(h);
                 }
@@ -143,11 +148,32 @@ impl SpineTree {
         if self.blocks.contains_key(&parent) {
             return self.insert(hash, parent, number);
         }
-        if self.parked_count < MAX_PARKED {
+        if self.parked_count < MAX_PARKED && !self.parked_parent.contains_key(&hash) {
             self.parked.entry(parent).or_default().push((hash, number));
+            self.parked_parent.insert(hash, parent);
             self.parked_count += 1;
         }
         false
+    }
+
+    /// The block to fetch so that `h` can join the tree: `None` if `h` is already in;
+    /// otherwise the bottom of the parked run `h` sits on (the first parent nobody holds),
+    /// or `h` itself when it was never seen at all. Asking for `h` while it waits parked
+    /// would only fetch what is already here (the braid learned the same thing 10-08).
+    pub fn missing_root(&self, h: &Hash) -> Option<Hash> {
+        if self.blocks.contains_key(h) {
+            return None;
+        }
+        let mut cur = *h;
+        // A parked run is at most MAX_PARKED long; the bound only guards a malformed cycle.
+        for _ in 0..=MAX_PARKED {
+            match self.parked_parent.get(&cur) {
+                Some(p) if self.blocks.contains_key(p) => return None, // joins on its own
+                Some(p) => cur = *p,
+                None => return Some(cur),
+            }
+        }
+        Some(cur)
     }
 
     /// After `fin` is final: keep its ancestors down to `keep` heights below it and every
@@ -188,6 +214,7 @@ impl SpineTree {
             !v.is_empty()
         });
         self.parked_count = self.parked.values().map(|v| v.len()).sum::<usize>().min(before);
+        self.parked_parent = self.parked.iter().flat_map(|(p, v)| v.iter().map(move |(h, _)| (*h, *p))).collect();
     }
 
     pub fn len(&self) -> usize {
@@ -467,6 +494,14 @@ pub struct RestartState {
     pub last_finalized: (Hash, Number),
 }
 
+/// Asks the node for blocks by hash (2026-10-20, restart-liveness design D3). Called with the
+/// blocks a held vote, commit or catch-up names that this voter's tree lacks — already reduced to
+/// the bottom of each parked run ([`SpineTree::missing_root`]). It must not block: the node puts
+/// the hashes on a channel and fetches them off the voter's thread; the blocks then come in the
+/// usual way (the node's block-store hook → [`SpineTree::insert_or_park`]).
+pub type BlockFetcher = Box<dyn Fn(Vec<Hash>) + Send + Sync>;
+type SharedFetcher = Arc<Mutex<Option<BlockFetcher>>>;
+
 /// Test-only fault injection: drop this voter's next outgoing precommit AFTER the guard
 /// recorded it (= crashed between persist and broadcast).
 #[derive(Default, Debug)]
@@ -499,6 +534,10 @@ pub struct SigilEnv<T: Transport> {
     /// split finalized 114 → 485 at once); pruning must keep the chain down to the oldest
     /// base still in use, or every vote is "not a descendant of the round base" and ignored.
     recent_bases: Mutex<std::collections::VecDeque<Number>>,
+    /// D3: who fetches the blocks held messages name (none = nobody asks, the pre-D3 behaviour).
+    fetcher: SharedFetcher,
+    /// How many block hashes this voter has asked for so far (diagnostics, tests).
+    pub blocks_requested: Arc<AtomicU64>,
 }
 
 impl<T: Transport> SigilEnv<T> {
@@ -532,7 +571,21 @@ impl<T: Transport> SigilEnv<T> {
             preferred: Arc::new(Mutex::new(None)),
             on_finalize: Mutex::new(None),
             recent_bases: Mutex::new(std::collections::VecDeque::new()),
+            fetcher: Arc::new(Mutex::new(None)),
+            blocks_requested: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// D3 (2026-10-20): let this voter ask for the blocks its held messages name.
+    ///
+    /// Why: a vote, commit or catch-up that names a block this node does not hold is HELD
+    /// until the block arrives — and before D3 nothing ever asked for it. Simulated 10-18
+    /// (`gossip_sim.rs`, S1/S1b): a voter that lost one branch's blocks across a restart held
+    /// one prevote forever, never saw a 3-of-4 prevote majority, never precommitted, and with a
+    /// fourth voter that could not use any catch-up (it lacked every block they named) no round
+    /// reached 3 of 4 again — the frozen r1 of 10-17, round 1531.
+    pub fn set_block_fetcher(&self, f: BlockFetcher) {
+        *self.fetcher.lock() = Some(f);
     }
 
     /// Send again the votes this voter signed in its newest `rounds` rounds (2026-10-17).
@@ -577,6 +630,8 @@ impl<T: Transport> SigilEnv<T> {
             self.transport.subscribe_global(self.id),
             self.tree.clone(),
             self.gossip,
+            self.fetcher.clone(),
+            self.blocks_requested.clone(),
             move |g: &GlobalMsg| match g {
                 GlobalMsg::Commit(round, commit) => verify_commit_signatures(&genesis, set_id, *round, commit),
                 GlobalMsg::CatchUp(c) => verify_catch_up_signatures(&genesis, set_id, c),
@@ -628,6 +683,17 @@ const PRUNE_MARGIN: Number = 64;
 /// floods votes for blocks that never arrive costs at most this much memory.
 const MAX_HELD_VOTES: usize = 4096;
 
+/// D3: one block is asked for again at most this often (per held-message stream). Eight gossip
+/// periods: 160 ms in the simulation (20 ms gossip), 2 s on the node (250 ms default).
+fn refetch_every(gossip: Duration) -> Duration {
+    (gossip * 8).max(Duration::from_millis(100))
+}
+/// D3: most hashes in one ask — the node's by-hash round trip carries at most 64
+/// (`sigil-node/src/parent_fetch.rs`, `BY_HASH_MAX`).
+const FETCH_BATCH: usize = 64;
+/// D3: most distinct hashes remembered as asked, per stream.
+const MAX_ASKED: usize = 8192;
+
 /// Incoming messages, checked by `valid`, with one addition to the reference crate's
 /// contract: a message naming a block we do not hold yet is HELD (not dropped) and released
 /// once every block it names (`needs`) has arrived. The reference voter requires this for
@@ -635,17 +701,30 @@ const MAX_HELD_VOTES: usize = 4096;
 /// to a failed ancestry check; on a real network votes and certificates outrun block data.
 /// Measured in the split-view Byzantine test (2026-10-08): without it for commits, a voter
 /// was asked to finalize a block it had never seen.
+///
+/// D3 (2026-10-20): holding is not enough — a block that does not arrive by itself never
+/// arrives. While anything is held, the blocks it names that the tree lacks are handed to
+/// `fetcher` (the bottom of each parked run, each block at most once per [`refetch_every`],
+/// at most [`FETCH_BATCH`] per ask). Without a fetcher this is the pre-D3 behaviour exactly.
+#[allow(clippy::too_many_arguments)]
 fn held_until_known<M: Send + 'static>(
     mut rx: UnboundedReceiver<M>,
     tree: Arc<Mutex<SpineTree>>,
     gossip: Duration,
+    fetcher: SharedFetcher,
+    requested: Arc<AtomicU64>,
     valid: impl Fn(&M) -> bool + Send + 'static,
-    needs: impl Fn(&M) -> Vec<Hash> + Send + 'static,
+    needs: impl Fn(&M) -> Vec<Hash> + Send + Sync + 'static,
 ) -> Pin<Box<dyn Stream<Item = M> + Send>> {
     let mut held: Vec<M> = Vec::new();
     let mut tick: Option<futures_timer::Delay> = None;
     let mut closed = false;
-    let known = move |t: &SpineTree, m: &M| needs(m).iter().all(|h| t.contains(h));
+    let needs = Arc::new(needs);
+    let needs_k = needs.clone();
+    let known = move |t: &SpineTree, m: &M| (*needs_k)(m).iter().all(|h| t.contains(h));
+    let mut asked: HashMap<Hash, Instant> = HashMap::new();
+    let mut last_scan: Option<Instant> = None;
+    let every = refetch_every(gossip);
     Box::pin(stream::poll_fn(move |cx| {
         use std::task::Poll;
         if let Some(i) = {
@@ -654,6 +733,7 @@ fn held_until_known<M: Send + 'static>(
         } {
             return Poll::Ready(Some(held.remove(i)));
         }
+        let mut held_new = false;
         while !closed {
             match rx.poll_next_unpin(cx) {
                 Poll::Ready(Some(m)) => {
@@ -667,6 +747,7 @@ fn held_until_known<M: Send + 'static>(
                         held.remove(0);
                     }
                     held.push(m);
+                    held_new = true;
                 }
                 Poll::Ready(None) => closed = true,
                 Poll::Pending => break,
@@ -674,6 +755,43 @@ fn held_until_known<M: Send + 'static>(
         }
         if held.is_empty() {
             return if closed { Poll::Ready(None) } else { Poll::Pending };
+        }
+        // D3: ask for what the held messages wait on — at once for a newly held message,
+        // otherwise once per gossip period; each block at most once per `every`.
+        if held_new || last_scan.is_none_or(|t| t.elapsed() >= gossip) {
+            last_scan = Some(Instant::now());
+            let roots: Vec<Hash> = {
+                let t = tree.lock();
+                let mut named: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+                for m in &held {
+                    named.extend((*needs)(m));
+                }
+                let mut roots: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+                for h in &named {
+                    if let Some(r) = t.missing_root(h) {
+                        roots.insert(r);
+                    }
+                }
+                roots.into_iter().collect()
+            };
+            let now = Instant::now();
+            let want: Vec<Hash> = roots
+                .into_iter()
+                .filter(|h| asked.get(h).is_none_or(|t| now.duration_since(*t) >= every))
+                .take(FETCH_BATCH)
+                .collect();
+            if !want.is_empty() {
+                if let Some(f) = fetcher.lock().as_ref() {
+                    for h in &want {
+                        asked.insert(*h, now);
+                    }
+                    requested.fetch_add(want.len() as u64, Ordering::Relaxed);
+                    f(want);
+                }
+                if asked.len() > MAX_ASKED {
+                    asked.retain(|_, t| now.duration_since(*t) < every * 4);
+                }
+            }
         }
         // Re-check what is held on a short timer: blocks arrive outside this stream.
         let t = tick.get_or_insert_with(|| futures_timer::Delay::new(gossip / 2));
@@ -709,6 +827,8 @@ impl<T: Transport> fg::voter::Environment<Hash, Number> for SigilEnv<T> {
             self.transport.subscribe_round(round, self.id),
             self.tree.clone(),
             self.gossip,
+            self.fetcher.clone(),
+            self.blocks_requested.clone(),
             move |m| verify(&genesis, set_id, round, m),
             |m: &SigilSignedMessage| vec![target(&m.message).0],
         )
@@ -871,6 +991,56 @@ mod tests {
         assert!(t.is_equal_or_descendent_of(h(1), h(12)));
         assert_eq!(t.best_chain_containing(h(0)), Some((h(3), 3)));
         assert_eq!(t.best_chain_containing(h(12)), Some((h(12), 2)));
+    }
+
+    #[test]
+    fn the_missing_root_is_the_bottom_of_the_parked_run() {
+        let mut t = SpineTree::new(h(0));
+        assert_eq!(t.missing_root(&h(9)), Some(h(9)), "never seen: ask for the block itself");
+        assert!(!t.insert_or_park(h(5), h(4), 5));
+        assert_eq!(t.missing_root(&h(5)), Some(h(4)), "parked on 4: ask for 4, not for 5 again");
+        assert!(!t.insert_or_park(h(4), h(3), 4));
+        assert_eq!(t.missing_root(&h(5)), Some(h(3)), "the run is 4-5, its root waits on 3");
+        assert!(!t.insert_or_park(h(5), h(4), 5), "a block parked twice is parked once");
+        assert!(t.insert(h(1), h(0), 1));
+        assert!(t.insert(h(2), h(1), 2));
+        assert!(t.insert(h(3), h(2), 3));
+        assert!(t.contains(&h(5)), "the parked run followed its root in");
+        assert_eq!(t.missing_root(&h(5)), None);
+        assert_eq!(t.missing_root(&h(4)), None);
+    }
+
+    #[test]
+    fn a_held_message_asks_for_its_missing_root_once_per_interval_and_is_released() {
+        let tree = Arc::new(Mutex::new(SpineTree::new(h(0))));
+        tree.lock().insert_or_park(h(3), h(2), 3); // waits on 2, which nobody has sent
+        let asked = Arc::new(Mutex::new(Vec::<Vec<Hash>>::new()));
+        let a2 = asked.clone();
+        let fetcher: SharedFetcher = Arc::new(Mutex::new(Some(Box::new(move |v: Vec<Hash>| a2.lock().push(v)))));
+        let requested = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = futures::channel::mpsc::unbounded::<Hash>();
+        let mut s = held_until_known(rx, tree.clone(), Duration::from_millis(20), fetcher, requested.clone(), |_| true, |m: &Hash| vec![*m]);
+        tx.unbounded_send(h(3)).unwrap();
+        assert!(s.next().now_or_never().is_none(), "held: its block is parked");
+        assert_eq!(*asked.lock(), vec![vec![h(2)]], "asked once, for the missing ROOT");
+        assert!(s.next().now_or_never().is_none());
+        assert_eq!(asked.lock().len(), 1, "not asked again inside the interval");
+        // The fetched blocks arrive the usual way (the node's block-store hook).
+        tree.lock().insert(h(1), h(0), 1);
+        tree.lock().insert(h(2), h(1), 2);
+        assert_eq!(s.next().now_or_never(), Some(Some(h(3))), "released once its block is in");
+        assert_eq!(requested.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn without_a_fetcher_a_held_message_asks_nobody() {
+        let tree = Arc::new(Mutex::new(SpineTree::new(h(0))));
+        let requested = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = futures::channel::mpsc::unbounded::<Hash>();
+        let mut s = held_until_known(rx, tree, Duration::from_millis(20), Arc::new(Mutex::new(None)), requested.clone(), |_| true, |m: &Hash| vec![*m]);
+        tx.unbounded_send(h(7)).unwrap();
+        assert!(s.next().now_or_never().is_none());
+        assert_eq!(requested.load(Ordering::Relaxed), 0, "the pre-D3 behaviour, exactly");
     }
 
     #[test]

@@ -1559,7 +1559,12 @@ fn run_start() -> Result<()> {
         // fresh state snapshot, then exit. The next boot resumes at the exact tip: nothing
         // to re-mint, nothing to orphan. Bounded by SIGIL_SHUTDOWN_GRACE_MS (default
         // 15000) so a silent committee cannot hold the stop open past TimeoutStopSec.
+        #[cfg(unix)]
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        // 2026-10-20: Windows has no SIGTERM; Ctrl-Break is its stop request (sigil-top sends it to its node
+        // child). Same Option + recv() shape, so the select arm below is shared.
+        #[cfg(windows)]
+        let mut sigterm = tokio::signal::windows::ctrl_break().ok();
         let mut shutting_down: Option<std::time::Instant> = None;
         let shutdown_grace_ms: u64 = std::env::var("SIGIL_SHUTDOWN_GRACE_MS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);

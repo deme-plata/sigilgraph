@@ -209,8 +209,13 @@ pub fn prepare() -> std::io::Result<Plan> {
         set_default("SIGIL_WG_LISTEN_ADDR", &format!("/ip4/0.0.0.0/tcp/{p}"));
     }
     if std::env::var_os("SIGIL_MONEY_API").is_none() {
-        // Loopback only: a user's node API is for this machine's screen and wallet, not the internet.
-        let p = free_port("127.0.0.1", 18181..=18280).unwrap_or(18181);
+        // Loopback only: a user's node API is for this machine's screen and wallet, not the internet. Never the
+        // screen's own mining relay port (18186 by default, bound later): whichever of the two lost that race
+        // would break — measured risk on Epsilon, where 18181–18185 are taken and 18186 would be "free".
+        let relay = crate::mining_relay::port();
+        let p = (18181..=18280u16)
+            .find(|p| *p != relay && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+            .unwrap_or(18181);
         std::env::set_var("SIGIL_MONEY_API", format!("127.0.0.1:{p}"));
     }
     let api = api_url(&std::env::var("SIGIL_MONEY_API").unwrap_or_default());

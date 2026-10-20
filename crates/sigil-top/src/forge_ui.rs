@@ -250,7 +250,11 @@ fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
     let log = ps::log();
     let lines: Vec<Line<'static>> = match mood {
         Mood::Booting => {
-            let eta = if beat.rate > 1.0 && net > height {
+            // The first samples after a start are hand-over bursts, not a speed (2026-10-20: the card read 47 blk/s
+            // and "≈2.3 h" while the node really did ~850): no speed or ETA until 30 s of measuring.
+            let measuring = beat.t < 30.0;
+            let rate = if measuring { "measuring speed…".to_string() } else { rate.clone() };
+            let eta = if !measuring && beat.rate > 1.0 && net > height {
                 let s = (net - height) as f64 / beat.rate;
                 if s < 120.0 { format!(" · ≈{s:.0} s to go") } else if s < 7200.0 { format!(" · ≈{:.0} min to go", s / 60.0) } else { format!(" · ≈{:.1} h to go", s / 3600.0) }
             } else { String::new() };

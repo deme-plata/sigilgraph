@@ -244,8 +244,49 @@ pub fn api() -> String {
     std::env::var(API_ENV).unwrap_or_default()
 }
 
-/// Run the node in THIS process (`sigil-node start`). Returns its exit code.
+/// The node exits with this when another node already holds its data folder (BSD EX_TEMPFAIL).
+pub const EXIT_FOLDER_IN_USE: u8 = 75;
+const LOCK_FILE: &str = "sigil-top-node.lock";
+const API_FILE: &str = "sigil-top-node.api";
+
+/// One node per data folder. Neither the node nor its store locks anything, and two programs appending to one
+/// chain.log damage it — two sigil-top windows, or a self-update whose new node starts while the old one is still
+/// writing its shutdown snapshot. The node process holds an exclusive lock on `<data>/sigil-top-node.lock` for its
+/// whole life; the OS releases it when the process ends, crash included. `Err` = another node holds it. A
+/// filesystem that cannot lock at all only warns: the guard must never be the reason a node does not start.
+fn lock_data_dir(dir: &Path) -> Result<Option<std::fs::File>, String> {
+    let f = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("⚠ sigil-top node: cannot open {} ({e}) — running without the one-node-per-folder guard", dir.join(LOCK_FILE).display());
+            return Ok(None);
+        }
+    };
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(format!("another node already runs on {}", dir.display())),
+        Err(std::fs::TryLockError::Error(e)) => {
+            eprintln!("⚠ sigil-top node: cannot lock {} ({e}) — running without the one-node-per-folder guard", dir.display());
+            Ok(None)
+        }
+    }
+}
+
+/// Run the node in THIS process (`sigil-node start`), holding its folder. Returns its exit code.
 fn run_here() -> ExitCode {
+    let dir = PathBuf::from(std::env::var("SIGIL_DB_PATH").unwrap_or_else(|_| ".".into()));
+    let _lock = match lock_data_dir(&dir) {
+        Ok(l) => l,
+        Err(why) => {
+            eprintln!("⏸ sigil-top node: {why} — not starting a second one (nothing written)");
+            return ExitCode::from(EXIT_FOLDER_IN_USE);
+        }
+    };
+    // Where this node answers, for a second sigil-top window on the same folder (it shows this node).
+    let api = api_url(&std::env::var("SIGIL_MONEY_API").unwrap_or_default());
+    if !api.is_empty() {
+        let _ = std::fs::write(dir.join(API_FILE), &api);
+    }
     sigil_node::node_main(vec!["sigil-node".into(), "start".into()])
 }
 
@@ -532,14 +573,18 @@ pub fn start_for_screen() -> Option<NodeHost> {
         let mut failures: u32 = 0;
         let mut started = Instant::now();
         let mut last_hashes = Instant::now() - Duration::from_secs(60);
+        // Another sigil-top window's node holds the folder: show that node (its API), try our own again later.
+        let mut attached: Option<String> = None;
+        let mut spawn_after = Instant::now();
+        let own_log = plan2.log.display().to_string();
         while !quit2.load(Ordering::Relaxed) {
             // (re)start
             let running = child2.lock().map(|g| g.is_some()).unwrap_or(false);
-            if !running {
+            if !running && Instant::now() >= spawn_after {
                 match spawn_child(&plan2) {
                     Ok(c) => {
                         if let Ok(mut g) = child2.lock() { *g = Some(c); }
-                        status::set_phase(status::SYNCING);
+                        if attached.is_none() { status::set_phase(status::SYNCING); }
                         status::set_retry_at(0);
                         started = Instant::now();
                     }
@@ -557,6 +602,17 @@ pub fn start_for_screen() -> Option<NodeHost> {
             });
             if let Some(st) = exited {
                 if quit2.load(Ordering::Relaxed) { break; }
+                if st.code() == Some(EXIT_FOLDER_IN_USE as i32) {
+                    // Not a failure: our node already runs, from another sigil-top window (or an old copy is still
+                    // writing its shutdown snapshot after an update). Show it; try to take over in a minute.
+                    attached = std::fs::read_to_string(plan2.data_dir.join(API_FILE)).ok()
+                        .map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    status::set_log(format!("{own_log} · this node runs from another sigil-top window"));
+                    spawn_after = Instant::now() + Duration::from_secs(if attached.is_some() { 60 } else { 5 });
+                    continue;
+                }
+                attached = None;
+                status::set_log(own_log.clone());
                 // A node that ran a while and then stopped is a fresh failure, not a crash loop.
                 if started.elapsed() > Duration::from_secs(600) { failures = 0; }
                 failures += 1;
@@ -574,10 +630,17 @@ pub fn start_for_screen() -> Option<NodeHost> {
                 }
                 continue;
             }
-            if !plan2.api.is_empty() {
+            let api = attached.clone().unwrap_or_else(|| plan2.api.clone());
+            if !api.is_empty() {
                 let with_hashes = last_hashes.elapsed() >= Duration::from_secs(5);
                 if with_hashes { last_hashes = Instant::now(); }
-                if !poll(&plan2.api, with_hashes) && status::phase() != status::STOPPED {
+                let ok = poll(&api, with_hashes);
+                if !ok && attached.is_some() {
+                    // The other window's node went away: start ours now.
+                    attached = None;
+                    status::set_log(own_log.clone());
+                    spawn_after = Instant::now();
+                } else if !ok && status::phase() != status::STOPPED {
                     status::set_phase(status::SYNCING); // started, API not answering yet
                 }
             }
@@ -652,6 +715,20 @@ mod tests {
             assert!(v.starts_with("/srv/users/alice/sigil-top-node-sigil-g3/"), "{k} = {v}");
             assert!(!v.contains("/root/") && !v.contains(".flux-agent-key"), "{k} = {v}");
         }
+    }
+
+    /// Two nodes on one folder would both append to one chain.log. The second is refused; the folder is free
+    /// again once the first is gone (the OS drops the lock with the process, crash included).
+    #[test]
+    fn one_node_per_folder() {
+        let d = std::env::temp_dir().join(format!("own-node-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let first = lock_data_dir(&d).unwrap();
+        assert!(first.is_some(), "the first node takes the folder");
+        assert!(lock_data_dir(&d).is_err(), "a second node on the same folder must be refused");
+        drop(first);
+        assert!(lock_data_dir(&d).unwrap().is_some(), "free again once the first node is gone");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

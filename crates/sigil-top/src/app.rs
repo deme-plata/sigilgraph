@@ -581,10 +581,9 @@ impl App {
             };
             #[cfg(feature = "producer")]
             {
-                // The producer's own replay (full blocks + state, the thing that makes
-                // this a REAL node) runs beside the archive; show it on the same line.
-                if target > 0 { producer::status::set_replay_target(target); }
-                if let Some(line) = producer::status::line() {
+                // Your own node (10.6.0) runs beside the archive; show it on the same line.
+                if target > 0 { own_node::status::note_net_tip(target); }
+                if let Some(line) = own_node::status::line() {
                     self.toast = format!("{} · ⛏ {}", self.toast, line);
                 }
             }

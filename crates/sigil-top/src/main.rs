@@ -28,7 +28,7 @@
 extern crate sigil_top_base;
 pub(crate) use sigil_top_base::tlog;
 use sigil_block_store as block_store;
-// pub(crate) (2026-08-23): producer::run reaches block_sync::verify::inflate_gossip_frame
+// pub(crate) (2026-08-23): the old producer/run.rs reached block_sync::verify::inflate_gossip_frame
 // through this path — everything else stays exactly as private as before.
 pub(crate) use sigil_top_sync::block_sync; // moved to crates/sigil-top-sync (2026-10-07)
 pub(crate) use sigil_top_sync::chain_verify; // moved to sigil-top-sync · v0.9.0: full verifying sync — spine continuity + precheck walk
@@ -39,7 +39,7 @@ mod serve;
 mod heroes;
 use heroes::*;
 mod mining_ui;  // LANE-U: mining tab + hero renderers
-mod forge_ui;   // 10.4.27: ◆ PRODUCER hero — the seal + block belt, from producer::status
+mod forge_ui;   // 10.4.27: the seal + block belt card · 10.6.0: ◆ YOUR NODE, from own_node::status
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
@@ -64,15 +64,12 @@ mod cathedral;     // CATHEDRAL DAGKNIGHT: vaulted 4-root + DagKnight finality v
 // internally gated on the `shield-register` feature (default-on), same as
 // `shield_setup` above. See the module's own doc comment for the full design.
 mod mine_local_api;
-// v7.1.40 (grogu-sync-perf, 2026-08-19): PRODUCER-MODE Phase 1 — inert scaffolding only.
-// `cathedral.rs`'s own doc comment already anticipated this: "Real flux-narwhal-core /
-// flux-consensus linearizer can be dropped in the run_dagknight_linearize slot later
-// without changing the surface." This module is that drop-in, ported (not yet — Phase 2)
-// from sigil-node's main.rs. Behind the `producer` Cargo feature (off by default) AND a
-// runtime double-gate (SIGIL_TOP_PRODUCER env, checked in main() below) so a shipped
-// producer-capable binary still defaults to today's light-client-only behavior.
+// 10.6.0 (Viktor 2026-10-20: one program that does it all): sigil-top runs THE node — sigil-node's own code,
+// `sigil_node::node_main` — headless in this process or, under the screen, as its own child process. The
+// `producer` Cargo feature (default-on) is what links the node library in. The second node implementation that
+// lived in `producer/` (its own sync + produce loop) is gone. See own_node.rs.
 #[cfg(feature = "producer")]
-mod producer;
+mod own_node;
 
 // `mine-rig --seed`'s auto-registration for shielded mining. Default-on (see the
 // crate's Cargo.toml `shield-register` feature comment).
@@ -278,23 +275,16 @@ mod top_core; #[allow(unused_imports)] use top_core::*;
 mod wallet_phrase;
 pub(crate) use startup_util::{boot_trace, persist_sync_mode, read_sync_mode};
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    // 10.6.0: started by our own screen as its node (own_node.rs) — be the node and nothing else.
+    #[cfg(feature = "producer")]
+    if own_node::is_child() { return own_node::run_child(); }
     sigil_top_base::set_version(VERSION); // http_get's user-agent keeps saying sigil-top/<this version>
     // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a
     // Windows double-click, the breadcrumb + panic land in this file so we can
     // read the EXACT reason instead of guessing.
     boot_trace(&format!("main() entry v{} pid {}", env!("CARGO_PKG_VERSION"), std::process::id()));
     std::panic::set_hook(Box::new(|info| { boot_trace(&format!("PANIC: {info}")); }));
-    // v7.1.40 producer-mode Phase 1: wire the runtime double-gate end-to-end now, while
-    // it's still guaranteed inert (both functions hardcode `false` until Phase 3/5), so
-    // the gate's presence and its boot-trace visibility are proven before anything real
-    // depends on them. A `producer`-feature binary run WITHOUT either env var behaves
-    // identically to today's shipping light client — this line changes nothing yet.
-    #[cfg(feature = "producer")]
-    boot_trace(&format!(
-        "producer-mode gates: SIGIL_TOP_PRODUCER→{} SIGIL_TOP_PRODUCE→{} (both inert, Phase 1)",
-        producer::producer_mode_enabled(), producer::should_produce()
-    ));
     // POOL-DIAG: report THIS release's version on every challenge fetch (`&v=`),
     // not the flux-miner engine-crate fallback — the pool's /mining/miners is how
     // stale rig installs get spotted.
@@ -323,108 +313,10 @@ fn main() {
     // (keys used to land in C:\root\.flux, readable by every user of the PC). See wallet_phrase.rs.
     #[cfg(feature = "shield-register")]
     if argv.first().map(|s| s.as_str()) != Some("--selfcheck") { wallet_phrase::adopt_windows_home(); }
-    if cli::dispatch(&argv) { return; }
-    // 2026-08-24 (sync-then-produce bridge, operator-directed: "work on unifiyhing
-    // the sigil top node so that i can produce blocks and actual is a real node ...
-    // every user downloading sigil top wil be full node operator"). This is the
-    // ACTUAL start of the producer loop — `producer::run::maybe_start` existed,
-    // fully tested, since Phase 3/5 (2026-08-23) but was never called from here, so
-    // no real `sigil-top` binary ever produced a block no matter what env vars were
-    // set. Hard no-op unless the operator has explicitly set BOTH
-    // `SIGIL_TOP_PRODUCER=1` AND `SIGIL_TOP_PRODUCE=1` (see
-    // `producer::producer_mode_enabled`/`producer::should_produce`) — every other
-    // launch of `sigil-top` (the vast majority: plain light-client wallet use) is
-    // byte-for-byte unaffected. The returned handle MUST be kept alive for the rest
-    // of `main()` (dropping it signals the background loop to stop — see
-    // `ProducerLoopHandle`'s `Drop` impl) so it is bound here, before the
-    // once/interactive dispatch below, and never re-bound to `_`.
-    // v7.5.2 STARTUP FIX (Viktor, "won't start on Windows / loads all blocks from genesis"):
-    // producer mode is DEFAULT-ON, and `maybe_start` runs a FULL sync
-    // from genesis ON THE CALLING THREAD before returning. Called synchronously here it froze
-    // startup before the TUI ever drew its first frame (reproduced under Wine: the boot trace
-    // stopped right after the producer-mode gates line). Move the whole sync-then-produce
-    // bootstrap onto a BACKGROUND thread so the dashboard opens instantly and the sync runs
-    // behind it — the operator's "full sync first, produce out of the box" intent is preserved
-    // (production still waits for the synced tip inside the loop), just off the UI thread. The
-    // handle is parked in a slot main() holds for its whole life, so its Drop still stops the
-    // loop on exit.
-    #[cfg(feature = "producer")]
-    let _producer_handle: std::sync::Arc<std::sync::Mutex<Option<producer::run::ProducerLoopHandle>>> = {
-        let tick_ms: u64 = std::env::var("SIGIL_TOP_PRODUCE_TICK_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(500);
-        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let slot_bg = slot.clone();
-        let _ = std::thread::Builder::new().name("producer-bootstrap".into()).spawn(move || {
-            // 2026-09-17 (Viktor: "press F for full archive … afterwards it produces real
-            // blocks and rewards"): do nothing until the operator asks for a FULL node —
-            // the F key, a persisted "full" mode, or SIGIL_TOP_PRODUCE=1. The gates in
-            // `producer::producer_mode_enabled`/`should_produce` still decide "never".
-            if !(producer::producer_mode_enabled() && producer::should_produce()) {
-                return;
-            }
-            while !producer::full_node_requested() {
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            // The hybrid (post-quantum) checkpoint verifier in `ChainTip::apply` needs the
-            // producer's trusted hybrid id or it reports every checkpoint as FAILED
-            // (observe-only, but on the dashboard). A downloaded node trusts the g2
-            // producer's ids by default — the retired 09-15 key for older blocks and the
-            // rotated one — exactly what happysrv and node3 are configured with.
-            if std::env::var("SIGIL_TRUSTED_PRODUCER_ID_HEX").map(|v| v.trim().is_empty()).unwrap_or(true) {
-                std::env::set_var("SIGIL_TRUSTED_PRODUCER_ID_HEX", producer::DEFAULT_TRUSTED_PRODUCER_IDS);
-            }
-            // The coinbase payee. `sigil-node`'s mint pays `SIGIL_PRODUCER_WALLET`, and with
-            // nothing set it pays a `c1c1…` placeholder nobody holds — measured 2026-09-17,
-            // 437 blocks minted to it. A user's full node pays the wallet the TUI already
-            // mines to (`[M]`, `SIGIL_MINE_WALLET`, the chosen-wallet file), unless the
-            // operator pinned a producer wallet explicitly.
-            if std::env::var("SIGIL_PRODUCER_WALLET").map(|v| v.trim().is_empty()).unwrap_or(true) {
-                let w = miner_wallet();
-                std::env::set_var("SIGIL_PRODUCER_WALLET", &w);
-                tlog!("[producer] coinbase payee = this node's mining wallet {}… (set SIGIL_PRODUCER_WALLET to override)", &w[..8.min(w.len())]);
-            }
-            boot_trace("producer-mode: full node requested — sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
-            tlog!("[producer] full node requested (F / persisted full / SIGIL_TOP_PRODUCE=1) — sync-then-produce bootstrap starting");
-            // 10.4.27: a refused bootstrap is no longer final. Viktor's Windows node (2026-10-15)
-            // read "full node: refused" until restarted, because one failed snapshot fetch
-            // ended the attempt for the life of the process. Now it tries again with a growing
-            // pause (1 → 2 → 5 min, then every 5 min), shown on the PRODUCER card as a countdown.
-            let mut attempt: u32 = 0;
-            loop {
-                attempt += 1;
-                producer::status::set_retry_at(0);
-                // Leave REFUSED before the new attempt starts, or the wait below would read the
-                // previous attempt's verdict and give up instantly.
-                producer::status::set_replayed(0);
-                producer::status::set_phase(producer::status::SYNCING);
-                if attempt > 1 {
-                    producer::status::set_message("");
-                    tlog!("[producer] bootstrap attempt {attempt} — trying again");
-                }
-                match producer::run::maybe_start(Duration::from_millis(tick_ms)) {
-                    Some(handle) => { if let Ok(mut g) = slot_bg.lock() { *g = Some(handle); } }
-                    None => return,
-                }
-                // Wait while the loop syncs or produces; only a REFUSED phase brings us back.
-                while producer::status::phase() != producer::status::REFUSED {
-                    std::thread::sleep(Duration::from_secs(2));
-                }
-                if let Ok(mut g) = slot_bg.lock() { g.take(); }
-                let pause = match attempt { 1 => 60, 2 => 120, _ => 300 };
-                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                producer::status::set_retry_at(now + pause);
-                tlog!("[producer] bootstrap refused ({}) — retrying in {pause}s", producer::status::message());
-                std::thread::sleep(Duration::from_secs(pause));
-                if !producer::full_node_requested() {
-                    producer::status::set_retry_at(0);
-                    while !producer::full_node_requested() { std::thread::sleep(Duration::from_secs(1)); }
-                }
-            }
-        });
-        slot
-    };
+    if cli::dispatch(&argv) { return std::process::ExitCode::SUCCESS; }
+    // 10.6.0: the second implementation's sync-then-produce bootstrap thread (started here since 2026-08-24)
+    // is gone — the node is sigil-node's own code now, started below: headless in this process, or as the
+    // screen's child just before the TUI.
     // v0.95: the default interactive dashboard runs the pinned updater gate before
     // entering raw-mode TUI so stale channels and bad signatures are visible instead
     // of looking like "already latest". --once, pipes, and --lite stay side-effect
@@ -468,6 +360,14 @@ fn main() {
     );
     boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={} win_console={}) once={} lite={}",
         interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), win_has_console(), cfg.once, cfg.lite));
+    // 10.6.0 (Viktor: "running sigil graph top node should just do it all"): no terminal — a systemd unit, a
+    // container, a server — runs the NODE in this process, exactly like `sigil-node start`. `--once` / `--lite`
+    // still print a frame; SIGIL_TOP_NODE=0 keeps the old one-frame behaviour.
+    #[cfg(feature = "producer")]
+    if !cfg.once && !cfg.lite && !interactive && own_node::enabled() {
+        boot_trace("headless: running the node in this process (own_node)");
+        return own_node::run_headless();
+    }
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
         // P2a: prewarm the ledger refresher so the single frame carries the real
@@ -480,7 +380,7 @@ fn main() {
         let frame = if cfg.lite { render_lite(&st, online) } else { render_full(&st, online, &cfg.api, source) };
         print!("{frame}");
         let _ = std::io::stdout().flush();
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
     // --lite → the compact one-line scorecard, live-looped in place (TTY only).
     if cfg.lite {
@@ -504,6 +404,10 @@ fn main() {
     // 10.4.22: no wallet yet? ask (use my sigilgraph.org / phone wallet, or make one) before the TUI.
     #[cfg(feature = "shield-register")]
     wallet_phrase::first_run_choice();
+    // 10.6.0: your own node — sigil-node's code as this program's child, its output in a log beside its data.
+    // Started after the update check and the wallet question, so a self-update never strands a fresh node.
+    #[cfg(feature = "producer")]
+    let own_node = own_node::start_for_screen();
     boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
         boot_trace(&format!("run_tui returned Err: {e}"));
@@ -511,6 +415,12 @@ fn main() {
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
         eprintln!("sigil-top: TUI error: {e}");
     }
+    #[cfg(feature = "producer")]
+    if let Some(mut n) = own_node {
+        println!("⏹ stopping your node — it writes its state first (log: {})", n.plan.log.display());
+        n.stop(Duration::from_secs(30));
+    }
+    std::process::ExitCode::SUCCESS
 }
 
 // ───────────────────────── ratatui TUI (v0.2) ─────────────────────────

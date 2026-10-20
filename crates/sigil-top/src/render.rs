@@ -175,7 +175,7 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
         o.push_str(&format!("  {GREEN}● synced from verified live feed{RESET} {DIM}· no local node required — verify on a potato{RESET}\n"));
     }
     #[cfg(feature = "producer")]
-    if let Some(line) = crate::producer::status::line() {
+    if let Some(line) = crate::own_node::status::line() {
         o.push_str(&format!("  {GOLD}⛏ {line}{RESET}\n"));
     }
     // keybar footer — real keybindings UI

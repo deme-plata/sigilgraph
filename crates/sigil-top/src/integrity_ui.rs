@@ -11,8 +11,8 @@
 //! separately.
 //!
 //! Sources, all public:
-//! * ours — the embedded full node's settled ring (`producer::status::settled_hash_at`)
-//!   when the operator pressed F, else the light archive (`BlockReader::hash_at_height`);
+//! * ours — your own node's recent block hashes (`own_node::status::settled_hash_at`, from its local
+//!   `/v1/dagknight/recent`; 10.6.0), else the light archive (`BlockReader::hash_at_height`);
 //! * Epsilon — `{api}/v1/dagknight/recent` (its finalized spine, 200 heights) and
 //!   `{api}/v1/finality/certificate` (the certified height; we only compare at or below it);
 //! * happysrv / node3 — `sigilgraph.org/downloads/sigil-integrity.json` `spine_hashes`,
@@ -210,8 +210,8 @@ pub(crate) fn snapshot() -> IntegrityState {
 /// verified headers only.
 fn local_hash(reader: &Arc<OnceLock<sigil_block_store::BlockReader>>, h: u64) -> Option<(String, &'static str)> {
     #[cfg(feature = "producer")]
-    if let Some(x) = crate::producer::status::settled_hash_at(h) {
-        return Some((hex::encode(x), "full node"));
+    if let Some(x) = crate::own_node::status::settled_hash_at(h) {
+        return Some((hex::encode(x), "your node"));
     }
     let r = reader.get()?;
     r.hash_at_height(h).map(|s| (s.to_ascii_lowercase(), "archive"))
@@ -220,9 +220,9 @@ fn local_hash(reader: &Arc<OnceLock<sigil_block_store::BlockReader>>, h: u64) ->
 fn local_top(reader: &Arc<OnceLock<sigil_block_store::BlockReader>>) -> (u64, &'static str) {
     #[cfg(feature = "producer")]
     {
-        let t = crate::producer::status::settled_top();
+        let t = crate::own_node::status::settled_top();
         if t > 0 {
-            return (t, "full node");
+            return (t, "your node");
         }
     }
     (reader.get().map(|r| r.best_height()).unwrap_or(0), "archive")
@@ -332,9 +332,10 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
             // The fifth root: Epsilon's live pool root, and ours when an embedded node runs.
             let pool_eps = fetch_integrity(&api_base);
             #[cfg(feature = "producer")]
-            let pool_ours = if crate::producer::mining_api::local_mining_api_is_up() {
-                fetch_integrity(&crate::producer::mining_api::local_mining_api_url())
-            } else { None };
+            let pool_ours = match crate::own_node::api() {
+                a if a.is_empty() => None,
+                a => fetch_integrity(&a),
+            };
             #[cfg(not(feature = "producer"))]
             let pool_ours: Option<PoolObs> = None;
             {
@@ -612,9 +613,9 @@ mod tests {
     #[cfg(feature = "producer")]
     #[test]
     fn compares_only_at_or_below_the_certified_height_and_counts_once() {
-        crate::producer::status::push_settled(1_000_000, [0x11; 32]);
-        crate::producer::status::push_settled(1_000_001, [0x22; 32]);
-        crate::producer::status::push_settled(1_000_002, [0x33; 32]);
+        crate::own_node::status::push_settled(1_000_000, [0x11; 32]);
+        crate::own_node::status::push_settled(1_000_001, [0x22; 32]);
+        crate::own_node::status::push_settled(1_000_002, [0x33; 32]);
         let mut st = IntegrityState::default();
         let mut remote = BTreeMap::new();
         remote.insert(1_000_000u64, "11".repeat(32));

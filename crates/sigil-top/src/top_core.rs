@@ -341,38 +341,29 @@ pub(crate) fn do_login(seed_hex: Option<String>) {
 /// at this original path. Capturing it up front makes relaunch reliable.
 pub(crate) static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// The [F] → full toast, with the unified-binary consequence spelled out: a full archive
-/// is also a real node — it replays the chain with state and then PRODUCES, with the
-/// coinbase going to this wallet. Builds without the `producer` feature say nothing extra.
+/// The [F] → full archive toast (the screen's own light engine; only when your node is off).
 pub(crate) fn full_node_toast(base: &str) -> String {
-    #[cfg(feature = "producer")]
-    {
-        if producer::producer_mode_enabled() && producer::should_produce() {
-            return match producer::status::phase() {
-                producer::status::PRODUCING => format!("{base} ⛏ full node already PRODUCING."),
-                producer::status::SYNCING => format!("{base} ⛏ full node replay continues."),
-                _ => format!("{base} ⛏ FULL NODE: replays the chain with state, then produces real blocks — rewards to this wallet."),
-            };
-        }
-    }
     base.to_string()
 }
 
-/// The [F] → light toast. If the producer is already running it keeps its synced state
-/// (a multi-hour replay is not thrown away by a keypress); if it was only waiting for F,
-/// the request is withdrawn and nothing starts.
+/// The [F] → light toast.
 pub(crate) fn light_monitor_toast() -> String {
-    let base = "◇ LIGHT MONITOR — verifies the live tip (10ms proof), holds nothing new. Press F for full archive.";
+    "◇ LIGHT MONITOR — verifies the live tip (10ms proof), holds nothing new. Press F for full archive.".to_string()
+}
+
+/// Your own node runs (10.6.0) — sigil-top always runs one unless SIGIL_TOP_NODE=0.
+pub(crate) fn own_node_on() -> bool {
     #[cfg(feature = "producer")]
     {
-        match producer::status::phase() {
-            producer::status::PRODUCING | producer::status::SYNCING => {
-                return format!("{base} ⛏ full node keeps running (quit to stop).");
-            }
-            _ => producer::withdraw_full_node_request(),
-        }
+        return crate::own_node::enabled();
     }
-    base.to_string()
+    #[allow(unreachable_code)]
+    false
+}
+
+/// [F] while your own node runs: there is nothing to switch.
+pub(crate) fn own_node_f_toast() -> String {
+    "◆ Your node keeps and checks the whole chain itself — nothing to switch. (Before 10.6.0 F started a full node; now one always runs.)".to_string()
 }
 
 /// v0.7.0: Poll each fleet node's status API to check uptime, height, and version.
@@ -671,21 +662,8 @@ pub(crate) fn engine_node_url() -> String {
     if let Ok(v) = std::env::var("SIGIL_MINE_NODE") {
         return v;
     }
-    // 2026-08-25 (local-mining-API work, operator-directed: "let a miner mine against
-    // their OWN locally-running node instead of always hitting the central Epsilon
-    // node"): when this process's own producer mode has a local mining API ACTUALLY up
-    // (not merely requested — see `producer::mining_api::local_mining_api_is_up`'s doc
-    // for what "up" means: a confirmed TCP accept, not just the env vars being set),
-    // prefer it. `local_mining_api_is_up()` is a single relaxed atomic load, so this is
-    // safe to call from a hot per-frame render path (the Mining tab). In every build
-    // without the `producer` feature — the overwhelming majority of users — this branch
-    // doesn't exist at all, and in a `producer`-feature build where the local server was
-    // never started (no env vars, or sync/bind failed), the flag is false and this falls
-    // through exactly as before: byte-identical default behavior either way.
-    #[cfg(feature = "producer")]
-    if producer::mining_api::local_mining_api_is_up() {
-        return producer::mining_api::local_mining_api_url();
-    }
+    // 10.6.0: your own node FOLLOWS the chain, so shares credit at the network's producer; the local producer
+    // mining endpoint that the second node implementation served (2026-08-25) is gone with it.
     // 2026-10-02: a node that has verified the chain (10 ms tip proof or full sync) serves
     // its own mining endpoint and balances shares across upstream nodes — so a rig never
     // depends on one URL. See `mining_relay.rs` for what this does and does not decentralise.

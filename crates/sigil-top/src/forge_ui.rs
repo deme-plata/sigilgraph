@@ -1,20 +1,14 @@
-//! ◆ PRODUCER hero band (10.4.27, Viktor 2026-10-15: "make it visible that node is producing
-//! blocks and make a wonderful animation for this").
+//! ◆ YOUR NODE card (10.4.27 as the PRODUCER band; 10.6.0 your own node — Viktor 2026-10-20: "running sigil
+//! graph top node should just do it all").
 //!
-//! What a full node does, drawn as it happens: blocks arrive from the network, wait out the
-//! 512-deep finality window, and are SEALED onto this node's own settled chain — the seal
-//! stamps once per block it settles. A block this node mints itself rides the belt in gold.
-//!
-//! Honest by construction: every number is read from `producer::status`, the same counters
-//! the `[producer] heartbeat` log line prints. "Settling" (verifying + applying every g2 block
-//! here) and "minting" (this node forging a block of its own) are shown apart, because on g2
-//! the first happens every second and the second only when work reaches this node — the mint
-//! policy is WORK, so a block is forged when the rig's [M] solve or a transaction arrives.
-//! The animation never moves faster than the measured settle rate says it should.
+//! What your node does, drawn as it happens: it downloads every block, checks it and applies it — the same
+//! program the network's own nodes run — and the seal stamps once per block it applies. Honest by construction:
+//! every number is read from `own_node::status`, which the host fills from the node's own local API. The
+//! animation never moves faster than the measured apply rate says it should.
 use super::*;
 
 #[cfg(feature = "producer")]
-use crate::producer::status as ps;
+use crate::own_node::status as ps;
 
 /// Per-process motion state: settle rate + the moments the seal last struck / a block was minted.
 struct Motion {
@@ -85,8 +79,7 @@ fn observe(settled: u64, minted: u64, last_minted_h: u64) -> Beat {
     }
 }
 
-/// Show the band? Only once a full node was asked for (F / persisted full / SIGIL_TOP_PRODUCE=1);
-/// a light monitor keeps its screen as it was.
+/// Show the band whenever your own node runs (10.6.0: always, unless SIGIL_TOP_NODE=0).
 pub(crate) fn band_visible() -> bool {
     #[cfg(feature = "producer")]
     {
@@ -101,7 +94,7 @@ pub(crate) fn wants_motion() -> bool {
     #[cfg(feature = "producer")]
     {
         let p = ps::phase();
-        return p == ps::PRODUCING || p == ps::SYNCING;
+        return p == ps::LIVE || p == ps::SYNCING;
     }
     #[allow(unreachable_code)]
     false
@@ -112,6 +105,7 @@ fn bold(c: Color) -> Style { Style::default().fg(c).add_modifier(Modifier::BOLD)
 fn sp(s: impl Into<String>, style: Style) -> Span<'static> { Span::styled(sa(s.into()), style) }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)] // `Forging` (a block your rig won, in gold) waits for the node to report wins; the tests draw it.
 enum Mood { Forging, Armed, CatchingUp, Booting, Refused }
 
 /// The conveyor: `net › ▪  ▪  ▪ ┤◆├ ■ ■ ■ ■ ⛓ h`. Left = blocks seen on the network still inside
@@ -220,38 +214,26 @@ pub(crate) fn draw_producer_hero(f: &mut Frame, app: &App, area: ratatui::layout
     let _ = (f, app, area);
 }
 
-/// First replay height seen in this bootstrap (the snapshot's height) — the 0 % mark of the
-/// bootstrap belt. Cleared whenever the producer is not bootstrapping.
-static BOOT_FROM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 #[cfg(feature = "producer")]
 fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
-    use std::sync::atomic::Ordering::Relaxed;
+    ps::note_net_tip(net_hint); // the light engine's view of the network tip, until the node hears certificates
     let phase = ps::phase();
-    let settled = ps::settled();
-    let net = ps::gossip_tip();
-    let minted = ps::minted();
-    let won = ps::won();
-    // "Ours" = blocks this node forged + blocks the rig WON (minted by the network's producer
-    // with this wallet as producer). Either one rides the belt in gold.
-    let ours = minted + won;
-    let last_h = ps::last_minted_height().max(ps::last_won_height());
+    let height = ps::height();
+    let net = ps::net_tip();
     let lag = ps::lag();
-    let beat = observe(settled, ours, last_h);
+    let beat = observe(height, 0, 0);
 
     let mood = match phase {
-        ps::PRODUCING if lag > 768 => Mood::CatchingUp,
-        ps::PRODUCING if ours > 0 => Mood::Forging,
-        ps::PRODUCING => Mood::Armed,
+        ps::LIVE if lag > 768 => Mood::CatchingUp,
+        ps::LIVE => Mood::Armed,
         ps::SYNCING => Mood::Booting,
         _ => Mood::Refused,
     };
     let (title, col) = match mood {
-        Mood::Forging => (if minted > 0 { " ⛏ PRODUCER · FORGING BLOCKS" } else { " ⛏ PRODUCER · YOUR RIG WINS BLOCKS" }, C_NEON_GOLD),
-        Mood::Armed => (" ◆ PRODUCER · FULL NODE LIVE", C_NEON_GREEN),
-        Mood::CatchingUp => (" ◆ PRODUCER · CATCHING UP", C_GOLD),
-        Mood::Booting => (" ◆ PRODUCER · BOOTSTRAPPING", C_NEON_CYAN),
-        Mood::Refused => (" ✕ PRODUCER · NOT STARTED", C_NEON_PINK),
+        Mood::CatchingUp => (" ◆ YOUR NODE · CATCHING UP", C_GOLD),
+        Mood::Booting => (" ◆ YOUR NODE · SYNCING", C_NEON_CYAN),
+        Mood::Refused => (" ✕ YOUR NODE · STOPPED", C_NEON_PINK),
+        _ => (" ◆ YOUR NODE · LIVE", C_NEON_GREEN),
     };
     let block = card_block(&sa(title), col).border_style(st(col));
     let inner = block.inner(area);
@@ -259,104 +241,78 @@ fn draw_inner(f: &mut Frame, area: ratatui::layout::Rect, net_hint: u64) {
     let [belt_row, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
     let [tele, art] = Layout::horizontal([Constraint::Min(0), Constraint::Length(16)]).spacing(1).areas(body);
 
-    // Bootstrap progress: from the snapshot's height to the network tip (the light client's
-    // view of it when the producer has none yet).
-    let replayed = ps::replayed();
-    let target = ps::replay_target().max(net).max(net_hint);
-    if mood != Mood::Booting {
-        BOOT_FROM.store(0, Relaxed);
-    } else if replayed > 0 && BOOT_FROM.load(Relaxed) == 0 {
-        BOOT_FROM.store(replayed, Relaxed);
-    }
-    let from = BOOT_FROM.load(Relaxed);
-    let progress = (from > 0 && target > from && replayed >= from)
-        .then(|| (replayed - from) as f64 / (target - from) as f64);
-    f.render_widget(Paragraph::new(belt(belt_row.width as usize, &beat, mood, settled, progress)), belt_row);
+    // Progress = the share of the chain this node holds, block 0 → the network tip.
+    let progress = (mood == Mood::Booting && net > 0).then(|| (height as f64 / net as f64).min(1.0));
+    f.render_widget(Paragraph::new(belt(belt_row.width as usize, &beat, mood, height, progress)), belt_row);
 
     let rate = if beat.rate >= 10.0 { format!("{:.0} blk/s", beat.rate) } else { format!("{:.1} blk/s", beat.rate) };
+    let peers = ps::peers();
+    let log = ps::log();
     let lines: Vec<Line<'static>> = match mood {
-        Mood::Armed | Mood::Forging | Mood::CatchingUp => {
-            let headline = match mood {
-                Mood::Forging => vec![
-                    sp(if minted > 0 { "⛏ FORGING" } else { "⛏ WINNING" }, bold(C_NEON_GOLD)),
-                    sp(" — blocks with your wallet as producer are in the chain, and this node seals every block", st(C_DIM)),
-                ],
-                Mood::CatchingUp => vec![
-                    sp("◆ CATCHING UP", bold(C_GOLD)),
-                    sp(format!(" — {} blocks behind the network — the resync lane catches up after 20 s without progress", group(lag)), st(C_DIM)),
-                ],
-                _ => vec![
-                    sp("◆ ARMED", bold(C_NEON_GREEN)),
-                    sp(" — this node verifies and seals every g2 block itself, with no trusted peer", st(C_DIM)),
-                ],
-            };
-            let secs = if beat.rate > 0.5 { format!(" ≈{:.0} s", lag as f64 / beat.rate) } else { String::new() };
-            let how = if ps::minting() {
-                "  · this node also forges its own when your rig solves against it"
-            } else {
-                "  · your rig [M] mines through the network's producer; a block it wins carries your wallet"
-            };
-            let mine = if ours == 0 {
-                vec![
-                    sp("your blocks ", st(C_DIM)), sp("0 yet", bold(C_GOLD)),
-                    sp(how, st(C_DIM)),
-                ]
-            } else {
-                let mut v = vec![
-                    sp("your blocks ", st(C_DIM)), sp(group(ours), bold(C_NEON_GOLD)),
-                    sp("  last ", st(C_DIM)), sp(format!("h={}", group(last_h)), bold(C_NEON_GOLD)),
-                ];
-                if minted > 0 {
-                    v.push(sp(format!("  ({} won by your rig, {} forged here)", group(won), group(minted)), st(C_DIM)));
-                } else {
-                    v.push(sp("  · won by your rig, settled and checked here", st(C_DIM)));
-                }
-                v
-            };
-            vec![
-                Line::from(headline),
-                Line::from(vec![
-                    sp("sealed ", st(C_DIM)), sp(rate, bold(C_NEON_GREEN)),
-                    sp("   net tip ", st(C_DIM)), sp(group(net), bold(C_VBRIGHT)),
-                    sp("   finality lag ", st(C_DIM)), sp(format!("{}{secs}", group(lag)), bold(if lag > 768 { C_GOLD } else { C_NEON_CYAN })),
-                    sp(" (the 512-deep rule)", st(C_DIM)),
-                ]),
-                Line::from(mine),
-                Line::from(vec![
-                    sp("peers ", st(C_DIM)), sp(group(ps::peers()), bold(if ps::peers() > 0 { C_NEON_GREEN } else { C_RED })),
-                    sp("   gossip in ", st(C_DIM)), sp(group(ps::ingested()), st(C_VBRIGHT)),
-                    sp("   resyncs ", st(C_DIM)), sp(group(ps::resyncs()), st(C_VBRIGHT)),
-                ]),
-            ]
-        }
         Mood::Booting => {
-            let what = ps::line().unwrap_or_default().trim_start_matches("full node: ").to_string();
+            let eta = if beat.rate > 1.0 && net > height {
+                let s = (net - height) as f64 / beat.rate;
+                if s < 120.0 { format!(" · ≈{s:.0} s to go") } else if s < 7200.0 { format!(" · ≈{:.0} min to go", s / 60.0) } else { format!(" · ≈{:.1} h to go", s / 3600.0) }
+            } else { String::new() };
             vec![
-                Line::from(vec![sp("◆ BOOTSTRAPPING", bold(C_NEON_CYAN)), sp(format!(" — {what}"), st(C_DIM))]),
                 Line::from(vec![
-                    sp("then this node seals every block itself and counts every block your rig [M] wins", st(C_DIM)),
+                    sp("◆ SYNCING", bold(C_NEON_CYAN)),
+                    sp(" — every block from block 0 is downloaded, checked and applied here, by the same program the network runs", st(C_DIM)),
                 ]),
                 Line::from(match progress {
                     Some(p) => vec![
-                        sp("replayed ", st(C_DIM)), sp(group(replayed.saturating_sub(from)), bold(C_NEON_CYAN)),
-                        sp(" of ", st(C_DIM)), sp(group(target.saturating_sub(from)), bold(C_VBRIGHT)),
-                        sp(format!(" blocks since the snapshot ({:.0} %) — each one applied and checked here", p * 100.0), st(C_DIM)),
+                        sp("h ", st(C_DIM)), sp(group(height), bold(C_NEON_CYAN)),
+                        sp(" of ~", st(C_DIM)), sp(group(net), bold(C_VBRIGHT)),
+                        sp(format!(" ({:.1} %) · {rate}{eta}", p * 100.0), st(C_DIM)),
                     ],
-                    None => vec![sp("the snapshot is signed by the g2 producer and checked against a key built into sigil-top", st(C_DIM))],
+                    None => vec![sp("starting — finding peers and the network's tip", st(C_DIM))],
                 }),
+                Line::from(vec![
+                    sp("peers ", st(C_DIM)), sp(group(peers), bold(if peers > 0 { C_NEON_GREEN } else { C_RED })),
+                    sp(format!("   log {log}"), st(C_DIM)),
+                ]),
             ]
         }
         Mood::Refused => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             let retry = match ps::retry_at() {
-                0 => "will try again on the next start".to_string(),
-                t => format!("trying again automatically in {}s", t.saturating_sub(now)),
+                0 => "it starts again with sigil-top".to_string(),
+                t => format!("restarting automatically in {}s", t.saturating_sub(now)),
             };
             let msg = ps::message();
             vec![
-                Line::from(vec![sp("✕ NOT STARTED", bold(C_NEON_PINK)), sp(format!(" — {}", if msg.is_empty() { "bootstrap failed" } else { &msg }), st(C_DIM))]),
-                Line::from(vec![sp(retry, bold(C_GOLD))]),
-                Line::from(vec![sp("the history download above is separate and keeps going; details in ~/.sigil-top.log", st(C_DIM))]),
+                Line::from(vec![sp("✕ STOPPED", bold(C_NEON_PINK)), sp(format!(" — {}", if msg.is_empty() { "the node is not running" } else { &msg }), st(C_DIM))]),
+                Line::from(vec![sp(retry, bold(C_GOLD)), sp(format!("   · restarts so far {}", ps::restarts()), st(C_DIM))]),
+                Line::from(vec![sp(format!("the node's own log: {log}"), st(C_DIM))]),
+            ]
+        }
+        _ => {
+            let headline = if mood == Mood::CatchingUp {
+                vec![
+                    sp("◆ CATCHING UP", bold(C_GOLD)),
+                    sp(format!(" — {} blocks behind the network's tip", group(lag)), st(C_DIM)),
+                ]
+            } else {
+                vec![
+                    sp("◆ LIVE", bold(C_NEON_GREEN)),
+                    sp(" — this node checks and applies every block itself: the same program the network's own nodes run", st(C_DIM)),
+                ]
+            };
+            vec![
+                Line::from(headline),
+                Line::from(vec![
+                    sp("applied ", st(C_DIM)), sp(rate, bold(C_NEON_GREEN)),
+                    sp("   h ", st(C_DIM)), sp(group(height), bold(C_VBRIGHT)),
+                    sp("   finalized ", st(C_DIM)), sp(group(ps::settled()), bold(C_NEON_CYAN)),
+                    sp("   network ", st(C_DIM)), sp(group(net), st(C_VBRIGHT)),
+                ]),
+                Line::from(vec![
+                    sp("your rig [M] mines through the network's producer; rewards land in your wallet", st(C_DIM)),
+                ]),
+                Line::from(vec![
+                    sp("peers ", st(C_DIM)), sp(group(peers), bold(if peers > 0 { C_NEON_GREEN } else { C_RED })),
+                    sp(format!("   log {log}"), st(C_DIM)),
+                ]),
             ]
         }
     };

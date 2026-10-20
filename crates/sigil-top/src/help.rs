@@ -39,15 +39,28 @@ pub fn print_help(version: &str) {
 /// passed even if `print_help` printed nothing at all.
 pub fn render(version: &str) -> String {
     format!(
-        r#"sigil-top {version} — SIGIL node monitor, light client, miner and wallet host
+        r#"sigil-top {version} — SIGIL full node, dashboard, miner and wallet host
 
-  A single binary that watches a SIGIL chain, VERIFIES it for itself rather than
-  trusting a feed, mines against it, and serves the wallet UI locally. Run it with
-  no arguments for the live dashboard.
+  One program: it runs a full SIGIL node (the same code the network's own nodes run),
+  shows it on a live dashboard, mines, and serves the wallet UI locally. Run it with no
+  arguments and it does all of that.
 
 USAGE
-  sigil-top [FLAGS]                 live dashboard (default)
+  sigil-top [FLAGS]                 your node + the live dashboard (default)
   sigil-top <SUBCOMMAND> [ARGS]
+
+YOUR NODE
+  With a terminal, sigil-top runs the node beside the dashboard (quitting stops it; it
+  writes its state first). With no terminal — systemd, docker, a server — it runs the node
+  alone, exactly like `sigil-node start`. The node downloads every block from block 0,
+  checks it and applies it. It follows the chain; it does not produce blocks.
+    data      a folder beside the block store, sigil-top-node-<network>/  (SIGIL_DB_PATH)
+    log       <data>/sigil-top-node.log
+    API       http://127.0.0.1:18181, or the next free port — this machine only
+    SIGIL_TOP_NODE=0     dashboard only, no node
+    SIGIL_HEADLESS=1     node only, even in a terminal
+  If SIGIL_DB_PATH is set, sigil-top runs the node exactly as the environment says (an
+  operator's unit or container) and fills in nothing.
 
 DASHBOARD
   -l, --lite                        compact scorecard instead of the full dashboard

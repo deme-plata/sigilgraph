@@ -131,12 +131,9 @@ fn http_client() -> &'static reqwest::blocking::Client {
 /// Start the relay once (idempotent). `configured` = the node API base sigil-top already uses.
 pub fn start(configured: String) {
     if !enabled() || UP.load(Ordering::Relaxed) { return; }
-    let local_producer = {
-        #[cfg(feature = "producer")]
-        { crate::producer::mining_api::local_mining_api_is_up().then(crate::producer::mining_api::local_mining_api_url) }
-        #[cfg(not(feature = "producer"))]
-        { None::<String> }
-    };
+    // 10.6.0: your own node follows the chain; shares credit at the network's producer, so there is no local
+    // producer endpoint to prefer (the second node implementation that served one is gone).
+    let local_producer: Option<String> = None;
     let env = std::env::var("SIGIL_MINING_UPSTREAMS").ok();
     let list = upstream_list(local_producer, env.as_deref(), &configured);
     if let Ok(mut s) = state().lock() { s.ups = list.into_iter().map(Upstream::new).collect(); }

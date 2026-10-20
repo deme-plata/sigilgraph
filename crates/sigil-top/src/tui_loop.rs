@@ -95,7 +95,8 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
         app.toggle_engine_mining();
         boot_trace("AUTOMINE: engine started via SIGIL_AUTOMINE");
     }
-    if std::env::var("SIGIL_AUTOFULLSYNC").is_ok() && app.p2p_sync.is_none() {
+    // 10.6.0: with your own node running the screen never downloads a second copy of the chain.
+    if std::env::var("SIGIL_AUTOFULLSYNC").is_ok() && app.p2p_sync.is_none() && !own_node_on() {
         if let Some(store) = app.take_idle_store() {
             let p2p = block_sync::P2PBlockSync::launch(store, false);
             app.p2p_sync = Some(p2p);
@@ -239,14 +240,10 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
     // 0.77/v7.0.21: the persisted [F] choice ("full") now RESUMES on every platform —
     // Windows defaulted want_sync=false, so an operator's full archive silently didn't
     // restart after an update ("it doesn't resume") until they pressed F again.
-    let autostart_full = read_sync_mode().as_deref() == Some("full");
-    let autofullsync = std::env::var("SIGIL_AUTOFULLSYNC").is_ok();
-    #[cfg(feature = "producer")]
-    if autostart_full || autofullsync {
-        // The persisted [F] choice survives restarts for the producer too: a full node
-        // stays a full node across an update without pressing F again.
-        producer::request_full_node();
-    }
+    // 10.6.0: your own node holds and checks the whole chain, so a saved "full" or SIGIL_AUTOFULLSYNC no longer
+    // starts the light engine's second copy while it runs (both work as before with SIGIL_TOP_NODE=0).
+    let autostart_full = read_sync_mode().as_deref() == Some("full") && !own_node_on();
+    let autofullsync = std::env::var("SIGIL_AUTOFULLSYNC").is_ok() && !own_node_on();
     // ONE-CHAIN (v7.1.6): the LEDGER header mirror is the default sync — full
     // floor→tip in ~1.4s. The SPINE monitor/backfill (31.5M empty dyno blocks,
     // ~8 blk/s serve valve → a 78-DAY eta) no longer auto-starts: it is opt-in
@@ -567,6 +564,11 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
+                                // 10.6.0: your own node already keeps the whole chain — nothing to switch.
+                                if own_node_on() {
+                                    app.toast = own_node_f_toast();
+                                    app.toast_sticky = false;
+                                } else
                                 // 0.77 GENESIS ARCHIVE (#156): [F] is the explicit "hold the whole
                                 // chain" switch. No engine → start it in FULL-ARCHIVE mode (base
                                 // anchored at genesis, every block held — the redundant-backup
@@ -595,8 +597,6 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                         app.p2p_sync = Some(p2p);
                                         app.full_sync = true;
                                         persist_sync_mode("full"); // LANE-V: survives update/restart
-                                        #[cfg(feature = "producer")]
-                                        producer::request_full_node();
                                         app.toast = full_node_toast("⛓ FULL ARCHIVE started — syncing genesis→tip, holding every block (~1GB). F again = light monitor.");
                                     }
                                     app.toast_sticky = true;
@@ -605,8 +605,6 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                         p2p.set_full_archive();
                                         app.full_sync = true;
                                         persist_sync_mode("full");
-                                        #[cfg(feature = "producer")]
-                                        producer::request_full_node();
                                         app.toast = full_node_toast("⛓ FULL ARCHIVE — base → genesis, downloading + holding every block (~1GB). Press F for light monitor.");
                                     } else {
                                         p2p.set_light_monitor();

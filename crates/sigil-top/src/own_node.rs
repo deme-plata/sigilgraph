@@ -138,6 +138,19 @@ fn default_data_dir() -> PathBuf {
     base.join(format!("sigil-top-node-{}", sigil_header::NETWORK_ID_STR))
 }
 
+/// A sigil-node producer on this machine: it published a plausible peer id AND `127.0.0.1:9501` accepts (a 300 ms
+/// probe, so a stale file never becomes a dead bootstrap entry). Same rule as flux-p2p's light-client side.
+fn local_producer(peerid_file: &Path) -> Option<String> {
+    let pid = std::fs::read_to_string(peerid_file).ok()?;
+    let pid = pid.trim();
+    if !pid.starts_with("12D3Koo") || pid.len() < 46 || !pid.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let addr: std::net::SocketAddr = "127.0.0.1:9501".parse().ok()?;
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
+    Some(format!("/ip4/127.0.0.1/tcp/9501/p2p/{pid}"))
+}
+
 /// `0.0.0.0:18181` → `http://127.0.0.1:18181` (the screen talks to its node over loopback).
 fn api_url(bind: &str) -> String {
     let bind = bind.trim();
@@ -177,6 +190,19 @@ pub fn prepare() -> std::io::Result<Plan> {
         set_default("SIGIL_PRODUCER", "0");
         set_default("SIGIL_TRUSTED_PRODUCER_ID_HEX", DEFAULT_TRUSTED_PRODUCER_IDS);
     }
+    // A producer on THIS machine (Viktor's Epsilon): the public bootstrap address does not answer from the same box
+    // (hairpin/firewall on :9501, measured 2026-10-20: a fresh node there sat at 0 peers), so dial it over loopback
+    // first, the way the light engine already does. Read the shared peer-id file BEFORE pointing ours elsewhere.
+    if std::env::var_os("SIGIL_BOOTSTRAP_PEERS").is_none() {
+        if let Some(local) = local_producer(&flux_p2p::sigil_peerid_path()) {
+            let mut list = vec![local];
+            list.extend(sigil_net::DEFAULT_BOOTSTRAP_PEERS.iter().map(|s| s.to_string()));
+            std::env::set_var("SIGIL_BOOTSTRAP_PEERS", list.join(","));
+        }
+    }
+    // Every node writes its peer id to that shared file unless told otherwise — a user's node would overwrite a
+    // producer's on the same machine and send every screen there dialing the wrong id. Ours lives with our data.
+    set_default("SIGIL_PEERID_FILE", &data_dir.join("peerid").to_string_lossy());
     if std::env::var_os("SIGIL_P2P_PORT").is_none() {
         let p = free_port("0.0.0.0", 9501..=9600).unwrap_or(9501);
         std::env::set_var("SIGIL_P2P_PORT", p.to_string());
@@ -593,6 +619,17 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), G3_PROFILE.len(), "a key twice");
+    }
+
+    #[test]
+    fn a_garbage_peer_id_file_is_never_a_bootstrap_entry() {
+        let d = std::env::temp_dir().join(format!("own-node-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("peerid");
+        std::fs::write(&f, "12D3Koo; rm -rf /").unwrap();
+        assert_eq!(local_producer(&f), None);
+        assert_eq!(local_producer(&d.join("missing")), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

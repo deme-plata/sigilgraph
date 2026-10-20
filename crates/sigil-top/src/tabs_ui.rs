@@ -479,9 +479,12 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
             // (network power + personal mining) right below it; the other cards flow beneath.
             // 10.4.27: a full node gets a third hero — the ◆ PRODUCER band (seal + block belt).
             let prod_h = if crate::forge_ui::band_visible() { 8 } else { 0 };
+            // 10.6.0: your own node IS the sync — while it runs, its card replaces the light engine's SYNC card,
+            // so the screen shows one sync, the real one (two progress bars for one chain confused, 2026-10-20).
+            let sync_h = if prod_h > 0 { 0 } else { 11 };
             let [hero_sync, hero_prod, hero_mining, cards_area] =
-                Layout::vertical([Constraint::Length(11), Constraint::Length(prod_h), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
-            draw_sync_hero(f, app, hero_sync);
+                Layout::vertical([Constraint::Length(sync_h), Constraint::Length(prod_h), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+            if sync_h > 0 { draw_sync_hero(f, app, hero_sync); }
             if prod_h > 0 { crate::forge_ui::draw_producer_hero(f, app, hero_prod); }
             draw_mining_hero(f, app, hero_mining);
             draw_node_body(f, app, cards_area);

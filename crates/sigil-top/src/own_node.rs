@@ -138,6 +138,22 @@ fn default_data_dir() -> PathBuf {
     base.join(format!("sigil-top-node-{}", sigil_header::NETWORK_ID_STR))
 }
 
+/// Secrets the node would otherwise pick up from fixed paths on the machine — an OPERATOR's, if sigil-top runs
+/// on a server that also hosts the network (Epsilon). A user's node holds none of them, so each points into the
+/// node's own folder, at a file that does not exist:
+///   * the tip-proof key — else `~/.flux-agent-key.json`, a user's Flux agent key;
+///   * the bridge vault key + ledger — else `/root/.config/sigil/bridge-vault.{seed,notes.jsonl}` (measured
+///     2026-10-20: a user-mode node on Epsilon logged "bridge vault loaded"; the ledger was not written);
+///   * the peer-id file — else the shared `/tmp/sigil-node-g0.peerid` a producer on this machine publishes.
+fn follower_secret_paths(data_dir: &Path) -> Vec<(&'static str, String)> {
+    let p = |name: &str| data_dir.join(name).to_string_lossy().into_owned();
+    vec![
+        ("SIGIL_TIP_PROOF_KEY", p("no-tip-proof-key")),
+        ("SIGIL_BRIDGE_VAULT_SEED", p("no-bridge-vault.seed")),
+        ("SIGIL_BRIDGE_VAULT_LEDGER", p("no-bridge-vault-notes.jsonl")),
+    ]
+}
+
 /// A sigil-node producer on this machine: it published a plausible peer id AND `127.0.0.1:9501` accepts (a 300 ms
 /// probe, so a stale file never becomes a dead bootstrap entry). Same rule as flux-p2p's light-client side.
 fn local_producer(peerid_file: &Path) -> Option<String> {
@@ -179,9 +195,9 @@ pub fn prepare() -> std::io::Result<Plan> {
     set_default("SIGIL_DB_PATH", &d);
     set_default("SIGIL_SNAPSHOT_DIR", &d);
     set_default("SIGIL_EXPECT_NETWORK", sigil_header::NETWORK_ID_STR);
-    // A follower signs nothing: without this the node would load ~/.flux-agent-key.json (a user's Flux agent key)
-    // as its tip-proof key. A path that does not exist means "no key".
-    set_default("SIGIL_TIP_PROOF_KEY", &data_dir.join("no-tip-proof-key").to_string_lossy());
+    for (k, v) in follower_secret_paths(&data_dir) {
+        set_default(k, &v);
+    }
     if sigil_header::IS_G3 {
         for (k, v) in G3_PROFILE {
             set_default(k, v);
@@ -624,6 +640,18 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), G3_PROFILE.len(), "a key twice");
+    }
+
+    /// A user's node never reaches for an operator's secret on the same machine.
+    #[test]
+    fn a_followers_secrets_point_into_its_own_folder() {
+        let d = Path::new("/srv/users/alice/sigil-top-node-sigil-g3");
+        let got = follower_secret_paths(d);
+        for k in ["SIGIL_TIP_PROOF_KEY", "SIGIL_BRIDGE_VAULT_SEED", "SIGIL_BRIDGE_VAULT_LEDGER"] {
+            let v = got.iter().find(|(x, _)| *x == k).map(|(_, v)| v.as_str()).unwrap_or_else(|| panic!("{k} missing"));
+            assert!(v.starts_with("/srv/users/alice/sigil-top-node-sigil-g3/"), "{k} = {v}");
+            assert!(!v.contains("/root/") && !v.contains(".flux-agent-key"), "{k} = {v}");
+        }
     }
 
     #[test]

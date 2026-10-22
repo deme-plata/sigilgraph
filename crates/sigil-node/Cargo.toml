@@ -53,6 +53,8 @@ hex        = { workspace = true }
 # chronos_send_throughput.rs: signs real SendBridge submissions with real
 # ed25519 keypairs (deterministic seeds — no rand_core feature needed here).
 ed25519-dalek = { version = "2.2" }
+# 2026-10-22: backfill signature checks across all cores (dag::verify_all_parallel).
+rayon      = { workspace = true }
 anyhow     = { workspace = true }
 tokio      = { workspace = true }
 # 2026-08-20: RUST_LOG was inert for this binary — no subscriber was ever installed,

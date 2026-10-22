@@ -587,6 +587,12 @@ fn trusted_release_keys() -> Vec<Vec<u8>> {
     keys
 }
 
+/// A range request in flight already covers height `h` (ranges are inclusive at both ends).
+fn range_in_flight(inflight: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>, h: u64) -> bool {
+    let g = match inflight.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+    g.iter().any(|&(from, to)| from <= h && h <= to)
+}
+
 /// The whole sigil-node program: `args` is argv as `std::env::args()` gives it (argv[0] = the program name).
 /// `src/main.rs` calls this, and so does sigil-top (2026-10-20), so both run this exact code.
 pub fn node_main(args: Vec<String>) -> ExitCode {
@@ -1934,7 +1940,13 @@ fn run_start() -> Result<()> {
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let inflight_cap: usize = std::env::var("SIGIL_FETCH_INFLIGHT")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(16);
-        const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
+        // 2026-10-22 (sync speed): never further ahead than `pending` keeps. This was 131,072 — "~16
+        // ranges" while a range was 8,192 blocks — but `pending_insert` drops anything more than
+        // PENDING_MAX_AHEAD (32,768) above the tip, so ~3/4 of every window was downloaded and thrown
+        // away, and the node then crawled through those heights on the 1–2-request gap-recovery path.
+        // Measured on a syncing node: asking 131 k ahead, applying ~1,000 blk/s while ~2,000 arrived.
+        // Concurrency is bounded by `inflight_cap` (requests), not by this.
+        const FETCH_MAX_AHEAD: u64 = crate::dag::PENDING_MAX_AHEAD - FETCH_CHUNK;
         loop {
             // Slide the window: fire consecutive range-requests until req_frontier is
             // FETCH_MAX_AHEAD past the applied tip. Height-bounded => apply backpressures fetch.
@@ -3785,6 +3797,16 @@ fn run_start() -> Result<()> {
                                     // prefer a peer topologically close to it (has actually been
                                     // carrying that strand) over an arbitrary connected peer.
                                     peer_affinity.record(from.clone(), block_producer, bheight);
+                                    // 2026-10-22 (sync speed): a block far above our tip (deep catch-up) cannot join
+                                    // the braid until the range catch-up reaches it — its parents are thousands of
+                                    // blocks above us. Parking it and walking its parents back by hash, 64 at a time,
+                                    // filled the park pool (4,096) within seconds of a sync, after which every parked
+                                    // arrival paid a full eviction scan: measured 31 % of a syncing node's main thread.
+                                    // The windowed range catch-up brings these heights in order; `net_tip` is noted
+                                    // above. A node at the tip never meets this (its gossip is one block ahead).
+                                    if bheight > chain.height().saturating_add(crate::dag::PENDING_MAX_AHEAD) {
+                                        continue;
+                                    }
                                     // QTFT-2: verify BEFORE insert — the window this block's
                                     // topology_commitment covers is `[height-32, height-1]`,
                                     // strictly ancestors, so it never includes `block` itself;
@@ -3980,7 +4002,12 @@ fn run_start() -> Result<()> {
                                                     // the 15ms rate-throttle above will let us try again
                                                     // shortly, and a permit frees up as soon as any
                                                     // in-flight fetch completes.
-                                                    if let Ok(permit) = std::sync::Arc::clone(&gap_fetch_permits).try_acquire_owned() {
+                                                    // 2026-10-22: not while a range in flight already covers our next
+                                                    // height — during catch-up the windowed fetcher holds it, and every
+                                                    // parked gossip block re-asked it (see the peer-heights path).
+                                                    let gap_covered = range_in_flight(&inflight_ranges, chain.height());
+                                                    if gap_covered {
+                                                    } else if let Ok(permit) = std::sync::Arc::clone(&gap_fetch_permits).try_acquire_owned() {
                                                         let mgr2 = std::sync::Arc::clone(&mgr);
                                                         let bf_tx2 = bf_tx.clone();
                                                         let (gf_from, gf_to) = (req.from, req.to);
@@ -4311,9 +4338,20 @@ fn run_start() -> Result<()> {
                                     // previous ask had been answered — MEASURED: five 29.8 MB replies
                                     // sharing one connection, every one of them timing out at 8 s.
                                     static PH_INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                                    let ph_peer = ph_peer.filter(|_| PH_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed) < 2);
+                                    // 2026-10-22: and never the range the windowed fetcher is already
+                                    // pulling, nor the same start twice. `expected` only moves once a reply
+                                    // is APPLIED, so every heartbeat re-asked the range in flight —
+                                    // measured: 40 of 126 requests in a minute were exact repeats, each
+                                    // block arrived 1.46 times. Gap recovery still fires when nothing
+                                    // covers `expected` (a failed or released range).
+                                    static PH_LAST_FROM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+                                    let ph_busy = range_in_flight(&inflight_ranges, expected)
+                                        || (PH_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed) > 0
+                                            && PH_LAST_FROM.load(std::sync::atomic::Ordering::Relaxed) == expected);
+                                    let ph_peer = ph_peer.filter(|_| PH_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed) < 2 && !ph_busy);
                                     if let Some(peer) = ph_peer {
                                         PH_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        PH_LAST_FROM.store(expected, std::sync::atomic::Ordering::Relaxed);
                                         let req = BackfillReq {
                                             from: expected,
                                             to: ph_to,
@@ -4585,10 +4623,15 @@ fn run_start() -> Result<()> {
                         // window once catch-up makes progress. Pushing a deep gap
                         // through the braid (pending cap 4096) is what wedged the
                         // first braid-c smoke test — never again.
-                        for block in vals {
-                            // 2026-08-20: verify_at_height — same early/cheap upgrade
-                            // as the braid-arm precheck above.
-                            if block.header.verify_at_height(block.header.height).is_err() { continue; }
+                        // 2026-08-20: verify_at_height — same early/cheap upgrade as the braid-arm
+                        // precheck above. 2026-10-22 (Viktor: "fix it so sync is as fast as 10.5.0"):
+                        // measured, these checks were 40 % of this thread — one at a time, and ~1/3 on
+                        // copies pending_insert drops anyway. Drop those first, check the rest on all
+                        // cores; the same blocks reach `pending` in the same order.
+                        let vals = crate::dag::backfill_candidates(vals, &pending, chain.height());
+                        let ok = crate::dag::verify_all_parallel(&vals);
+                        for (block, ok) in vals.into_iter().zip(ok) {
+                            if !ok { continue; }
                             let h = block.header.height;
                             pending_insert(&mut pending, chain.height(), h, block);
                         }

@@ -567,8 +567,43 @@ impl Braid {
             self.frontier.insert(rec.key());
         }
         self.recs.insert(view.hash, rec);
+        let prev_gen = self.gen;
         self.gen += 1; // recs changed → selected_tip memo invalid
+        self.carry_tip_memo(prev_gen, view.hash);
         Accept::Ok
+    }
+
+    /// 2026-10-22 (sync speed, Viktor: "fix it so sync is as fast as 10.5.0"): `selected_tip` is the best of all
+    /// resident blocks — max blue work (v2) or max height (v1), min-hash tie-break — and every insert threw its memo
+    /// away, so the next call re-scanned the whole window (up to 16,384 blocks, two hash-map lookups each): 26 % of a
+    /// syncing node's busy thread, measured. One block added and nothing else changed ⇒ the new best is the old best
+    /// or the new block, by the SAME comparison. Carried only when the memo was current just before this insert and
+    /// no fork-choice anchor is resident (that path chooses among the anchor's descendants and keeps the full
+    /// recount); evictions and anchor changes bump `gen` without carrying, so they still recount. A block's blue work
+    /// never changes once computed (`GhostdagStore::compute` writes only the new block's data).
+    fn carry_tip_memo(&self, prev_gen: u64, new: BlockHash) {
+        let Some((g, old)) = self.sel_tip_memo.get() else { return };
+        if g != prev_gen || self.fork_anchor.is_some_and(|(_, a)| self.recs.contains_key(&a)) {
+            return;
+        }
+        let tip = match old {
+            None if self.recs.len() == 1 => new,
+            None => return,
+            Some(old) => {
+                let new_wins = match &self.ghostdag {
+                    Some(store) => {
+                        let (wo, wn) = (store.blue_work(&old), store.blue_work(&new));
+                        wn > wo || (wn == wo && new < old)
+                    }
+                    None => {
+                        let (ho, hn) = (self.recs[&old].view.height, self.recs[&new].view.height);
+                        hn > ho || (hn == ho && new < old)
+                    }
+                };
+                if new_wins { new } else { old }
+            }
+        };
+        self.sel_tip_memo.set(Some((self.gen, Some(tip))));
     }
 
     /// After `accepted` entered the window, unpark every pending descendant
@@ -1597,6 +1632,47 @@ mod tests {
             out.push(v(h(i), h(i - 1), vec![], i as u64, PA));
         }
         out
+    }
+
+    /// 2026-10-22: the carried selected-tip memo equals a full recount after EVERY insert — a random braid with
+    /// side strands, merges and two producers, GHOSTDAG on and off, drained (so the window evicts) as it grows.
+    #[test]
+    fn carried_tip_memo_equals_a_full_recount_after_every_insert() {
+        for ghostdag_k in [None, Some(4u32)] {
+            for seed in [1u64, 7, 42, 1234] {
+                let mut b = Braid::new(BraidConfig { final_depth: 32, ghostdag_k, ..BraidConfig::default() });
+                let mut rng = seed;
+                let mut next = || { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng };
+                let hash_of = |i: u64| -> BlockHash { *blake3::hash(&i.to_le_bytes()).as_bytes() };
+                let mut made: Vec<(BlockHash, u64)> = vec![];
+                assert!(matches!(b.insert(v(hash_of(0), [0u8; 32], vec![], 0, PA)), InsertOutcome::Inserted { .. }));
+                made.push((hash_of(0), 0));
+                let mut carried = 0usize;
+                for i in 1..700u64 {
+                    // a parent among the newest few blocks (side strands), sometimes a merge parent too
+                    let back = (next() % 4) as usize;
+                    let (parent, ph) = made[made.len().saturating_sub(1 + back)];
+                    let mut merges = vec![];
+                    if next() % 3 == 0 && made.len() > 2 {
+                        let (m, _) = made[made.len().saturating_sub(1 + (next() % 3) as usize)];
+                        if m != parent { merges.push(m); }
+                    }
+                    let producer = if next() % 2 == 0 { PA } else { PB };
+                    let before = b.sel_tip_memo.get().map(|(g, _)| g == b.gen).unwrap_or(false);
+                    let out = b.insert(v(hash_of(i), parent, merges, ph + 1, producer));
+                    if matches!(out, InsertOutcome::Inserted { .. }) {
+                        made.push((hash_of(i), ph + 1));
+                    }
+                    if before && b.sel_tip_memo.get().map(|(g, _)| g == b.gen).unwrap_or(false) { carried += 1; }
+                    let fast = b.selected_tip();
+                    b.sel_tip_memo.set(None);
+                    let full = b.selected_tip();
+                    assert_eq!(fast, full, "k={ghostdag_k:?} seed={seed} after insert {i}");
+                    if i % 37 == 0 { let _ = b.drain_ordered(); }
+                }
+                assert!(carried > 100, "the memo must actually be carried (k={ghostdag_k:?} seed={seed}: {carried})");
+            }
+        }
     }
 
     /// A config with intrinsic quorum finality armed.

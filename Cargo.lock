@@ -9189,6 +9189,7 @@ dependencies = [
  "hex",
  "lz4",
  "rand 0.8.6",
+ "rayon",
  "rmp-serde",
  "serde",
  "serde_json",

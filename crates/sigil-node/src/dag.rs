@@ -311,6 +311,30 @@ pub const PENDING_MAX_AHEAD: u64 = 32_768;
 
 /// Buffer a gossiped/backfilled block by height, bounded in BOTH directions.
 /// Returns true if it was retained. Every `pending` insert must go through here.
+/// The blocks of a backfill reply that [`pending_insert`] could still keep: not settled, within the horizon,
+/// not already waiting (it keeps the FIRST block per height). 2026-10-22: a syncing node checked the producer
+/// signature of every copy before `pending_insert` dropped it — ~1/3 of the checks were on copies (measured: 1.46
+/// blocks received per height). Dropping them first changes nothing that reaches `pending`.
+pub fn backfill_candidates(vals: Vec<Block>, pending: &BTreeMap<u64, Block>, tip_height: u64) -> Vec<Block> {
+    vals.into_iter()
+        .filter(|b| {
+            let h = b.header.height;
+            h >= tip_height && h - tip_height <= PENDING_MAX_AHEAD && !pending.contains_key(&h)
+        })
+        .collect()
+}
+
+/// `verify_at_height` for every block, across all cores; the answers in input order. 2026-10-22: these checks
+/// were 40 % of a syncing node's one busy thread, one at a time, while every other core sat idle.
+pub fn verify_all_parallel(blocks: &[Block]) -> Vec<bool> {
+    let check = |b: &Block| b.header.verify_at_height(b.header.height).is_ok();
+    if blocks.len() < 16 {
+        return blocks.iter().map(check).collect();
+    }
+    use rayon::prelude::*;
+    blocks.par_iter().map(check).collect()
+}
+
 pub fn pending_insert(
     pending: &mut BTreeMap<u64, Block>,
     tip_height: u64,

@@ -847,8 +847,21 @@ impl SigilBlockHeaderV0 {
         match self.sig_scheme {
             SigScheme::Ed25519Hot => {
                 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
-                let vk = VerifyingKey::from_bytes(&self.producer)
-                    .map_err(|_| HeaderError::ProducerSigInvalid)?;
+                // 2026-10-22 (sync speed): decoding the key (a point decompression) was ~3 % of a syncing node's
+                // busy thread, and every block of a chain carries the same producer key. Remember the last
+                // decoded key per thread; the same 32 bytes always decode to the same key.
+                thread_local! {
+                    static LAST_VK: std::cell::Cell<Option<([u8; 32], VerifyingKey)>> = const { std::cell::Cell::new(None) };
+                }
+                let vk = match LAST_VK.with(|c| c.get()).filter(|(k, _)| *k == self.producer) {
+                    Some((_, vk)) => vk,
+                    None => {
+                        let vk = VerifyingKey::from_bytes(&self.producer)
+                            .map_err(|_| HeaderError::ProducerSigInvalid)?;
+                        LAST_VK.with(|c| c.set(Some((self.producer, vk))));
+                        vk
+                    }
+                };
                 let sig_arr: [u8; 64] = self
                     .producer_sig
                     .0

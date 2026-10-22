@@ -1525,6 +1525,9 @@ fn run_start() -> Result<()> {
         // height at the last reseed — reseeds are progress-gated on the height.
         let mut dag_last_reseed_rejects: u64 = 0;
         let mut dag_last_reseed_height: u64 = 0;
+        // 2026-10-22 (speed stage 2): set while catch-up skips the braid (far below the network tip); cleared by the
+        // one re-seed when the node gets near the tip.
+        let mut braid_skipped_deep = false;
         // Adaptive governor (if on) starts at its floor; else the fixed produce_us.
         let initial_produce_us = rate_gov.as_ref()
             .map(|g| (1_000_000.0 / g.rate_min) as u64)
@@ -4636,19 +4639,51 @@ fn run_start() -> Result<()> {
                             pending_insert(&mut pending, chain.height(), h, block);
                         }
                         let mut fork_at_tip = false;
-                        while let Some(b) = pending.remove(&chain.height()) {
-                            let bhash = b.hash();
-                            let view = BlockView::from(&b.header);
-                            let braw = chain_log::encode_record(&b).unwrap_or_default();
-                            let witness = (b.header.height, b.header.event_log_root, b.events.clone());
-                            match chain.apply(b.clone()) {
-                                Ok(_) => {
-                                    let _ = chain_log.append_bytes(&braw);
-                                    sigil_api::height::set(witness.0);
-                                            court_bridge.record_block(witness.0, witness.1, witness.2);
+                        // 2026-10-22 (speed stage 1, Viktor: "i want at least 10x that"): the contiguous run waiting
+                        // in `pending` is applied on ONE state copy (`ChainTip::apply_run`), its disk records packed
+                        // and its header hashes computed on all cores first. The same blocks, the same checks, the
+                        // same order and the same per-block bookkeeping as the one-at-a-time loop this replaces; a
+                        // failure is handled exactly as before, and the blocks after it stay waiting in `pending`.
+                        const APPLY_RUN_MAX: usize = 512;
+                        loop {
+                            let mut run: Vec<crate::block::Block> = Vec::new();
+                            while run.len() < APPLY_RUN_MAX {
+                                match pending.remove(&(chain.height() + run.len() as u64)) {
+                                    Some(b) => run.push(b),
+                                    None => break,
+                                }
+                            }
+                            if run.is_empty() { break; }
+                            // 2026-10-22 (speed stage 2): far below the network tip these blocks are settled history —
+                            // feeding each into the braid (a FRONTIER structure) filled its 16,384 window, parked
+                            // every block after a refused one and paid a full eviction scan per insert (measured: ~80 %
+                            // of the main thread at 5,500 blk/s), plus a re-seed per batch. Skip it here; one re-seed
+                            // from the chain's window happens when the node comes near the tip (below).
+                            let deep = net_tip.saturating_sub(chain.height()) > crate::dag::PENDING_MAX_AHEAD;
+                            if deep { braid_skipped_deep = true; }
+                            let raws: Vec<Vec<u8>> = {
+                                use rayon::prelude::*;
+                                run.par_iter().map(|b| chain_log::encode_record(b).unwrap_or_default()).collect()
+                            };
+                            let out = chain.apply_run(&run);
+                            let mut rest = run.into_iter();
+                            for (k, b) in rest.by_ref().take(out.applied).enumerate() {
+                                let bhash = out.hashes[k];
+                                let view = BlockView {
+                                    hash: bhash,
+                                    parent: b.header.parent_hash,
+                                    merge_parents: b.header.merge_parents.clone(),
+                                    height: b.header.height,
+                                    producer: b.header.producer,
+                                    difficulty: b.header.difficulty,
+                                };
+                                    let _ = chain_log.append_bytes(&raws[k]);
+                                    sigil_api::height::set(b.header.height);
+                                            court_bridge.record_block(b.header.height, b.header.event_log_root, b.events.clone());
                                     applied += 1;
                                     backfilled += 1;
                                     if let Some(r) = reorg_ring.as_mut() { r.clear_fork_hits(); }
+                                    if deep { continue; }
                                     // 2026-10-08 (step 1): this block came from a peer's SETTLED
                                     // chain and just passed the state chokepoint, so its merge
                                     // parents are committed history — the other producer's side
@@ -4664,8 +4699,15 @@ fn run_start() -> Result<()> {
                                     if matches!(br.insert(view), InsertOutcome::Inserted { .. }) {
                                         dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, b, &|h| body_use(br, h));
                                     }
-                                }
-                                Err(e) => {
+                            }
+                            match out.error {
+                                None => continue,
+                                Some((_, e)) => {
+                                    // The failed block is the one right after the applied prefix.
+                                    let Some(b) = rest.next() else { break };
+                                    for later in rest {
+                                        pending.insert(later.header.height, later);
+                                    }
                                     dag_apply_failed += 1;
                                     // 2026-09-08: this arm used to swallow the error and
                                     // break silently. A single follower that cannot extend
@@ -4715,7 +4757,15 @@ fn run_start() -> Result<()> {
                         // the braid's tip — linear catch-up from final blocks got ahead of a
                         // braid stuck on parked blocks (measured: braid 5,259, settled 6,443).
                         // The braid is then behind its own node: re-seed it from the chain.
-                        if br.follows_certificates() {
+                        let deep_now = net_tip.saturating_sub(chain.height()) > crate::dag::PENDING_MAX_AHEAD;
+                        if braid_skipped_deep && !deep_now {
+                            // 2026-10-22 (speed stage 2): catch-up skipped the braid; near the tip now — rebuild it from
+                            // the chain's window once, exactly as a start-up near the tip does.
+                            braid_skipped_deep = false;
+                            eprintln!("🕸 braid re-seeded after deep catch-up: H={}, network tip {}", chain.height(), net_tip);
+                            *br = dag_seed_braid(&chain);
+                        }
+                        if br.follows_certificates() && !deep_now {
                             let braid_tip = br.selected_tip().and_then(|t| br.height_of(&t)).unwrap_or(0);
                             if chain.height() > braid_tip.saturating_add(8) {
                                 eprintln!("🕸 braid re-seeded: settled H={} is past the braid tip H={braid_tip}",

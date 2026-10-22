@@ -166,52 +166,7 @@ impl ChainTip {
     /// drives the REAL follower through a scheduled height before the live table carries an
     /// entry. Production goes through [`apply`].
     pub fn apply_with_schedule(&mut self, block: Block, schedule: &[(u64, WalletId)]) -> Result<()> {
-        block.header.precheck().with_context(|| "header precheck failed")?;
-        // 2026-09-15: the post-quantum leg is finally CHECKED here, at the one chokepoint every
-        // block passes (gossip, backfill, self-mined). Observe-only unless SIGIL_HYBRID_ENFORCE=1;
-        // trusted ids are a list so retired producer keys keep verifying their own epoch.
-        crate::producer_signing::check_hybrid_on_apply(&block.header)
-            .map_err(|e| anyhow!("hybrid producer signature rejected at height {}: {}", block.header.height, e))?;
-
-        let expected_height = self.height();
-        if block.header.height != expected_height {
-            return Err(anyhow!(
-                "block height mismatch: chain expects {}, block claims {}",
-                expected_height, block.header.height
-            ));
-        }
-        if block.header.parent_hash != self.parent_hash() {
-            return Err(anyhow!(
-                "parent_hash mismatch: chain tip is {}, block parent is {}",
-                hex_short(&self.parent_hash()),
-                hex_short(&block.header.parent_hash),
-            ));
-        }
-        if block.transition.at_height != expected_height {
-            return Err(anyhow!(
-                "transition height mismatch with header: header={}, transition={}",
-                expected_height, block.transition.at_height
-            ));
-        }
-
-        // v9: at a scheduled rotation height the block MUST open with exactly the scheduled
-        // rotation. The chokepoint below already refuses a rotation that is not on the
-        // schedule (wrong height / wrong wallet); this is the other half — a producer cannot
-        // SKIP the rotation, or bury it after a coinbase that still paid the old master.
-        if let Some(wallet) = sigil_state::scheduled_master_rotation_in(schedule, expected_height) {
-            match block.transition.mutations.first() {
-                Some(StateMutation::RotateMasterWallet { wallet: w }) if *w == wallet => {}
-                other => {
-                    return Err(anyhow!(
-                        "block at height {} must open with the scheduled master-wallet rotation to {} — first mutation is {}",
-                        expected_height,
-                        hex_short(&wallet),
-                        match other { Some(m) => format!("{:?}", std::mem::discriminant(m)), None => "none (empty transition)".to_string() },
-                    ));
-                }
-            }
-        }
-
+        check_block(&block, self.height(), self.parent_hash(), schedule)?;
         // Commit into a COPY and swap it in only once every root matches the header.
         // 2026-10-09 (measured, `tampered_body_is_refused_without_touching_state`): committing straight
         // into `self.state` left a refused block's mutations behind. The block hash covers only the
@@ -220,43 +175,159 @@ impl ChainTip {
         // The heavy parts of the state (notes, ciphertexts, archive) are copy-on-write, so the copy is
         // cheap; the maps are the size of the chain's wallets and nullifiers.
         let mut next = self.state.clone();
-        let computed = commit_state_transition_with_master_schedule(&mut next, &block.transition, expected_height, schedule)
-            .map_err(|e| anyhow!("state commit failed: {}", e))?;
-
-        if !block.check_roots_match(&computed) {
-            return Err(anyhow!(
-                "STATE DIVERGENCE at height {} — local roots != header roots", expected_height
-            ));
-        }
-        // The fifth root — the shielded pool — height-gated (see `Block::check_shielded_pool_root`).
-        let local_pool_root = next.shielded_pool_root();
-        if !block.check_shielded_pool_root(local_pool_root) {
-            return Err(anyhow!(
-                "STATE DIVERGENCE at height {} — shielded pool root: header {} != local {}",
-                expected_height,
-                block.header.shielded_pool_root.map(hex::encode).unwrap_or_else(|| "none".into()),
-                hex::encode(local_pool_root)
-            ));
-        }
+        commit_checked(&mut next, &block, self.height(), schedule)?;
         // Every check passed: only now does the block's transition become this node's state.
         self.state = next;
-        if expected_height == sigil_header::shielded_pool_root_activation_height() {
-            eprintln!(
-                "🔏 shielded pool root ACTIVE from height {} — header commits {} (notes {}, nullifiers {})",
-                expected_height, hex::encode(local_pool_root),
-                self.state.shielded().len(), self.state.shielded().nullifier_count()
-            );
-        }
-
         // Hash once, here, while the header is fresh — `parent_hash()` serves it from now on.
-        self.tip_hash = Some(block.hash());
+        let hash = block.hash();
+        self.push_applied(block, hash);
+        Ok(())
+    }
+
+    /// 2026-10-22 (sync speed, Viktor: "i want at least 10x that"): apply a contiguous run of blocks on ONE copy of the
+    /// state instead of one copy per block. Copying and freeing the wallet + nullifier maps for every block was ~29 %
+    /// of a syncing node's main thread, measured, and grows with the chain. Every block passes exactly the checks
+    /// `apply` makes ([`check_block`] + [`commit_checked`]), in order, against the state the block before it left.
+    /// The copy becomes this node's state only after the LAST block's roots match. If block `i` fails, the copy —
+    /// which may hold block `i`'s partial mutation (the 2026-10-09 M0 lesson) — is thrown away and blocks `0..i` are
+    /// applied again one by one through `apply`, so the node ends exactly where sequential application leaves it.
+    /// The run's header hashes are computed on all cores; they are returned for the caller to reuse.
+    pub fn apply_run(&mut self, run: &[Block]) -> RunOutcome {
+        self.apply_run_with_schedule(run, sigil_state::MASTER_WALLET_ROTATIONS)
+    }
+
+    /// [`apply_run`] with an explicit rotation schedule (the test seam, as for `apply_with_schedule`).
+    pub fn apply_run_with_schedule(&mut self, run: &[Block], schedule: &[(u64, WalletId)]) -> RunOutcome {
+        use rayon::prelude::*;
+        let hashes: Vec<BlockHash> = run.par_iter().map(|b| b.hash()).collect();
+        let start = self.height();
+        let mut height = start;
+        let mut parent = self.parent_hash();
+        let mut next: Option<SigilState> = None;
+        for (i, block) in run.iter().enumerate() {
+            let step = check_block(block, height, parent, schedule).and_then(|()| {
+                let st = next.get_or_insert_with(|| self.state.clone());
+                commit_checked(st, block, height, schedule)
+            });
+            if let Err(e) = step {
+                drop(next);
+                for b in &run[..i] {
+                    if let Err(again) = self.apply_with_schedule(b.clone(), schedule) {
+                        // Cannot happen (the same blocks on the same state, deterministic) — say so if it does.
+                        return RunOutcome { applied: self.height().saturating_sub(start) as usize, hashes,
+                            error: Some((i, again.context("re-applying a prefix that had just passed"))) };
+                    }
+                }
+                return RunOutcome { applied: i, hashes, error: Some((i, e)) };
+            }
+            parent = hashes[i];
+            height += 1;
+        }
+        if let Some(st) = next {
+            self.state = st;
+        }
+        for (b, h) in run.iter().zip(&hashes) {
+            self.push_applied(b.clone(), *h);
+        }
+        RunOutcome { applied: run.len(), hashes, error: None }
+    }
+
+    fn push_applied(&mut self, block: Block, hash: BlockHash) {
+        self.tip_hash = Some(hash);
         self.blocks.push_back(block);
         while self.blocks.len() > WINDOW {
             self.blocks.pop_front();
             self.base_height += 1;
         }
-        Ok(())
     }
+}
+
+/// What [`ChainTip::apply_run`] did: how many blocks of the run are now applied (always a prefix), every block's
+/// header hash (in run order), and the first failure, if any — `(index in the run, why)`.
+pub struct RunOutcome {
+    pub applied: usize,
+    pub hashes: Vec<BlockHash>,
+    pub error: Option<(usize, anyhow::Error)>,
+}
+
+/// The checks a block passes before its transition touches any state (moved out of `apply_with_schedule` unchanged).
+fn check_block(block: &Block, expected_height: u64, parent_hash: BlockHash, schedule: &[(u64, WalletId)]) -> Result<()> {
+    block.header.precheck().with_context(|| "header precheck failed")?;
+    // 2026-09-15: the post-quantum leg is finally CHECKED here, at the one chokepoint every
+    // block passes (gossip, backfill, self-mined). Observe-only unless SIGIL_HYBRID_ENFORCE=1;
+    // trusted ids are a list so retired producer keys keep verifying their own epoch.
+    crate::producer_signing::check_hybrid_on_apply(&block.header)
+        .map_err(|e| anyhow!("hybrid producer signature rejected at height {}: {}", block.header.height, e))?;
+
+    if block.header.height != expected_height {
+        return Err(anyhow!(
+            "block height mismatch: chain expects {}, block claims {}",
+            expected_height, block.header.height
+        ));
+    }
+    if block.header.parent_hash != parent_hash {
+        return Err(anyhow!(
+            "parent_hash mismatch: chain tip is {}, block parent is {}",
+            hex_short(&parent_hash),
+            hex_short(&block.header.parent_hash),
+        ));
+    }
+    if block.transition.at_height != expected_height {
+        return Err(anyhow!(
+            "transition height mismatch with header: header={}, transition={}",
+            expected_height, block.transition.at_height
+        ));
+    }
+
+    // v9: at a scheduled rotation height the block MUST open with exactly the scheduled
+    // rotation. The chokepoint below already refuses a rotation that is not on the
+    // schedule (wrong height / wrong wallet); this is the other half — a producer cannot
+    // SKIP the rotation, or bury it after a coinbase that still paid the old master.
+    if let Some(wallet) = sigil_state::scheduled_master_rotation_in(schedule, expected_height) {
+        match block.transition.mutations.first() {
+            Some(StateMutation::RotateMasterWallet { wallet: w }) if *w == wallet => {}
+            other => {
+                return Err(anyhow!(
+                    "block at height {} must open with the scheduled master-wallet rotation to {} — first mutation is {}",
+                    expected_height,
+                    hex_short(&wallet),
+                    match other { Some(m) => format!("{:?}", std::mem::discriminant(m)), None => "none (empty transition)".to_string() },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Commit `block`'s transition into `next` and require every root to match the header (moved out of
+/// `apply_with_schedule` unchanged). On `Err`, `next` may hold a partial mutation — the caller throws it away.
+fn commit_checked(next: &mut SigilState, block: &Block, expected_height: u64, schedule: &[(u64, WalletId)]) -> Result<()> {
+    let computed = commit_state_transition_with_master_schedule(next, &block.transition, expected_height, schedule)
+        .map_err(|e| anyhow!("state commit failed: {}", e))?;
+
+    if !block.check_roots_match(&computed) {
+        return Err(anyhow!(
+            "STATE DIVERGENCE at height {} — local roots != header roots", expected_height
+        ));
+    }
+    // The fifth root — the shielded pool — height-gated (see `Block::check_shielded_pool_root`).
+    let local_pool_root = next.shielded_pool_root();
+    if !block.check_shielded_pool_root(local_pool_root) {
+        return Err(anyhow!(
+            "STATE DIVERGENCE at height {} — shielded pool root: header {} != local {}",
+            expected_height,
+            block.header.shielded_pool_root.map(hex::encode).unwrap_or_else(|| "none".into()),
+            hex::encode(local_pool_root)
+        ));
+    }
+    if expected_height == sigil_header::shielded_pool_root_activation_height() {
+        eprintln!(
+            "🔏 shielded pool root ACTIVE from height {} — header commits {} (notes {}, nullifiers {})",
+            expected_height, hex::encode(local_pool_root),
+            next.shielded().len(), next.shielded().nullifier_count()
+        );
+    }
+    Ok(())
 }
 
 fn hex_short(b: &[u8; 32]) -> String {

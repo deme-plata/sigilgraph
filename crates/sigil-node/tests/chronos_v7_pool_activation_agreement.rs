@@ -29,9 +29,11 @@ use sigil_header::{
     override_shielded_pool_root_activation_for_simulation, override_v7_pool_activation_for_simulation,
     v7_pool_active,
 };
+use sigil_api::shielded::ShieldedSubmitError;
 use sigil_shield::wallet::{build_spend, shield_note, NoteStore, ShieldedAccount};
-use sigil_state::shielded::SHIELDED_FEE;
-use sigil_state::NATIVE;
+use sigil_shield::wallet_v7::{seal_output_v7, shield_note_v7, AccountV7, NoteStoreV7};
+use sigil_state::shielded::{PoolGeneration, SHIELDED_FEE};
+use sigil_state::{StateMutation, NATIVE};
 use std::collections::BTreeSet;
 
 const ROOT_GATE: u64 = 4;
@@ -68,6 +70,19 @@ fn send_existing(h: &mut Harness, alice: &ShieldedAccount, bob: &ShieldedAccount
 #[test]
 #[cfg_attr(debug_assertions, ignore = "STARK prover needs debug_assertions off — run with --profile release-fast")]
 fn chronos_v7_opens_beside_v1_and_producer_equals_follower_across_the_gate() {
+    if sigil_header::IS_G3 {
+        // sigil-g3 has no v7 transition to test: v1 is closed and v7 is epoch 1 from genesis.
+        // Prove that premise rather than pass silently; the g3 counterpart is
+        // `chronos_g3_v7_from_genesis_producer_equals_follower` below.
+        let h = Harness::new(OfferPolicy::Fixed);
+        let pool = h.chain.state().shielded();
+        assert!(pool.v7_active() && !pool.v1_live(), "sigil-g3: v7 open and v1 closed at genesis");
+        eprintln!(
+            "chronos[v7 activation]: NOT APPLICABLE on {} — no transition (v7 open, v1 closed from genesis); the g3 counterpart runs instead",
+            sigil_header::NETWORK_ID_STR
+        );
+        return;
+    }
     override_shielded_pool_root_activation_for_simulation(ROOT_GATE);
     override_v7_pool_activation_for_simulation(u64::MAX - 1); // set for real once round 1 has settled
     std::env::set_var("SIGIL_DAG_FINAL_DEPTH", FINAL_DEPTH);
@@ -225,4 +240,143 @@ fn chronos_v7_opens_beside_v1_and_producer_equals_follower_across_the_gate() {
     override_v7_pool_activation_for_simulation(u64::MAX);
     override_shielded_pool_root_activation_for_simulation(u64::MAX);
     std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
+}
+
+/// sigil-g3 counterpart (2026-10-22). g3 has no v7 transition: v1 is closed and v7 is epoch 1
+/// from genesis, and every note carries a sealed, view-tagged envelope (chain rule, 2026-10-19).
+/// On the REAL loop with an independent follower, the checks of the live g3 driver
+/// (`sigil-api/examples/g3_r3_driver.rs` G0–G6, G12):
+///   1. GENESIS SHAPE: v7 open as epoch 1, v1 closed and empty.
+///   2. THE DOOR: an old-format (v1) deposit is refused; a v7 deposit with no envelope is
+///      refused; the same deposit with its view tag stripped is refused.
+///   3. The same deposit, tagged, settles in the v7 tree. A v7 payment with ONE untagged
+///      output is refused at the door; the same payment fully tagged settles: nullifier spent
+///      in the v7 epoch and NOT in epoch 0, both outputs in the v7 tree, the fee out of v7's
+///      own value, nothing in v1.
+///   4. FOLLOWER ≡ PRODUCER on all five roots; a third ChainTip replays every block and
+///      re-derives every committed pool root, present in EVERY block.
+///   5. TEETH: the block carrying the v7 spend, with a flipped pool root, is refused.
+/// Outside the g3 family this scenario does not exist: the test checks v1 is live and says so.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "STARK prover needs debug_assertions off — run with --profile release-fast")]
+fn chronos_g3_v7_from_genesis_producer_equals_follower() {
+    if !sigil_header::IS_G3 {
+        let h = Harness::new(OfferPolicy::Fixed);
+        assert!(h.chain.state().shielded().v1_live(), "outside the g3 family v1 is live at genesis");
+        eprintln!(
+            "chronos[g3 v7 from genesis]: NOT APPLICABLE on {} — v1 is live here; the transition test covers it",
+            sigil_header::NETWORK_ID_STR
+        );
+        return;
+    }
+    std::env::set_var("SIGIL_DAG_FINAL_DEPTH", FINAL_DEPTH);
+    let alice_sk = ed25519_dalek::SigningKey::from_bytes(&[0x5E; 32]);
+    let alice_addr = alice_sk.verifying_key().to_bytes();
+    std::env::set_var("SIGIL_PRODUCER_WALLET", hex::encode(alice_addr));
+    let alice = AccountV7::from_seed([0x5E; 32]);
+    let bob = AccountV7::from_seed([0xB0; 32]);
+    let mut h = Harness::new(OfferPolicy::Fixed);
+
+    // ── 1. GENESIS SHAPE ─────────────────────────────────────────────────────────
+    {
+        let pool = h.chain.state().shielded();
+        assert!(pool.v7_active() && !pool.v1_live(), "v7 open and v1 closed at genesis");
+        assert_eq!(pool.len(), 0, "the v1 tree is empty");
+        assert_eq!(pool.v7().unwrap().epoch(), 1, "v7 is epoch 1 (no number shared with v1)");
+    }
+    let e7 = spend_epoch(&h);
+
+    // ── 2. THE DOOR refuses every pre-g3 shape ───────────────────────────────────
+    let amount = 1_000_000u128; // a denomination
+    tick_until(&mut h, 40, "Alice funded by coinbase", |h| h.chain.state().balance_of(&alice_addr, &NATIVE) >= amount);
+    let from_hex = hex::encode(alice_addr);
+    let v1 = ShieldedAccount::from_seed([0x5E; 32]);
+    let (_, cm1) = shield_note(&v1, &mut NoteStore::new(), amount as u64).expect("derive v1 note");
+    let n = g3_nonce();
+    let r = h.api.shielded.submit_shield(&from_hex, amount, &hex::encode(cm1), 0, &sign_shield(&alice_sk, &from_hex, amount, &hex::encode(cm1), 0, n), n);
+    assert!(matches!(r, Err(ShieldedSubmitError::V1DepositsClosed)), "an old-format deposit is refused at the door: {r:?}");
+    let dep = shield_note_v7(&alice, &mut NoteStoreV7::new(), amount as u64).expect("derive v7 note");
+    let tagged = seal_output_v7(amount as u64, alice.blinding(dep.index), &alice.pk_enc_hex(), "chronos deposit").expect("seal").0;
+    for (what, ct) in [("no envelope", None), ("its view tag stripped", Some(untag(&tagged)))] {
+        let n = g3_nonce();
+        let sig = sign_shield(&alice_sk, &from_hex, amount, &hex::encode(dep.cm), 0, n);
+        let r = h.api.shielded.submit_shield_opened(
+            &from_hex, amount, &hex::encode(dep.cm), 0, &sig, n,
+            ct.as_deref(), Some(&hex::encode(dep.blinding)), Some(&hex::encode(dep.pk_shield)),
+        );
+        assert!(matches!(r, Err(ShieldedSubmitError::UntaggedEnvelope)), "a v7 deposit with {what} is refused: {r:?}");
+    }
+
+    // ── 3. the same deposit, tagged; a payment refused with one untagged output, then settled ──
+    let mut store = NoteStoreV7::new();
+    let v7_before = pay_tree_len(&h);
+    let locked_before = h.chain.state().shielded().value_locked_in(PoolGeneration::V7);
+    let (dep_hash, slot) = g3_deposit(&mut h, &alice_sk, alice_addr, &alice, &mut store, amount);
+    tick_until(&mut h, 40, "the tagged v7 deposit lands", |h| matches!(h.status(&dep_hash), Some(TxOutcome::Applied)));
+    {
+        let pool = h.chain.state().shielded();
+        assert_eq!(pool.v7().unwrap().len(), v7_before + 1, "the deposit is in the v7 tree");
+        assert!(pool.v7().unwrap().notes().contains(&dep.cm), "the same deposit the door refused untagged, now tagged");
+        assert_eq!(pool.value_locked_in(PoolGeneration::V7), locked_before + amount, "counted in v7's own value");
+        assert_eq!(pool.len(), 0, "and not in v1");
+    }
+    let (b, mut cts) = g3_build_payment(&h, &alice, &bob, &mut store, slot, 400_000);
+    let good = cts[0].clone();
+    cts[0] = Some(untag(cts[0].as_deref().expect("sealed")));
+    let r = g3_submit_payment(&h, &b, &cts);
+    assert!(matches!(r, Err(ShieldedSubmitError::UntaggedEnvelope)), "a payment with one untagged output is refused: {r:?}");
+    cts[0] = good;
+    let send = g3_submit_payment(&h, &b, &cts).expect("the fully tagged payment is accepted");
+    tick_until(&mut h, 60, "the v7 payment settles", |h| matches!(h.status(&send), Some(TxOutcome::Applied)) && nf_spent(h, &b.nullifier));
+    {
+        let pool = h.chain.state().shielded();
+        assert!(!pool.is_spent_in_epoch(0, &b.nullifier), "the nullifier is scoped to the v7 epoch, not epoch 0");
+        assert_eq!(pool.v7().unwrap().len(), v7_before + 3, "deposit + both outputs in the v7 tree");
+        assert_eq!(pool.value_locked_in(PoolGeneration::V7), locked_before + amount - SHIELDED_FEE, "the fee left v7's own value");
+        assert_eq!(pool.len(), 0, "v1 untouched");
+    }
+    for _ in 0..6 { h.tick(); }
+
+    // ── 4. FOLLOWER ≡ PRODUCER, and a third ChainTip re-derives every committed root ──
+    assert_eq!(h.follower.height(), h.chain.height());
+    assert_eq!(h.follower.parent_hash(), h.chain.parent_hash(), "follower sits on the producer's tip");
+    assert_eq!(h.follower.state().roots(), h.chain.state().roots(), "four roots agree");
+    assert_eq!(h.follower.state().shielded_pool_root(), h.chain.state().shielded_pool_root(), "the fifth root agrees");
+    assert_eq!(h.applied_blocks.len() as u64, h.chain.height() - h.genesis_height, "every applied block was mirrored");
+    let mut replay = sigil_node::chain::ChainTip::new();
+    replay.apply(sigil_node::genesis::build_genesis().expect("genesis")).expect("apply genesis");
+    let mut roots_seen: BTreeSet<[u8; 32]> = BTreeSet::new();
+    for blk in &h.applied_blocks {
+        let hgt = blk.header.height;
+        replay.apply(blk.clone()).unwrap_or_else(|e| panic!("replay refused the producer's block at {hgt}: {e}"));
+        let r = blk.header.shielded_pool_root.unwrap_or_else(|| panic!("h={hgt}: sigil-g3 commits the pool root in every block"));
+        assert_eq!(r, replay.state().shielded_pool_root(), "h={hgt}: header root == re-derived pool root");
+        roots_seen.insert(r);
+    }
+    assert!(roots_seen.len() >= 3, "the deposit and the payment must each move the pool root (took {} values)", roots_seen.len());
+
+    // ── 5. TEETH: the block carrying the v7 spend, with a flipped pool root, is refused ──
+    let target = h.applied_blocks.iter()
+        .find(|blk| blk.transition.mutations.iter().any(|m| matches!(m, StateMutation::ShieldedSpend { .. })))
+        .expect("a block carrying the v7 spend");
+    let mut pre = sigil_node::chain::ChainTip::new();
+    pre.apply(sigil_node::genesis::build_genesis().expect("genesis")).expect("apply genesis");
+    for blk in &h.applied_blocks {
+        if blk.header.height >= target.header.height { break; }
+        pre.apply(blk.clone()).expect("replay prefix");
+    }
+    let mut flipped = target.clone();
+    let mut fr = flipped.header.shielded_pool_root.expect("committed");
+    fr[0] ^= 0x01;
+    flipped.header.shielded_pool_root = Some(fr);
+    let err = pre.clone().apply(flipped).expect_err("a follower must refuse a block whose pool root is not its own");
+    assert!(err.to_string().contains("STATE DIVERGENCE"), "{err}");
+    pre.apply(target.clone()).expect("the genuine block is accepted");
+
+    eprintln!(
+        "chronos[g3 v7 from genesis]: {} blocks mirrored · door refused v1, envelope-less and untagged deposits + an untagged output · tagged v7 deposit + payment settled, nullifier in epoch {e7} · pool root took {} values in every block · follower ≡ producer",
+        h.applied_blocks.len(), roots_seen.len()
+    );
+    std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
+    std::env::remove_var("SIGIL_PRODUCER_WALLET");
 }

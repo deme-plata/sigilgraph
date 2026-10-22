@@ -65,7 +65,7 @@ fn chronos_header_commits_exactly_the_body_it_ships_with() {
             &mut h, &alice_sk, alice_addr, &alice, &bob, &bob_seed, &mut store, shield_amt, pay_amt,
         );
         tick_until(&mut h, 60, "the private payment settles", |h| {
-            matches!(h.status(&send_hash), Some(TxOutcome::Applied)) && h.chain.state().shielded().is_spent(&nf)
+            matches!(h.status(&send_hash), Some(TxOutcome::Applied)) && nf_spent(h, &nf)
         });
         settled_sends += 1;
         assert_eq!(

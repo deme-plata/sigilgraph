@@ -38,7 +38,15 @@ const GATE: u64 = 4;
 #[test]
 #[cfg_attr(debug_assertions, ignore = "STARK prover needs debug_assertions off — run with --profile release-fast")]
 fn chronos_header_commits_the_shielded_pool_from_the_gate() {
-    override_shielded_pool_root_activation_for_simulation(GATE);
+    // sigil-g3 commits the pool root from genesis: lowering the gate on a g3 build would
+    // simulate a configuration no g3 node runs, so g3 keeps its compiled-in height 0.
+    let gate = if sigil_header::IS_G3 {
+        assert_eq!(sigil_header::SHIELDED_POOL_ROOT_ACTIVATION_HEIGHT, 0, "sigil-g3: the pool root is committed from genesis");
+        0
+    } else {
+        override_shielded_pool_root_activation_for_simulation(GATE);
+        GATE
+    };
     std::env::set_var("SIGIL_DAG_FINAL_DEPTH", FINAL_DEPTH);
     let alice_sk = ed25519_dalek::SigningKey::from_bytes(&[0x5E; 32]);
     let alice_addr = alice_sk.verifying_key().to_bytes();
@@ -57,7 +65,7 @@ fn chronos_header_commits_the_shielded_pool_from_the_gate() {
             &mut h, &alice_sk, alice_addr, &alice, &bob, &bob_seed, &mut store, shield_amt, pay_amt,
         );
         tick_until(&mut h, 60, "the private payment settles", |h| {
-            matches!(h.status(&send_hash), Some(TxOutcome::Applied)) && h.chain.state().shielded().is_spent(&nf)
+            matches!(h.status(&send_hash), Some(TxOutcome::Applied)) && nf_spent(h, &nf)
         });
         assert_eq!(
             h.applied_blocks.len() as u64, h.chain.height() - h.genesis_height,
@@ -74,7 +82,7 @@ fn chronos_header_commits_the_shielded_pool_from_the_gate() {
         h.follower.state().shielded_pool_root(), h.chain.state().shielded_pool_root(),
         "the fifth root agrees"
     );
-    assert!(h.chain.height() > GATE + 2, "the chain must have crossed the gate: height {}", h.chain.height());
+    assert!(h.chain.height() > gate + 2, "the chain must have crossed the gate: height {}", h.chain.height());
 
     // ── 1. GATE + 3. NOT VACUOUS: replay every block through a third ChainTip ─────
     let mut replay = sigil_node::chain::ChainTip::new();
@@ -85,7 +93,7 @@ fn chronos_header_commits_the_shielded_pool_from_the_gate() {
         let hgt = b.header.height;
         assert_eq!(
             b.header.shielded_pool_root.is_some(), shielded_pool_root_required(hgt),
-            "h={hgt}: shielded_pool_root present ⇔ height ≥ gate {GATE}"
+            "h={hgt}: shielded_pool_root present ⇔ height ≥ gate {gate}"
         );
         replay.apply(b.clone()).unwrap_or_else(|e| panic!("replay refused the producer's block at {hgt}: {e}"));
         match b.header.shielded_pool_root {
@@ -97,7 +105,11 @@ fn chronos_header_commits_the_shielded_pool_from_the_gate() {
             None => below += 1,
         }
     }
-    assert!(below >= 1, "no block below the gate — the pre-gate `None` path was never exercised");
+    if sigil_header::IS_G3 {
+        assert_eq!(below, 0, "sigil-g3: every block commits the pool root");
+    } else {
+        assert!(below >= 1, "no block below the gate — the pre-gate `None` path was never exercised");
+    }
     assert!(gated >= 2, "fewer than two gated blocks");
     assert!(
         roots_seen.len() >= 3,

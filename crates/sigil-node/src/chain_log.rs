@@ -12,6 +12,10 @@
 //!   * streaming `replay()` on recovery — one block at a time, BOUNDED RAM.
 //! The in-RAM chain ([`crate::chain::ChainTip`]) then keeps only a small recent
 //! WINDOW; everything older lives here on disk.
+//!
+//! 2026-10-22: the `offsets` index is persisted as `chain.off` (see [`OFF_MAGIC`]), so a
+//! restart reads it instead of walking every record — measured 78.5 min for a 1 TB log of
+//! private-payment blocks before it.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -66,6 +70,30 @@ const IDX_ENTRY_LEN: usize = 16;
 /// 511 of every 512 appends don't touch the index at all; the 512th pays one
 /// tiny probe-parse + a flushed 16-byte write).
 const IDX_EVERY: u64 = 512;
+
+/// `chain.off` — the DENSE persisted copy of the in-RAM `offsets` (2026-10-22).
+///
+/// Without it every restart re-derives `offsets` by walking the whole log, one disk seek per
+/// record: measured 78.5 min for a 1 TB log of 0.92 MB private-payment blocks (1,084,864
+/// records, 4.3 ms each), 22 min at 250 GB, 6 min at 50 GB (chronos lane
+/// sigil-chronos-g3-1022). Layout: 8-byte header (`b"SGLOFF\0"` + version) followed by one
+/// `u64` LE per record — the byte offset of record `i` in `chain.log` (8 B/record).
+///
+/// Written right AFTER each record is flushed to the log, so it can only ever LAG the log (a
+/// crash between the two writes, or an older binary appending without it): `open` scans just
+/// the records past its last entry. Trusted only after it checks out against the log —
+/// strictly increasing from 0, every entry inside the file, and [`OFF_SAMPLES`] sampled
+/// entries plus the last each sit on a real record boundary (`offset + 4 + len` equals the
+/// next entry) with a readable record header. Anything else → the full scan, and the file is
+/// rewritten. A stale `chain.off` costs time, never correctness.
+const OFF_MAGIC: [u8; 7] = *b"SGLOFF\0";
+const OFF_VERSION: u8 = 1;
+const OFF_HEADER_LEN: usize = 8;
+const OFF_SAMPLES: usize = 64;
+/// The most a torn last record may leave dangling past the last complete one before `open`
+/// refuses to cut it: far above any real record, so anything larger is not a crash mid-append
+/// but a corrupt length prefix inside the log — cutting there would silently drop real blocks.
+const MAX_TORN_TAIL: u64 = 64 << 20;
 
 /// Minimal deserialization target to pull `header.height` out of a block's
 /// serde_json bytes without decoding the whole block (used on the append path
@@ -150,45 +178,217 @@ pub struct ChainLog {
     /// Best-effort append handle for `chain.idx`. `None` = index writes are
     /// disabled (open/IO error) — reads then fall back to filtered scans.
     idx_writer: Option<BufWriter<File>>,
+    /// Best-effort append handle for `chain.off`. `None` = disabled after an IO error; the
+    /// next `open` then scans the records it is missing.
+    off_writer: Option<BufWriter<File>>,
+    /// How the last `open` got its offsets: records taken from `chain.off`, records scanned.
+    opened_from_off: u64,
+    opened_by_scan: u64,
 }
 
 impl ChainLog {
-    /// Open (creating if absent) and build the offset index by scanning records.
+    /// Open (creating if absent). The offset index comes from `chain.off` when it checks out
+    /// against the log (see [`OFF_MAGIC`]); only the records past what it covers are scanned —
+    /// all of them on the first open after an upgrade, or when `chain.off` is missing or
+    /// rejected (it is then rewritten). A torn last record (a crash mid-append) is cut off and
+    /// kept beside the log as `chain.log.torn-<offset>`, so later appends land where the index
+    /// says they do.
     pub fn open(dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("chain.log");
+        let off_path = Self::off_path_for(&path);
         let mut offsets = Vec::new();
         let mut bytes_len = 0u64;
+        let mut trusted = 0usize; // leading entries of `offsets` that chain.off already holds
         if path.exists() {
-            let mut r = BufReader::new(File::open(&path)?);
-            let mut pos = 0u64;
-            loop {
-                let mut lb = [0u8; 4];
-                if r.read_exact(&mut lb).is_err() {
-                    break; // clean EOF (or a torn trailing record — stop there)
-                }
-                let rec = u32::from_le_bytes(lb) as u64;
-                offsets.push(pos);
-                pos += 4 + rec;
-                // seek_relative (not seek(SeekFrom::Start)) — a BufReader's Seek impl
-                // unconditionally discards its internal buffer on every call, turning
-                // this scan into one raw unbuffered syscall PER RECORD (each pulling a
-                // fresh OS page just to read the next 4-byte length prefix). At tens of
-                // millions of records that's tens of millions of syscalls and hundreds
-                // of GB of redundant reads — the actual cause of a multi-hour open() on
-                // a large chain.log. seek_relative stays inside the buffer whenever the
-                // skip distance fits (always true here: records are ~hundreds of bytes,
-                // the buffer is 8 KB), so the common case costs no syscall at all.
-                if r.seek_relative(rec as i64).is_err() {
-                    offsets.pop(); // torn record at the tail; drop it
-                    break;
-                }
+            let t0 = std::time::Instant::now();
+            let file_len = std::fs::metadata(&path)?.len();
+            let mut f = File::open(&path)?;
+            let mut start = 0u64;
+            if let Some((persisted, end)) = Self::load_offsets(&off_path, &mut f, file_len) {
+                trusted = persisted.len();
+                offsets = persisted;
+                start = end;
             }
-            bytes_len = pos;
+            let (end, torn) = Self::scan_offsets(f, start, file_len, &mut offsets)?;
+            bytes_len = end;
+            if torn {
+                Self::cut_torn_tail(&path, end, file_len, MAX_TORN_TAIL)?;
+            }
+            if !offsets.is_empty() {
+                eprintln!(
+                    "chain.log: {} records — {} from chain.off, {} scanned ({:.1} s)",
+                    offsets.len(), trusted, offsets.len() - trusted, t0.elapsed().as_secs_f64()
+                );
+            }
         }
         let writer = BufWriter::new(OpenOptions::new().create(true).append(true).open(&path)?);
         let idx_writer = Self::open_idx_writer(&Self::idx_path_for(&path), offsets.is_empty());
-        Ok(Self { path, writer, offsets, bytes_len, idx_writer })
+        let off_writer = Self::open_off_writer(&off_path, &offsets, trusted);
+        let (opened_from_off, opened_by_scan) = (trusted as u64, (offsets.len() - trusted) as u64);
+        Ok(Self { path, writer, offsets, bytes_len, idx_writer, off_writer, opened_from_off, opened_by_scan })
+    }
+
+    /// How the last `open` got its offsets: (records taken from `chain.off`, records scanned).
+    pub fn open_stats(&self) -> (u64, u64) {
+        (self.opened_from_off, self.opened_by_scan)
+    }
+
+    /// Walk the records from `start` to EOF, pushing each record's offset. Returns the end of
+    /// the last COMPLETE record and whether the file ends in a torn one — its length prefix or
+    /// its body runs past EOF. (The old scan relied on `seek_relative` failing there; it does
+    /// not fail past EOF, so a torn record was counted and later appends landed after its
+    /// garbage, misaligned with `offsets` — found by the 2026-10-18 chronos torn-tail probe.)
+    fn scan_offsets(f: File, start: u64, file_len: u64, offsets: &mut Vec<u64>) -> std::io::Result<(u64, bool)> {
+        let mut r = BufReader::new(f);
+        r.seek(SeekFrom::Start(start))?;
+        let mut pos = start;
+        loop {
+            if pos == file_len {
+                return Ok((pos, false));
+            }
+            if pos + 4 > file_len {
+                return Ok((pos, true));
+            }
+            let mut lb = [0u8; 4];
+            r.read_exact(&mut lb)?;
+            let rec = u32::from_le_bytes(lb) as u64;
+            if pos + 4 + rec > file_len {
+                return Ok((pos, true));
+            }
+            offsets.push(pos);
+            pos += 4 + rec;
+            // seek_relative (not seek(SeekFrom::Start)) — a BufReader's Seek impl
+            // unconditionally discards its internal buffer on every call, turning
+            // this scan into one raw unbuffered syscall PER RECORD (each pulling a
+            // fresh OS page just to read the next 4-byte length prefix). At tens of
+            // millions of records that's tens of millions of syscalls and hundreds
+            // of GB of redundant reads — the actual cause of a multi-hour open() on
+            // a large chain.log. seek_relative stays inside the buffer whenever the
+            // skip distance fits (always true here: records are ~hundreds of bytes,
+            // the buffer is 8 KB), so the common case costs no syscall at all.
+            r.seek_relative(rec as i64)?;
+        }
+    }
+
+    /// Cut a torn last record off the log, keeping its bytes beside it as evidence. `end` is
+    /// the end of the last record that fits entirely inside the file. Refuses (an error, so the
+    /// node does not start on it) when more than `max_cut` bytes dangle: that is a corrupt
+    /// length prefix inside the log, not a crash, and cutting would drop real blocks.
+    fn cut_torn_tail(path: &Path, end: u64, file_len: u64, max_cut: u64) -> std::io::Result<()> {
+        let dangling = file_len - end;
+        if dangling > max_cut {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "chain.log: {dangling} bytes after the last complete record at offset {end} do not form a \
+                     record — a corrupt length prefix, not a torn append; not cutting (repair_chain_log)"
+                ),
+            ));
+        }
+        let keep = path.with_file_name(format!("chain.log.torn-{end}"));
+        let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+        f.seek(SeekFrom::Start(end))?;
+        std::io::copy(&mut (&mut f).take(dangling), &mut File::create(&keep)?)?;
+        f.set_len(end)?;
+        f.sync_all()?;
+        eprintln!(
+            "⚠ chain.log ended in a torn record: {dangling} bytes after the last complete one (offset {end}) cut off, kept as {}",
+            keep.display()
+        );
+        Ok(())
+    }
+
+    /// `chain.off` lives next to `chain.log`.
+    fn off_path_for(log_path: &Path) -> PathBuf {
+        log_path.with_file_name("chain.off")
+    }
+
+    /// `chain.off`'s offsets and the end of the last record they cover — if, and only if, the
+    /// file checks out against the log (see [`OFF_MAGIC`]). `None` → scan from byte 0.
+    fn load_offsets(off_path: &Path, log: &mut File, file_len: u64) -> Option<(Vec<u64>, u64)> {
+        let raw = std::fs::read(off_path).ok()?;
+        if raw.len() < OFF_HEADER_LEN || raw[..7] != OFF_MAGIC || raw[7] != OFF_VERSION {
+            return None;
+        }
+        // A crash mid-entry leaves a partial trailing entry: chunks_exact drops it.
+        let offsets: Vec<u64> =
+            raw[OFF_HEADER_LEN..].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let Some(&last) = offsets.last() else { return Some((offsets, 0)) };
+        if offsets[0] != 0 || last >= file_len || !offsets.windows(2).all(|w| w[0] < w[1]) {
+            return None;
+        }
+        let n = offsets.len();
+        let mut picks: Vec<usize> = (0..OFF_SAMPLES).map(|k| k * (n - 1) / OFF_SAMPLES).collect();
+        picks.push(n - 1);
+        picks.dedup();
+        let mut end_of_last = 0;
+        for i in picks {
+            let end = Self::record_end_if_whole(log, offsets[i], file_len)?;
+            if i + 1 < n && end != offsets[i + 1] {
+                return None;
+            }
+            end_of_last = end;
+        }
+        Some((offsets, end_of_last))
+    }
+
+    /// The end of the record at `off`, if a whole record with a readable header starts there.
+    fn record_end_if_whole(log: &mut File, off: u64, file_len: u64) -> Option<u64> {
+        log.seek(SeekFrom::Start(off)).ok()?;
+        let mut lb = [0u8; 4];
+        log.read_exact(&mut lb).ok()?;
+        let len = u32::from_le_bytes(lb) as u64;
+        let end = off + 4 + len;
+        if len == 0 || end > file_len {
+            return None;
+        }
+        let mut head = vec![0u8; (len as usize).min(PROBE_WINDOW)];
+        log.read_exact(&mut head).ok()?;
+        probe_height(&head)?;
+        Some(end)
+    }
+
+    /// Bring `chain.off` up to date with `offsets` and keep it open for appends. `trusted` =
+    /// how many leading entries the file already holds (checked by [`Self::load_offsets`]);
+    /// 0 = missing or rejected, so it is rewritten whole (tmp + rename). Best-effort: on an IO
+    /// error the file is removed and the next `open` scans, exactly as before it existed.
+    fn open_off_writer(off_path: &Path, offsets: &[u64], trusted: usize) -> Option<BufWriter<File>> {
+        let res = (|| -> std::io::Result<BufWriter<File>> {
+            if trusted == 0 {
+                let tmp = off_path.with_extension("off.tmp");
+                let mut w = BufWriter::new(File::create(&tmp)?);
+                let mut hdr = [0u8; OFF_HEADER_LEN];
+                hdr[..7].copy_from_slice(&OFF_MAGIC);
+                hdr[7] = OFF_VERSION;
+                w.write_all(&hdr)?;
+                for o in offsets {
+                    w.write_all(&o.to_le_bytes())?;
+                }
+                w.flush()?;
+                w.get_ref().sync_all()?;
+                drop(w);
+                std::fs::rename(&tmp, off_path)?;
+            } else {
+                // Drop a partial trailing entry, then add what the scan found past the index.
+                OpenOptions::new().write(true).open(off_path)?.set_len((OFF_HEADER_LEN + 8 * trusted) as u64)?;
+                let mut w = BufWriter::new(OpenOptions::new().append(true).open(off_path)?);
+                for o in &offsets[trusted..] {
+                    w.write_all(&o.to_le_bytes())?;
+                }
+                w.flush()?;
+                return Ok(w);
+            }
+            Ok(BufWriter::new(OpenOptions::new().append(true).open(off_path)?))
+        })();
+        match res {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("⚠ chain.off disabled ({e}) — the next open scans chain.log");
+                let _ = std::fs::remove_file(off_path);
+                None
+            }
+        }
     }
 
     /// `chain.idx` lives next to `chain.log`.
@@ -274,8 +474,15 @@ impl ChainLog {
                 self.write_idx_entry(p.header.height, off);
             }
         }
-        self.offsets.push(self.bytes_len);
+        let off = self.bytes_len;
+        self.offsets.push(off);
         self.bytes_len += 4 + bytes.len() as u64;
+        // chain.off AFTER the record is flushed: the index may lag the log, never lead it.
+        if let Some(w) = self.off_writer.as_mut() {
+            if w.write_all(&off.to_le_bytes()).and_then(|_| w.flush()).is_err() {
+                self.off_writer = None;
+            }
+        }
         Ok(())
     }
 
@@ -859,6 +1066,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── chain.off (2026-10-22) ──────────────────────────────────────────────────────
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sigil-chainoff-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// What every open derived before chain.off existed: walk each record from byte 0.
+    pub(super) fn offsets_by_full_scan(dir: &Path) -> Vec<u64> {
+        let path = dir.join("chain.log");
+        let len = std::fs::metadata(&path).unwrap().len();
+        let mut v = Vec::new();
+        let (end, torn) = ChainLog::scan_offsets(File::open(&path).unwrap(), 0, len, &mut v).unwrap();
+        assert!(!torn && end == len, "the fixture log must be whole");
+        v
+    }
+
+    fn off_entries(dir: &Path) -> u64 {
+        (std::fs::metadata(dir.join("chain.off")).unwrap().len() - OFF_HEADER_LEN as u64) / 8
+    }
+
+    fn write_log(dir: &Path, blocks: &[Block]) {
+        let mut log = ChainLog::open(dir).unwrap();
+        for b in blocks {
+            log.append(b).unwrap();
+        }
+    }
+
+    #[test]
+    fn chain_off_tracks_every_append_and_a_reopen_trusts_it() {
+        let dir = fresh_dir("trust");
+        let blocks = crate::block::__test_chain(305);
+        write_log(&dir, &blocks[..300]);
+        assert_eq!(off_entries(&dir), 300, "one entry per appended record");
+        let mut log = ChainLog::open(&dir).unwrap();
+        assert_eq!(log.open_stats(), (300, 0), "a whole chain.off means nothing is scanned");
+        assert_eq!(log.offsets, offsets_by_full_scan(&dir), "chain.off == what the full scan derives");
+        for b in &blocks[300..] {
+            log.append(b).unwrap();
+        }
+        drop(log);
+        assert_eq!(off_entries(&dir), 305);
+        let log = ChainLog::open(&dir).unwrap();
+        assert_eq!(log.open_stats(), (305, 0));
+        assert_eq!(log.get(304).unwrap().header.height, 305);
+        assert_eq!(log.offsets, offsets_by_full_scan(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chain_off_behind_the_log_is_caught_up_by_a_short_scan() {
+        // A crash between a record and its chain.off entry, or an older binary appending.
+        let dir = fresh_dir("behind");
+        write_log(&dir, &crate::block::__test_chain(300));
+        let off = dir.join("chain.off");
+        OpenOptions::new().write(true).open(&off).unwrap().set_len((OFF_HEADER_LEN + 8 * 200 + 3) as u64).unwrap();
+        let log = ChainLog::open(&dir).unwrap();
+        assert_eq!(log.open_stats(), (200, 100), "only the 100 records past chain.off are scanned");
+        assert_eq!(log.offsets, offsets_by_full_scan(&dir));
+        drop(log);
+        assert_eq!(off_entries(&dir), 300, "chain.off is whole again");
+        assert_eq!((std::fs::metadata(&off).unwrap().len() - OFF_HEADER_LEN as u64) % 8, 0, "the torn entry is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_garbled_chain_off_falls_back_to_the_full_scan() {
+        let dir = fresh_dir("garbled");
+        write_log(&dir, &crate::block::__test_chain(300));
+        let off = dir.join("chain.off");
+        let good = std::fs::read(&off).unwrap();
+        let at = |i: usize| OFF_HEADER_LEN + 8 * i;
+        let set = |b: &mut Vec<u8>, i: usize, v: u64| b[at(i)..at(i) + 8].copy_from_slice(&v.to_le_bytes());
+        let get = |b: &[u8], i: usize| u64::from_le_bytes(b[at(i)..at(i) + 8].try_into().unwrap());
+        let mut swapped = good.clone();
+        let (a, b) = (get(&good, 10), get(&good, 11));
+        set(&mut swapped, 10, b);
+        set(&mut swapped, 11, a);
+        let mut beyond = good.clone();
+        set(&mut beyond, 299, u64::MAX);
+        let mut off_boundary = good.clone();
+        set(&mut off_boundary, 299, get(&good, 299) + 1);
+        let mut bad_magic = good.clone();
+        bad_magic[0] ^= 0xFF;
+        let expect = offsets_by_full_scan(&dir);
+        for (what, content) in [
+            ("missing", None),
+            ("bad magic", Some(bad_magic)),
+            ("two entries swapped", Some(swapped)),
+            ("an entry beyond the file", Some(beyond)),
+            ("an entry off a record boundary", Some(off_boundary)),
+        ] {
+            match &content {
+                Some(c) => std::fs::write(&off, c).unwrap(),
+                None => std::fs::remove_file(&off).unwrap(),
+            }
+            let log = ChainLog::open(&dir).unwrap();
+            assert_eq!(log.open_stats(), (0, 300), "{what}: rejected → full scan");
+            assert_eq!(log.offsets, expect, "{what}: offsets still right");
+            drop(log);
+            assert_eq!(std::fs::read(&off).unwrap(), good, "{what}: chain.off rewritten whole");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chain_off_from_a_different_log_is_rejected() {
+        // The same 300 blocks re-encoded in the older v1 format: other record sizes, so other
+        // boundaries — what a swapped-in repaired or recompressed log looks like to chain.off.
+        let dir = fresh_dir("foreign");
+        let blocks = crate::block::__test_chain(300);
+        write_log(&dir, &blocks);
+        let stale = std::fs::read(dir.join("chain.off")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        {
+            let mut log = ChainLog::open(&dir).unwrap();
+            for b in &blocks {
+                log.append_bytes(&super::probe_height_tests::encode_v1_for_test(b)).unwrap();
+            }
+        }
+        assert_ne!(std::fs::read(dir.join("chain.off")).unwrap(), stale, "the fixture must really move the boundaries");
+        let expect = offsets_by_full_scan(&dir);
+        std::fs::write(dir.join("chain.off"), &stale).unwrap();
+        let log = ChainLog::open(&dir).unwrap();
+        assert_eq!(log.open_stats(), (0, 300), "a foreign chain.off is rejected");
+        assert_eq!(log.offsets, expect);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_last_record_is_cut_and_later_appends_stay_aligned() {
+        let blocks = crate::block::__test_chain(101);
+        let mut cut_short = 5000u32.to_le_bytes().to_vec();
+        cut_short.extend([0xAB; 100]);
+        for (what, junk) in [("half a length prefix", vec![0x10u8, 0x27]), ("a body cut short", cut_short)] {
+            let dir = fresh_dir("torn");
+            write_log(&dir, &blocks[..100]);
+            let path = dir.join("chain.log");
+            let whole = std::fs::metadata(&path).unwrap().len();
+            OpenOptions::new().append(true).open(&path).unwrap().write_all(&junk).unwrap();
+            let mut log = ChainLog::open(&dir).unwrap();
+            assert_eq!(log.height(), 100, "{what}: the torn record is not counted");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), whole, "{what}: cut back to the last whole record");
+            assert_eq!(std::fs::read(dir.join(format!("chain.log.torn-{whole}"))).unwrap(), junk, "{what}: the cut bytes are kept");
+            log.append(&blocks[100]).unwrap();
+            drop(log);
+            let log = ChainLog::open(&dir).unwrap();
+            assert_eq!(log.height(), 101);
+            assert_eq!(log.get(100).unwrap().header.height, 101, "{what}: the next append is where the index says");
+            assert_eq!(log.offsets, offsets_by_full_scan(&dir));
+            assert_eq!(ChainLog::replay(&dir, |_| {}).unwrap(), 101);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_large_dangling_region_is_refused_not_cut() {
+        // More than `max_cut` past the last whole record is a corrupt length prefix, not a crash.
+        let dir = fresh_dir("dangling");
+        write_log(&dir, &crate::block::__test_chain(10));
+        let path = dir.join("chain.log");
+        let whole = std::fs::metadata(&path).unwrap().len();
+        OpenOptions::new().append(true).open(&path).unwrap().write_all(&[0xEE; 300]).unwrap();
+        let err = ChainLog::cut_torn_tail(&path, whole, whole + 300, 256).expect_err("300 > 256 dangling bytes: refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 300, "nothing cut");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn get_range_by_height_returns_the_real_requested_heights() {
         // 2026-08-21: get_range_by_height is the height-validated replacement
@@ -1068,7 +1445,7 @@ mod probe_height_tests {
 
     /// The v1 shape, exactly as every record written 2026-08-27..2026-09-13 was — kept as
     /// a test-side encoder so the reader's v1 branch stays covered forever.
-    fn encode_v1_for_test(b: &Block) -> Vec<u8> {
+    pub(super) fn encode_v1_for_test(b: &Block) -> Vec<u8> {
         let packed = rmp_serde::to_vec_named(b).unwrap();
         let body = zstd::encode_all(&packed[..], REC_ZSTD_LEVEL).unwrap();
         let mut out = vec![REC_MAGIC, REC_VERSION_V1];
@@ -1129,6 +1506,7 @@ mod probe_height_tests {
         assert!(a2 < b2, "recompressed {a2} B must be smaller than {b2} B");
         assert!(dir.join("chain.log.pre-v2").exists());
         assert!(!dir.join("chain.log.recompress.state").exists());
+        assert!(!dir.join("chain.off").exists(), "the swap drops the old file's dense offsets");
         let after = std::fs::metadata(dir.join("chain.log")).unwrap().len();
         assert!(after < before);
         let mut seen = Vec::new();
@@ -1137,7 +1515,11 @@ mod probe_height_tests {
         assert_eq!(seen, blocks.iter().map(|b| b.hash()).collect::<Vec<_>>());
         // every record is v2 now, and the fresh index seeks
         let log = ChainLog::open(&dir).unwrap();
+        assert_eq!(log.open_stats(), (0, 40), "the first open after the swap scans, and rebuilds chain.off");
+        assert_eq!(log.offsets, super::tests::offsets_by_full_scan(&dir));
         assert_eq!(log.get_by_height(blocks[39].header.height).map(|b| b.hash()), Some(blocks[39].hash()));
+        drop(log);
+        assert_eq!(ChainLog::open(&dir).unwrap().open_stats(), (40, 0), "and the next one reads it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1393,6 +1775,8 @@ pub fn recompress_offline(dir: &Path, live: bool) -> std::io::Result<(u64, u64, 
     std::fs::rename(&dst, &src)?;
     let _ = std::fs::rename(dir.join("chain.idx"), dir.join("chain.idx.pre-v2"));
     std::fs::rename(&dst_idx, dir.join("chain.idx"))?;
+    // Every record moved: the dense offsets describe the old file. The next open rebuilds them.
+    let _ = std::fs::remove_file(dir.join("chain.off"));
     let _ = std::fs::remove_file(&state);
     Ok((n, before, after))
 }

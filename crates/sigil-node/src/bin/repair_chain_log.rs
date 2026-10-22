@@ -297,5 +297,6 @@ fn main() {
     println!("   mv {}/chain.log {}/chain.log.corrupt-backup", dir.display(), dir.display());
     println!("   mv {} {}/chain.log", out_path.display(), dir.display());
     println!("   rm -f {}/chain.idx     # sparse index is rebuilt on next open", dir.display());
+    println!("   rm -f {}/chain.off     # dense offsets too (open would reject them anyway, after a check)", dir.display());
     println!("   systemctl start sigil-node");
 }

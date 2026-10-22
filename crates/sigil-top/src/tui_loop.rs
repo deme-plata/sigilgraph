@@ -530,7 +530,10 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                             // Rust takes the first matching arm, so [W] silently became [L] and
                             // the embedded :9800 wallet (which now carries Nation › SIGIL OS too)
                             // was unreachable from the keyboard. [L] stays the hosted option.
-                            KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                if !node_resync_key(&mut app) { app.resync(); }
+                                app.toast_sticky = false;
+                            }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
                                 // [G] gates GPU use: GPU mining is OFF by default and only
@@ -1373,4 +1376,27 @@ pub(crate) fn ai_skills_start(app: &mut App) {
     app.ai_skills_note = "loading…".into();
     let base = release::active_base().to_string();
     std::thread::spawn(move || { let _ = tx.send(skills::load(&base)); });
+}
+
+
+/// [Y] (10.6.3, Viktor: "Y resync doesnt work"): with your own node running, [Y] re-syncs THE NODE from block 0 —
+/// pressed twice within 5 s, because the whole chain downloads again. Returns false when there is no own node (the
+/// light engine's resync then runs, as before 10.6.0).
+fn node_resync_key(app: &mut App) -> bool {
+    #[cfg(feature = "producer")]
+    if crate::forge_ui::band_visible() {
+        static ARMED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        let mut g = match ARMED.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+        if g.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+            *g = None;
+            crate::own_node::status::request_resync();
+            app.toast = "⟲ re-syncing your node from block 0 — its old chain data is moved aside, not deleted".into();
+        } else {
+            *g = Some(Instant::now());
+            app.toast = "press [Y] again within 5 s to re-sync YOUR NODE from block 0 (the whole chain downloads again)".into();
+        }
+        return true;
+    }
+    let _ = app;
+    false
 }

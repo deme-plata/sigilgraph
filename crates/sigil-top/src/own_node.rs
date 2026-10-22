@@ -126,7 +126,64 @@ fn free_port(host: &str, range: std::ops::RangeInclusive<u16>) -> Option<u16> {
 fn set_default(k: &str, v: &str) {
     if std::env::var_os(k).is_none() {
         std::env::set_var(k, v);
+        note_filled(k);
     }
+}
+
+/// Set unconditionally, and remember that user mode set it.
+fn fill(k: &str, v: &str) {
+    std::env::set_var(k, v);
+    note_filled(k);
+}
+
+/// 10.6.3: the settings user mode filled in, listed in [`FILLED_ENV`] so a process STARTED BY this one can tell them
+/// from an operator's configuration. The self-update relaunch inherits the environment: measured 2026-10-22 on
+/// Viktor's PC, 10.6.2 ran with 10.6.0's `\\?\` SIGIL_DB_PATH, took the node for operator-configured and skipped
+/// its own defaults — the per-install identity among them.
+const FILLED_ENV: &str = "SIGIL_TOP_FILLED";
+static FILLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+fn note_filled(k: &str) {
+    if let Ok(mut g) = FILLED.lock() {
+        if !g.iter().any(|x| x == k) {
+            g.push(k.to_string());
+        }
+    }
+}
+
+/// What 10.6.0–10.6.2 filled in user mode (they left no list): recognised by sigil-top's internal API_ENV plus a data
+/// folder with sigil-top's own name.
+const LEGACY_FILL_KEYS: &[&str] = &[
+    "SIGIL_DB_PATH", "SIGIL_SNAPSHOT_DIR", "SIGIL_EXPECT_NETWORK", "SIGIL_TIP_PROOF_KEY", "SIGIL_BRIDGE_VAULT_SEED",
+    "SIGIL_BRIDGE_VAULT_LEDGER", "SIGIL_PRODUCER", "SIGIL_TRUSTED_PRODUCER_ID_HEX", "SIGIL_BOOTSTRAP_PEERS",
+    "SIGIL_PEERID_FILE", "SIGIL_P2P_PORT", "SIGIL_WG_LISTEN_ADDR", "SIGIL_MONEY_API", "SIGIL_NODE_ID", API_ENV,
+];
+
+/// Clear what an earlier sigil-top filled in, so this one fills in afresh. Never touches anything else: only keys
+/// that sigil-top itself lists (or, for 10.6.0–10.6.2, its own key set, recognised as above). The node child never
+/// calls `prepare`, so it keeps exactly its parent's settings.
+fn forget_inherited_fill() {
+    let listed = std::env::var(FILLED_ENV).ok();
+    let legacy = listed.is_none()
+        && std::env::var_os(API_ENV).is_some()
+        && std::env::var("SIGIL_DB_PATH").ok().is_some_and(|p| {
+            Path::new(&p).file_name().is_some_and(|n| n.to_string_lossy().starts_with("sigil-top-node-"))
+        });
+    let keys: Vec<String> = match &listed {
+        Some(l) => l.split(',').map(str::to_string).collect(),
+        None if legacy => LEGACY_FILL_KEYS.iter().chain(G3_PROFILE.iter().map(|(k, _)| k)).map(|k| k.to_string()).collect(),
+        None => return,
+    };
+    for k in keys.iter().filter(|k| k.starts_with("SIGIL_")) {
+        // 10.6.0–10.6.2 set the bootstrap list only to put a local producer first; anything else is the user's.
+        if legacy && k == "SIGIL_BOOTSTRAP_PEERS"
+            && !std::env::var(k).is_ok_and(|v| v.starts_with("/ip4/127.0.0.1/"))
+        {
+            continue;
+        }
+        std::env::remove_var(k);
+    }
+    std::env::remove_var(FILLED_ENV);
+    crate::boot_trace("own node: settings an earlier sigil-top filled in (self-update relaunch) were cleared — filling afresh");
 }
 
 /// The node's folder: beside the place the block store REALLY lives (Viktor's `~/sigil-top-blocks.db` is a link
@@ -191,6 +248,7 @@ fn api_url(bind: &str) -> String {
 /// where unset), so the node — here or in a child — reads them like an operator's unit. Call before any thread
 /// that reads the environment starts.
 pub fn prepare() -> std::io::Result<Plan> {
+    forget_inherited_fill();
     if configured_by_env() {
         let data_dir = PathBuf::from(std::env::var("SIGIL_DB_PATH").unwrap_or_default());
         let api = api_url(&std::env::var("SIGIL_MONEY_API").unwrap_or_default());
@@ -203,7 +261,7 @@ pub fn prepare() -> std::io::Result<Plan> {
     std::fs::create_dir_all(&data_dir)?;
     if std::env::var_os("SIGIL_NODE_ID").is_none() {
         match node_identity(&data_dir) {
-            Ok(id) => std::env::set_var("SIGIL_NODE_ID", id),
+            Ok(id) => fill("SIGIL_NODE_ID", &id),
             Err(e) => crate::boot_trace(&format!("own node: no identity file ({e}) — the node falls back to its default name")),
         }
     }
@@ -229,7 +287,7 @@ pub fn prepare() -> std::io::Result<Plan> {
         if let Some(local) = local_producer(&flux_p2p::sigil_peerid_path()) {
             let mut list = vec![local];
             list.extend(sigil_net::DEFAULT_BOOTSTRAP_PEERS.iter().map(|s| s.to_string()));
-            std::env::set_var("SIGIL_BOOTSTRAP_PEERS", list.join(","));
+            fill("SIGIL_BOOTSTRAP_PEERS", &list.join(","));
         }
     }
     // Every node writes its peer id to that shared file unless told otherwise — a user's node would overwrite a
@@ -237,7 +295,7 @@ pub fn prepare() -> std::io::Result<Plan> {
     set_default("SIGIL_PEERID_FILE", &data_dir.join("peerid").to_string_lossy());
     if std::env::var_os("SIGIL_P2P_PORT").is_none() {
         let p = free_port("0.0.0.0", 9501..=9600).unwrap_or(9501);
-        std::env::set_var("SIGIL_P2P_PORT", p.to_string());
+        fill("SIGIL_P2P_PORT", &p.to_string());
         set_default("SIGIL_WG_LISTEN_ADDR", &format!("/ip4/0.0.0.0/tcp/{p}"));
     }
     if std::env::var_os("SIGIL_MONEY_API").is_none() {
@@ -248,10 +306,13 @@ pub fn prepare() -> std::io::Result<Plan> {
         let p = (18181..=18280u16)
             .find(|p| *p != relay && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
             .unwrap_or(18181);
-        std::env::set_var("SIGIL_MONEY_API", format!("127.0.0.1:{p}"));
+        fill("SIGIL_MONEY_API", &format!("127.0.0.1:{p}"));
     }
     let api = api_url(&std::env::var("SIGIL_MONEY_API").unwrap_or_default());
-    std::env::set_var(API_ENV, &api);
+    fill(API_ENV, &api);
+    if let Ok(g) = FILLED.lock() {
+        std::env::set_var(FILLED_ENV, g.join(","));
+    }
     Ok(Plan { log: data_dir.join("sigil-top-node.log"), data_dir, api, user_mode: true })
 }
 
@@ -423,6 +484,10 @@ pub mod status {
     static RESTARTS: AtomicU64 = AtomicU64::new(0);
     static RETRY_AT: AtomicU64 = AtomicU64::new(0);
     static PID: AtomicU64 = AtomicU64::new(0);
+    static RESYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// [Y] (10.6.3): ask the host to re-sync the node from block 0.
+    pub fn request_resync() { RESYNC.store(true, Ordering::Relaxed); }
+    pub fn take_resync() -> bool { RESYNC.swap(false, Ordering::Relaxed) }
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     static LOG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
@@ -612,6 +677,42 @@ fn stop_child(mut c: Child, wait: Duration) {
     let _ = c.wait();
 }
 
+/// [Y] (10.6.3): the node's chain data — `aether/` (block log, index, saved state, snapshot keys) — moves to
+/// `aether.old-<unix time>`; `mining-history` comes back into the fresh `aether/`. Kept, not deleted: the copy from an
+/// EARLIER re-sync is removed first, so repeated re-syncs cannot fill the disk. The identity (`node-id`, keys,
+/// `peerid`) and the user store `aether-user` stay where they are. The node must be stopped.
+fn move_chain_aside(dir: &Path) -> std::io::Result<PathBuf> {
+    let live = dir.join("aether");
+    if !live.is_dir() {
+        return Ok(live);
+    }
+    for e in std::fs::read_dir(dir)?.flatten() {
+        if e.file_name().to_string_lossy().starts_with("aether.old-") && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let old = dir.join(format!("aether.old-{secs}"));
+    // On Windows a scanner can hold the folder a moment after the node exits: a few tries.
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(&live, &old) {
+            Ok(()) => break,
+            Err(e) if tries >= 10 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    std::fs::create_dir_all(&live)?;
+    let mh = old.join("mining-history");
+    if mh.is_dir() {
+        let _ = std::fs::rename(&mh, live.join("mining-history"));
+    }
+    Ok(old)
+}
+
 /// For the screen: prepare the node, start it as a child, watch it (restart with a growing pause if it stops),
 /// and keep [`status`] fresh. `None` when the node is off or its folder cannot be made.
 pub fn start_for_screen() -> Option<NodeHost> {
@@ -639,6 +740,28 @@ pub fn start_for_screen() -> Option<NodeHost> {
         let mut spawn_after = Instant::now();
         let own_log = plan2.log.display().to_string();
         while !quit2.load(Ordering::Relaxed) {
+            // [Y] (10.6.3, Viktor: "Y resync doesnt work"): stop the node politely, move its chain data aside,
+            // start again from block 0.
+            if status::take_resync() {
+                if attached.is_some() {
+                    crate::tlog!("[own-node] re-sync asked, but this node runs from another sigil-top window");
+                } else {
+                    let c = child2.lock().ok().and_then(|mut g| g.take());
+                    if let Some(c) = c {
+                        stop_child(c, Duration::from_secs(60));
+                    }
+                    status::set_pid(0);
+                    match move_chain_aside(&plan2.data_dir) {
+                        Ok(old) => crate::tlog!("[own-node] re-sync from block 0 — the previous chain data is kept in {}", old.display()),
+                        Err(e) => crate::tlog!("[own-node] re-sync: could not move the chain data aside ({e}) — restarting on what it has"),
+                    }
+                    status::set_height(0);
+                    status::set_settled(0);
+                    status::set_phase(status::SYNCING);
+                    failures = 0;
+                    spawn_after = Instant::now();
+                }
+            }
             // (re)start
             let running = child2.lock().map(|g| g.is_some()).unwrap_or(false);
             if !running && Instant::now() >= spawn_after {
@@ -789,6 +912,30 @@ mod tests {
             assert_eq!(mode, 0o600, "the identity seeds the node's key — owner-only");
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// [Y]: the chain data moves aside (one old copy kept), mining history and identity stay.
+    #[test]
+    fn resync_moves_the_chain_aside_and_keeps_identity_and_mining_history() {
+        let d = std::env::temp_dir().join(format!("own-node-resync-test-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("aether/mining-history")).unwrap();
+        std::fs::create_dir_all(d.join("aether-user")).unwrap();
+        std::fs::write(d.join("aether/chain.log"), b"blocks").unwrap();
+        std::fs::write(d.join("aether/mining-history/won"), b"7").unwrap();
+        std::fs::write(d.join("node-id"), b"sigil-top-x").unwrap();
+        let old = move_chain_aside(&d).unwrap();
+        assert_eq!(std::fs::read(old.join("chain.log")).unwrap(), b"blocks", "the chain data is kept aside");
+        assert!(!d.join("aether/chain.log").exists(), "the node starts from block 0");
+        assert_eq!(std::fs::read(d.join("aether/mining-history/won")).unwrap(), b"7", "mining history stays");
+        assert!(d.join("node-id").exists() && d.join("aether-user").is_dir(), "identity and user store untouched");
+        std::fs::write(d.join("aether/chain.log"), b"new").unwrap();
+        std::thread::sleep(Duration::from_millis(1100)); // a different second → a different folder name
+        let old2 = move_chain_aside(&d).unwrap();
+        let olds: Vec<_> = std::fs::read_dir(&d).unwrap().flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("aether.old-")).collect();
+        assert_eq!(olds.len(), 1, "only the newest old copy is kept");
+        assert_eq!(std::fs::read(old2.join("chain.log")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Windows' verbatim prefix is dropped for drive paths only.

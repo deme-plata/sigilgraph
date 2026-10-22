@@ -477,15 +477,15 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
         Tab::Node => {
             // v0.33.3: SYNC full-width HERO band on top; v0.36.1: an equally-large MINING hero
             // (network power + personal mining) right below it; the other cards flow beneath.
-            // 10.4.27: a full node gets a third hero — the ◆ PRODUCER band (seal + block belt).
-            let prod_h = if crate::forge_ui::band_visible() { 8 } else { 0 };
-            // 10.6.0: your own node IS the sync — while it runs, its card replaces the light engine's SYNC card,
-            // so the screen shows one sync, the real one (two progress bars for one chain confused, 2026-10-20).
-            let sync_h = if prod_h > 0 { 0 } else { 11 };
-            let [hero_sync, hero_prod, hero_mining, cards_area] =
-                Layout::vertical([Constraint::Length(sync_h), Constraint::Length(prod_h), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
-            if sync_h > 0 { draw_sync_hero(f, app, hero_sync); }
-            if prod_h > 0 { crate::forge_ui::draw_producer_hero(f, app, hero_prod); }
+            // 10.6.1 (Viktor 2026-10-22: "in 10.5.0 the ui looked like this. i liked that better"): while your own
+            // node runs, the ◇ SYNC card keeps 10.5.0's shape and shows THE NODE's numbers — one card, one bar.
+            // (10.6.0 swapped in a smaller ◆ YOUR NODE band that said less.)
+            let [hero_sync, hero_mining, cards_area] =
+                Layout::vertical([Constraint::Length(11), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+            #[cfg(feature = "producer")]
+            if crate::forge_ui::band_visible() { crate::forge_ui::draw_node_sync_card(f, app, hero_sync); } else { draw_sync_hero(f, app, hero_sync); }
+            #[cfg(not(feature = "producer"))]
+            draw_sync_hero(f, app, hero_sync);
             draw_mining_hero(f, app, hero_mining);
             draw_node_body(f, app, cards_area);
         }
@@ -520,7 +520,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
 pub(crate) fn render_fleet_card(app: &App) -> Paragraph<'static> {
     // Clone all fleet data to avoid borrow-from-app lifetime issues
     let nodes: Vec<(String, bool, u64, String)> = app.fleet_nodes.iter().map(|n| {
-        let ver = if n.version.is_empty() { "?".to_string() }
+        let ver = if n.version.is_empty() { String::new() } // 10.6.1: unknown = blank, not "?"
             else if version_gt(VERSION, &n.version) { format!("!{}", n.version) }
             else { n.version.clone() };
         (n.name.clone(), n.online, n.height, ver)
@@ -549,8 +549,22 @@ pub(crate) fn render_fleet_card(app: &App) -> Paragraph<'static> {
                 Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
         } else { Span::raw(sa("")) },
     ]);
-    // v0.8: Mesh health line
-    let mesh_line = Line::from(vec![
+    // 10.6.1: the probe only proves a node answers on :9501 — it never reads a height, so "h0" was the empty value.
+    // The tip this screen knows comes from that node's own feed (Epsilon = the producer); label it as the tip.
+    let tip = app.target_height;
+    // v0.8: Mesh health line — 10.6.1: while your own node runs, ITS peers and height (the light engine's
+    // "0 blk synced" described an engine that no longer syncs).
+    #[cfg(feature = "producer")]
+    let own = crate::forge_ui::band_visible().then(|| (crate::own_node::status::peers(), crate::own_node::status::height()));
+    #[cfg(not(feature = "producer"))]
+    let own: Option<(u64, u64)> = None;
+    let mesh_line = if let Some((p, h)) = own {
+        Line::from(vec![
+            dim("node    "),
+            Span::styled(format!("{} peers", p), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            dim(format!("  h {}", group(h))),
+        ])
+    } else { Line::from(vec![
         dim("mesh    "),
         Span::styled(format!("{} peers", mesh), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
         dim("  "),
@@ -558,20 +572,22 @@ pub(crate) fn render_fleet_card(app: &App) -> Paragraph<'static> {
             if mesh_quality == "healthy" { C_GREEN } else if mesh_quality == "warming" { C_GOLD } else { C_RED }
         )),
         dim(format!("  {} blk synced", group(mesh_blk))),
-    ]);
+    ]) };
 
     // Per-node lines with owned data
     let node_lines: Vec<Line> = nodes.iter().map(|(name, online, height, ver)| {
         let dot = if *online { Span::styled("●", Style::default().fg(C_GREEN)) }
                   else { Span::styled("○", Style::default().fg(C_RED)) };
-        let ver_color = if ver == "?" { C_DIM }
+        let ver_color = if ver.is_empty() { C_DIM }
             else if ver.starts_with('!') { C_RED }
             else { C_GREEN };
         Line::from(vec![
             dot,
             Span::raw(sa(" ")),
             Span::styled(name.clone(), Style::default().fg(C_CYAN)),
-            dim(format!("  h{}", group(*height))),
+            dim(if *height > 0 { format!("  h{}", group(*height)) }
+                else if *online && tip > 0 { format!("  tip {}", group(tip)) }
+                else { "  h —".to_string() }),
             Span::raw(sa("  ")),
             Span::styled(ver.clone(), Style::default().fg(ver_color).add_modifier(Modifier::BOLD)),
         ])

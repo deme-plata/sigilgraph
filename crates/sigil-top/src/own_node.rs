@@ -133,9 +133,19 @@ fn set_default(k: &str, v: &str) {
 /// into the big array; following it keeps a growing chain off a small system disk), named by network.
 fn default_data_dir() -> PathBuf {
     let store = PathBuf::from(sigil_top_sync::sigil_top_db_path());
-    let real = std::fs::canonicalize(&store).unwrap_or(store);
+    let real = std::fs::canonicalize(&store).map(|p| plain_path(&p)).unwrap_or(store);
     let base = real.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     base.join(format!("sigil-top-node-{}", sigil_header::NETWORK_ID_STR))
+}
+
+/// `canonicalize` on Windows answers in the verbatim form `\\?\C:\Users\…` (10.6.0 showed it on the node card, and
+/// it reaches the node as SIGIL_DB_PATH). Drop the prefix for a plain drive path; a `\\?\UNC\` share stays as it is.
+fn plain_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") && rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => p.to_path_buf(),
+    }
 }
 
 /// Secrets the node would otherwise pick up from fixed paths on the machine — an OPERATOR's, if sigil-top runs
@@ -191,6 +201,12 @@ pub fn prepare() -> std::io::Result<Plan> {
     }
     let data_dir = default_data_dir();
     std::fs::create_dir_all(&data_dir)?;
+    if std::env::var_os("SIGIL_NODE_ID").is_none() {
+        match node_identity(&data_dir) {
+            Ok(id) => std::env::set_var("SIGIL_NODE_ID", id),
+            Err(e) => crate::boot_trace(&format!("own node: no identity file ({e}) — the node falls back to its default name")),
+        }
+    }
     let d = data_dir.to_string_lossy().into_owned();
     set_default("SIGIL_DB_PATH", &d);
     set_default("SIGIL_SNAPSHOT_DIR", &d);
@@ -248,6 +264,42 @@ pub fn api() -> String {
 pub const EXIT_FOLDER_IN_USE: u8 = 75;
 const LOCK_FILE: &str = "sigil-top-node.lock";
 const API_FILE: &str = "sigil-top-node.api";
+
+/// This install's network identity, in the node's own folder.
+const NODE_ID_FILE: &str = "node-id";
+const NODE_ID_PREFIX: &str = "sigil-top-";
+
+/// 10.6.1: the node names itself `sigil-<net>-<HOSTNAME>` and takes its network identity (PeerId) from that
+/// name. Windows has no HOSTNAME and most shells do not export it, so EVERY user
+/// node was `sigil-sigil-g3-node` — one PeerId for all (measured 2026-10-22: Viktor's PC and a test node on
+/// Epsilon were both 12D3KooWN1KRR…, and the second sat idle, never hearing the network's tip). Now one random
+/// identity per install, written once, owner-only, reused on every start.
+fn node_identity(dir: &Path) -> std::io::Result<String> {
+    let p = dir.join(NODE_ID_FILE);
+    if let Ok(s) = std::fs::read_to_string(&p) {
+        let s = s.trim();
+        let hex_part = s.strip_prefix(NODE_ID_PREFIX).unwrap_or("");
+        if hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(s.to_string());
+        }
+    }
+    let id = format!("{NODE_ID_PREFIX}{}", hex::encode(sigil_oauth::random_seed()));
+    let tmp = p.with_extension("tmp");
+    {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o.open(&tmp)?;
+        f.write_all(id.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &p)?;
+    Ok(id)
+}
 
 /// One node per data folder. Neither the node nor its store locks anything, and two programs appending to one
 /// chain.log damage it — two sigil-top windows, or a self-update whose new node starts while the old one is still
@@ -370,6 +422,7 @@ pub mod status {
     static PEERS: AtomicU64 = AtomicU64::new(0);
     static RESTARTS: AtomicU64 = AtomicU64::new(0);
     static RETRY_AT: AtomicU64 = AtomicU64::new(0);
+    static PID: AtomicU64 = AtomicU64::new(0);
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     static LOG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
@@ -414,6 +467,9 @@ pub mod status {
     pub fn restarts() -> u64 { RESTARTS.load(Ordering::Relaxed) }
     pub fn set_retry_at(unix: u64) { RETRY_AT.store(unix, Ordering::Relaxed); }
     pub fn retry_at() -> u64 { RETRY_AT.load(Ordering::Relaxed) }
+    /// The node process's id (0 = none running) — the SYNC card shows it, as 10.5.0 showed its own.
+    pub fn set_pid(p: u64) { PID.store(p, Ordering::Relaxed); }
+    pub fn pid() -> u64 { PID.load(Ordering::Relaxed) }
     pub fn set_message(m: impl Into<String>) { if let Ok(mut g) = MESSAGE.lock() { *g = m.into(); } }
     pub fn message() -> String { MESSAGE.lock().map(|g| g.clone()).unwrap_or_default() }
     pub fn set_log(p: impl Into<String>) { if let Ok(mut g) = LOG.lock() { *g = p.into(); } }
@@ -524,7 +580,12 @@ fn spawn_child(plan: &Plan) -> std::io::Result<Child> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP: Ctrl-Break reaches the node alone
+        // CREATE_NEW_PROCESS_GROUP: Ctrl-Break reaches the node alone. NORMAL_PRIORITY_CLASS: the screen lowers
+        // itself to below-normal (platform.rs, so the miner never makes the PC sluggish) and a child would inherit
+        // that, and fight the miner as an equal. At normal priority the node gets the cores first and the miner the
+        // rest. (10.6.0's first sync on Viktor's PC ran at 217 blk/s vs ~800 on Epsilon; the cause is not measured,
+        // a second sigil-top was running beside it — this removes one candidate.)
+        cmd.creation_flags(0x0000_0200 | 0x0000_0020);
     }
     cmd.spawn()
 }
@@ -583,6 +644,7 @@ pub fn start_for_screen() -> Option<NodeHost> {
             if !running && Instant::now() >= spawn_after {
                 match spawn_child(&plan2) {
                     Ok(c) => {
+                        status::set_pid(c.id() as u64);
                         if let Ok(mut g) = child2.lock() { *g = Some(c); }
                         if attached.is_none() { status::set_phase(status::SYNCING); }
                         status::set_retry_at(0);
@@ -598,6 +660,7 @@ pub fn start_for_screen() -> Option<NodeHost> {
             let exited = child2.lock().ok().and_then(|mut g| {
                 let st = g.as_mut()?.try_wait().ok()??;
                 g.take();
+                status::set_pid(0);
                 Some(st)
             });
             if let Some(st) = exited {
@@ -703,6 +766,40 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), G3_PROFILE.len(), "a key twice");
+    }
+
+    /// One identity per install: made once, read back the same, different in another folder, a damaged file replaced.
+    #[test]
+    fn each_install_has_its_own_lasting_identity() {
+        let base = std::env::temp_dir().join(format!("own-node-id-test-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let first = node_identity(&a).unwrap();
+        assert!(first.starts_with(NODE_ID_PREFIX) && first.len() == NODE_ID_PREFIX.len() + 64, "{first}");
+        assert_eq!(node_identity(&a).unwrap(), first, "the same folder keeps its identity");
+        assert_ne!(node_identity(&b).unwrap(), first, "another install gets another identity");
+        std::fs::write(a.join(NODE_ID_FILE), "sigil-sigil-g3-node").unwrap();
+        let fresh = node_identity(&a).unwrap();
+        assert!(fresh != "sigil-sigil-g3-node" && fresh.starts_with(NODE_ID_PREFIX), "a damaged file is replaced");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(a.join(NODE_ID_FILE)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the identity seeds the node's key — owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Windows' verbatim prefix is dropped for drive paths only.
+    #[test]
+    fn verbatim_prefix_is_dropped_for_drive_paths_only() {
+        let got = plain_path(Path::new(r"\\?\C:\Users\Viktor S. Kristensen\AppData\Local\sigil-top-blocks.db"));
+        assert_eq!(got, PathBuf::from(r"C:\Users\Viktor S. Kristensen\AppData\Local\sigil-top-blocks.db"));
+        let unc = Path::new(r"\\?\UNC\server\share\x");
+        assert_eq!(plain_path(unc), unc.to_path_buf());
+        let unix = Path::new("/home/storage/sigil-top-blocks.db");
+        assert_eq!(plain_path(unix), unix.to_path_buf());
     }
 
     /// A user's node never reaches for an operator's secret on the same machine.

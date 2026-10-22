@@ -269,7 +269,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
         if !recent_only { app.full_sync = true; }
         app.p2p_sync = Some(p2p);
         if app.toast.is_empty() {
-            app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+            app.toast = "⚡ P2P mesh connecting → Epsilon…".into(); // Delta is gone since 2026-07
         }
     } else {
         // v0.40.3/v7.0.21: park the RECEIVER so [F] can launch the sync engine ON
@@ -498,11 +498,8 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.40: 33ms full redraws are cheap on a modern terminal but heavy on the
             // legacy CP437 conhost — halve the animating cadence on Windows so the
             // console host never becomes a load source itself.
-            // 10.4.27: the PRODUCER band's belt moves — ~10 fps is smooth enough for it and
-            // cheap enough to leave on for a node that runs for days.
-            let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } }
-                else if app.tab == Tab::Node && crate::forge_ui::wants_motion() { if cfg!(windows) { 150 } else { 100 } }
-                else { 200 };
+            // (10.4.27–10.6.0 polled faster for the node band's moving belt; 10.6.1's SYNC card does not animate.)
+            let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } } else { 200 };
             if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {

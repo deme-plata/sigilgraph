@@ -508,6 +508,34 @@ impl SigilState {
             .unwrap_or(0)
     }
 
+    /// 2026-10-23 (SSE: balances pushed to wallets): every (wallet, token) whose balance differs between `self` (the
+    /// older state) and `newer`, with its NEW balance (0 when the entry disappeared). One merge walk over the two
+    /// ordered maps; internal reserved entries (the batch-nonce high-water) are not balances and are left out.
+    pub fn changed_balances(&self, newer: &SigilState) -> Vec<(WalletId, TokenId, u128)> {
+        use std::cmp::Ordering;
+        let mut out = Vec::new();
+        let mut a = self.wallets.iter().peekable();
+        let mut b = newer.wallets.iter().peekable();
+        loop {
+            let (ka, kb) = (a.peek().map(|(k, _)| **k), b.peek().map(|(k, _)| **k));
+            match (ka, kb) {
+                (None, None) => break,
+                (Some(k), None) => { a.next(); out.push((k.0, k.1, 0)); }
+                (None, Some(k)) => { let v = *b.next().unwrap().1; out.push((k.0, k.1, v)); }
+                (Some(x), Some(y)) => match x.cmp(&y) {
+                    Ordering::Less => { a.next(); out.push((x.0, x.1, 0)); }
+                    Ordering::Greater => { let v = *b.next().unwrap().1; out.push((y.0, y.1, v)); }
+                    Ordering::Equal => {
+                        let (va, vb) = (*a.next().unwrap().1, *b.next().unwrap().1);
+                        if va != vb { out.push((y.0, y.1, vb)); }
+                    }
+                },
+            }
+        }
+        out.retain(|(_, t, _)| *t != NONCE_TOKEN);
+        out
+    }
+
     /// R0: the author's batch replay-nonce high-water (0 if never set). Stored as a
     /// reserved-token balance (see [`NONCE_TOKEN`]).
     pub fn nonce_of(&self, author: &WalletId) -> u64 {
@@ -1798,6 +1826,28 @@ fn hash_event_log(events: &[[u8; 32]]) -> Root {
         layer = next;
     }
     layer[0]
+}
+
+#[cfg(test)]
+mod changed_balances_tests {
+    use super::*;
+
+    #[test]
+    fn changed_balances_names_exactly_the_wallets_that_moved() {
+        let (w1, w2, w3) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let mut old = SigilState::default();
+        old.set_balance(w1, NATIVE, 100);
+        old.set_balance(w2, NATIVE, 50);
+        old.set_balance(w2, NONCE_TOKEN, 7);
+        let mut new = old.clone();
+        new.set_balance(w1, NATIVE, 100); // unchanged
+        new.set_balance(w2, NATIVE, 80); // up
+        new.set_balance(w2, NONCE_TOKEN, 8); // internal — never a balance event
+        new.set_balance(w3, NATIVE, 5); // new wallet
+        let got = old.changed_balances(&new);
+        assert_eq!(got, vec![(w2, NATIVE, 80), (w3, NATIVE, 5)]);
+        assert!(new.changed_balances(&new).is_empty(), "a state compared with itself changes nothing");
+    }
 }
 
 #[cfg(test)]

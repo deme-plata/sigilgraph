@@ -1122,6 +1122,45 @@ impl ShieldedPool {
     /// Append a note commitment, returning its leaf position. No delivery ciphertext —
     /// use [`append_note_with_delivery`](Self::append_note_with_delivery) for a
     /// `ShieldedSend` output that needs one.
+    /// The notes and delivery ciphertexts of epoch `e` — sealed (archive), the live v1 epoch or the live v7 epoch.
+    fn notes_in_epoch(&self, e: u32) -> Option<(&[[u8; 32]], &[Option<String>])> {
+        if let Some(a) = self.archive.get(e as usize) {
+            return Some((&a.notes[..], &a.ciphertexts[..]));
+        }
+        if self.v1_live() && e == self.epoch {
+            return Some((self.notes(), self.ciphertexts()));
+        }
+        if let Some(v) = self.v7.as_ref() {
+            if e == v.epoch {
+                return Some((v.notes(), v.ciphertexts()));
+            }
+        }
+        None
+    }
+
+    /// 2026-10-23 (SSE: incoming private coins pushed to wallets): every note `newer` holds that `self` (the older pool)
+    /// did not, as (epoch, index, delivery ciphertext) — the live epochs that grew, and the tail of an epoch sealed in
+    /// between. The ciphertext's view tag lets a wallet recognise its own note locally; the node learns nothing.
+    pub fn new_notes_since<'a>(&self, newer: &'a ShieldedPool) -> Vec<(u32, u64, Option<&'a str>)> {
+        let live = |p: &ShieldedPool| -> Vec<u32> {
+            let mut v = Vec::new();
+            if p.v1_live() { v.push(p.epoch); }
+            if let Some(e) = p.v7.as_ref() { v.push(e.epoch); }
+            v
+        };
+        let lo = live(self).into_iter().min().unwrap_or(0);
+        let hi = live(newer).into_iter().max().unwrap_or(lo);
+        let mut out = Vec::new();
+        for e in lo..=hi {
+            let Some((notes, cts)) = newer.notes_in_epoch(e) else { continue };
+            let had = self.notes_in_epoch(e).map(|(n, _)| n.len()).unwrap_or(0);
+            for i in had..notes.len() {
+                out.push((e, i as u64, cts.get(i).and_then(|c| c.as_deref())));
+            }
+        }
+        out
+    }
+
     pub(crate) fn append_note(&mut self, cm: [u8; 32]) -> Result<usize, ShieldedError> {
         self.append_note_with_delivery(cm, None)
     }
@@ -2300,6 +2339,53 @@ mod g3_tests {
             Err(ShieldedError::UntaggedEnvelope)
         ));
         assert_eq!(p.append_note_with_delivery(v7_cm(6), Some(tagged_envelope())).unwrap(), 0);
+    }
+}
+
+/// 2026-10-23: `new_notes_since` names exactly the notes that arrived — the SSE `note` events are built from it.
+#[cfg(test)]
+mod new_notes_since_tests {
+    use super::ShieldedPool;
+
+    #[test]
+    fn new_notes_since_names_the_appended_notes_in_order() {
+        let mut old = ShieldedPool::new();
+        for i in 1..=3u8 { old.append_note([i; 32]).expect("append"); }
+        let mut new = old.clone();
+        for i in 4..=5u8 { new.append_note([i; 32]).expect("append"); }
+        let got: Vec<(u32, u64)> = old.new_notes_since(&new).into_iter().map(|(e, i, _)| (e, i)).collect();
+        let e = new.epoch();
+        assert_eq!(got, vec![(e, 3), (e, 4)]);
+        assert!(new.new_notes_since(&new).is_empty(), "nothing new against itself");
+    }
+
+    /// The g3 shape: a live v7 epoch that grows, then fills and seals while a new one opens — the notes that landed
+    /// in the sealed tail are still reported, with their envelopes, and nothing already known is repeated.
+    #[test]
+    fn new_notes_since_sees_the_v7_epoch_and_the_tail_of_a_sealed_one() {
+        use super::{EpochArchive, LiveEpochV7, PoolGeneration};
+        let v7 = |epoch: u32, ns: &[u8], cts: Vec<Option<String>>| LiveEpochV7 {
+            epoch,
+            notes: ns.iter().map(|i| [*i; 32]).collect::<Vec<_>>().into(),
+            ciphertexts: cts.into(),
+            ..Default::default()
+        };
+        let mut old = ShieldedPool::new();
+        for i in 1..=2u8 { old.append_note([i; 32]).expect("append"); }
+        old.v7 = Some(v7(1, &[9], vec![Some("c9".into())]));
+
+        let mut grew = old.clone();
+        grew.v7 = Some(v7(1, &[9, 10, 11], vec![Some("c9".into()), Some("c10".into()), None]));
+        assert_eq!(old.new_notes_since(&grew), vec![(1, 1, Some("c10")), (1, 2, None)]);
+
+        let mut sealed = old.clone();
+        sealed.archive = vec![
+            EpochArchive { root: [0; 32], notes: vec![[1; 32], [2; 32]], ciphertexts: vec![None, None], generation: PoolGeneration::V1 },
+            EpochArchive { root: [0; 32], notes: vec![[9; 32], [10; 32]], ciphertexts: vec![Some("c9".into()), Some("c10".into())], generation: PoolGeneration::V7 },
+        ].into();
+        sealed.v1_closed = true;
+        sealed.v7 = Some(v7(2, &[12], vec![Some("c12".into())]));
+        assert_eq!(old.new_notes_since(&sealed), vec![(1, 1, Some("c10")), (2, 0, Some("c12"))]);
     }
 }
 

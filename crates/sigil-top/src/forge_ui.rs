@@ -36,9 +36,11 @@ fn observe(height: u64) -> Beat {
     let dt = now.duration_since(m.sample_t).as_secs_f64();
     if dt >= 1.0 {
         let jump = height.saturating_sub(m.sample_h);
-        // A node resuming from its snapshot hands over a whole chain at once (0 → 42 M); a resync replays a few
-        // thousand blocks in seconds. Neither is an apply RATE — re-measure from here.
-        if m.sample_h == 0 || height < m.sample_h || jump > 5_000 {
+        // A node resuming from its snapshot hands over a whole chain at once (0 → 42 M) — not an apply RATE, so
+        // re-measure from there. 2026-10-23: judged by speed, not by step size. "More than 5,000 blocks in a sample"
+        // was every sample once 10.6.7 applied 4,000-16,000 blk/s, and the card said "measuring speed…" all sync long.
+        const HANDOVER_BLK_S: f64 = 250_000.0;
+        if m.sample_h == 0 || height < m.sample_h || jump as f64 / dt > HANDOVER_BLK_S {
             m.rate = 0.0;
         } else {
             let inst = jump as f64 / dt;
@@ -236,5 +238,11 @@ mod tests {
         if let Some(m) = MOTION.lock().unwrap().as_mut() { m.sample_t -= Duration::from_secs(2); }
         let b = observe(42_466_301);
         assert!((b.rate - 8.0).abs() < 0.5, "16 blocks in 2 s = 8 blk/s, got {}", b.rate);
+        // 2026-10-23: a fast sync IS a rate — 15,000 blocks in one second read 0 under the old 5,000-block line.
+        *MOTION.lock().unwrap() = None;
+        observe(1_000_000);
+        if let Some(m) = MOTION.lock().unwrap().as_mut() { m.sample_t -= Duration::from_secs(1); }
+        let b = observe(1_015_000);
+        assert!((b.rate - 15_000.0).abs() < 500.0, "15,000 blocks in 1 s = ~15,000 blk/s, got {}", b.rate);
     }
 }

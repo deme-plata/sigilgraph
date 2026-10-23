@@ -24,7 +24,8 @@ set -euo pipefail
 
 VER="${1:?usage: release-sigil-top.sh <version> [note]}"
 NOTE="${2:-sigil-top v${VER}}"
-PINNED_PUB="150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402"
+# Release keys (2026-10-23 rotation): scripts/sign-manifest.sh signs .sig2 with key 2 and, during the
+# bridge, .sig with key 1; scripts/verify-live-manifest.py checks both over the network.
 # SIGIL_RELEASE_REPO (2026-09-25): a DETACHED worktree pinned at the tested commit, so a release
 # from a shared tree never ships another lane's uncommitted work under the signature.
 REPO="${SIGIL_RELEASE_REPO:-/home/storage/deepseek-codewhale/sigil}"
@@ -318,9 +319,12 @@ EOF
 python3 -I -c 'import json, sys; json.load(open(sys.argv[1]))' "$DL/sigil-top-latest.json" \
   || { echo "✗ the manifest is not valid JSON — refusing to sign it"; exit 1; }
 bash scripts/sign-manifest.sh "$DL/sigil-top-latest.json"
-# legacy channel + canonical home get the identical signed manifest
-cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$LEGACY_DL/"
-cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$ORG_DL/"
+# legacy channel + canonical home get the identical signed manifest. .sig2 = key 2 (what installs
+# from 10.6.9 on read); .sig = key 1, only while the bridge is on (see scripts/sign-manifest.sh).
+# cp copies in argument order: signatures land before the manifest they sign.
+SIGS=("$DL/sigil-top-latest.json.sig2")
+[ -f "${SIGIL_RELEASE_SEED:-/root/.config/sigil/release-sign.seed}" ] && SIGS+=("$DL/sigil-top-latest.json.sig")
+for d in "$LEGACY_DL" "$ORG_DL"; do cp "${SIGS[@]}" "$DL/sigil-top-latest.json" "$d/"; done
 
 # ── THE ARM64 GAP, SAID OUT LOUD (2026-09-06) ───────────────────────────────
 # This script writes four targets. A phone or SBC running the aarch64 build looks for
@@ -330,16 +334,11 @@ cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$ORG_DL/"
 # and removed the entry that had just been added by hand.
 if [ "$WANT_ARM" = 1 ]; then echo "  ✓ linux-arm64 is in this manifest ($ASZ B)"; else echo "  ! ARM64 IS NOT IN THIS MANIFEST — [U] on aarch64 installs will fail closed (SIGIL_RELEASE_ARM64=0 or toolchain missing)"; fi
 
-echo "▸ 6/7 verify LIVE manifest+sig against pinned key"
-python3 - "$PINNED_PUB" <<'PY'
-import urllib.request, time, json, sys
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-pin=sys.argv[1]; t=int(time.time())
-g=lambda u: urllib.request.urlopen(f'https://sigilgraph.fluxapp.xyz/downloads/{u}?t={t}',timeout=25).read()
-body=g('sigil-top-latest.json'); sig=bytes.fromhex(g('sigil-top-latest.json.sig').decode().strip()); d=json.loads(body)
-Ed25519PublicKey.from_public_bytes(bytes.fromhex(pin)).verify(sig, body)
-print('  ✓ live manifest+sig VALID — channel now', d['version'])
-PY
+echo "▸ 6/7 verify LIVE manifest + signatures on every channel base (key 2; key 1 while the bridge is on)"
+for base in https://sigilgraph.org/downloads https://sigilgraph.fluxapp.xyz/downloads https://quillon.xyz/downloads; do
+  python3 -I scripts/verify-live-manifest.py "$base" sigil-top-latest.json \
+    || { echo "✗ the live manifest on $base does not verify — installs reading it will refuse the update"; exit 1; }
+done
 
 # The stable links are what a HUMAN gets from a wget line, and they are NOT
 # covered by the manifest check above — which is exactly how they rotted for

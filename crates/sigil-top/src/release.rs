@@ -140,11 +140,37 @@ pub(crate) fn flux_webhook(event: &str, detail: &str) {
 /// REFUSES any manifest not signed by the matching secret — so a compromised release server / MITM
 /// that serves a matching-blake3 (but attacker-built) binary can't push it: without the secret it
 /// can't forge the manifest signature, and the blake3 the client trusts comes ONLY from a signed
-/// manifest. The secret lives solely on the release host (`/root/.config/sigil/release-sign.seed`,
+/// manifest. The secret lives solely on the release host (`/root/.config/sigil/release-sign-v2.seed`,
 /// chmod 600). Ed25519 today; the sigil-oauth IssuerSigner abstraction lets a SQIsign-L5 PQ key
 /// replace it without a wire change once flux-sqisign is in the cross-build.
+///
+/// KEY 2, since 2026-10-23. Key 1 (`150fb84d…6402`, made 2026-06-10) sat readable on Epsilon while
+/// third parties had root there (incident 2026-09-23), so this build does not trust it at all. Key 1
+/// still signs `<name>.sig` during the bridge, because installs from before the rotation trust only
+/// key 1 and must be able to reach a build that trusts key 2; this build reads [`RELEASE_SIG_SUFFIX`].
 const RELEASE_SIGN_PUBKEY_HEX: &str =
-    "150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402";
+    "a78061cfb9e2b2cdd5e876da5d737ba0edce6ef77ba3b91e83acb892741225ae";
+
+/// Where key 2's detached signature lives: `<manifest>.sig2`. A separate file, not `.sig`, so the
+/// bridge can serve key 1's signature to old installs and key 2's to new ones over the same bytes.
+const RELEASE_SIG_SUFFIX: &str = ".sig2";
+
+/// Check a detached 128-hex ed25519 signature over `body` against the pinned key. Pure (no network)
+/// so the key and the format can be pinned by tests with real signatures.
+fn check_release_sig(name: &str, body: &[u8], sig_hex: &str) -> Result<(), String> {
+    let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "pinned release key malformed".to_string())?;
+    let sig: [u8; 64] = hex::decode(sig_hex.trim()).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "release-manifest signature malformed (want 128-hex ed25519)".to_string())?;
+    if sigil_oauth::verify_sig(&pk, body, &sig) {
+        Ok(())
+    } else {
+        // Keep the literal "MANIFEST SIGNATURE INVALID" — self_update.rs + main.rs branch on it.
+        Err(format!("MANIFEST SIGNATURE INVALID ({name}) — refusing (possible compromised release server)"))
+    }
+}
 
 /// LANE-C: verify the release manifest is signed by [`RELEASE_SIGN_PUBKEY_HEX`]. The detached
 /// signature is published at `<manifest>.sig` as 128-hex (ed25519 over the EXACT manifest bytes).
@@ -158,12 +184,9 @@ fn verify_manifest_sig(base: &str, manifest_body: &str) -> Result<(), String> {
 /// [A]I manifest (`sigil-ai-latest.json`) and the skills manifest (`sigil-skills-latest.json`)
 /// share the auto-updater's ONE trust root — no second key, no second code path. Fail-closed.
 pub(crate) fn verify_signed_body(base: &str, name: &str, body: &str) -> Result<(), String> {
-    let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
-        .and_then(|v| v.try_into().ok())
-        .ok_or_else(|| "pinned release key malformed".to_string())?;
     let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
-    let sig_url = format!("{base}/{name}.sig?t={bust}");
+    let sig_url = format!("{base}/{name}{RELEASE_SIG_SUFFIX}?t={bust}");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
@@ -171,14 +194,43 @@ pub(crate) fn verify_signed_body(base: &str, name: &str, body: &str) -> Result<(
         .build().map_err(|e| format!("sig client init: {e}"))?;
     let sig_hex = client.get(&sig_url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
         .map_err(|e| format!("{name}: no signature ({e}) — refusing"))?;
-    let sig: [u8; 64] = hex::decode(sig_hex.trim()).ok()
-        .and_then(|v| v.try_into().ok())
-        .ok_or_else(|| "release-manifest signature malformed (want 128-hex ed25519)".to_string())?;
-    if sigil_oauth::verify_sig(&pk, body.as_bytes(), &sig) {
-        Ok(())
-    } else {
-        // Keep the literal "MANIFEST SIGNATURE INVALID" — self_update.rs + main.rs branch on it.
-        Err(format!("MANIFEST SIGNATURE INVALID ({name}) — refusing (possible compromised release server)"))
+    check_release_sig(name, body.as_bytes(), &sig_hex)
+}
+
+#[cfg(test)]
+mod release_key_tests {
+    use super::*;
+
+    /// Signed on Epsilon 2026-10-23 with BOTH seeds; Ed25519 is deterministic, so these are fixed.
+    /// The body is plain text, not a manifest: neither signature can ever pass as an update.
+    const BODY: &[u8] = b"sigil release key rotation test vector 2026-10-23 (not a manifest)";
+    const SIG_KEY2: &str = "5576ed53ed1947e624559b2b8ad4e4b0a2bc71b8c32f402f4557015dbee262d5d30dfd7db3904e19d8ebff1f11c7685bae2d866b9db1e73efe147cf17702b107";
+    const SIG_KEY1: &str = "5f4b78b9f3917b3b40fbe6d7a7ae66f22016bb1186bd26c808aadf1dca6c76b2deae18bd77050e9c990bcd7f92b77c01efc76f859ffea0470a4d1cc6eb515c00";
+
+    #[test]
+    fn a_key2_signature_is_accepted() {
+        assert!(check_release_sig("t", BODY, SIG_KEY2).is_ok());
+        assert!(check_release_sig("t", BODY, &format!("{SIG_KEY2}\n")).is_ok(), "a trailing newline is not a new signature");
+    }
+
+    /// The point of the rotation: whoever copied key 1 off Epsilon cannot sign for this build.
+    #[test]
+    fn a_key1_signature_is_refused() {
+        let e = check_release_sig("t", BODY, SIG_KEY1).unwrap_err();
+        assert!(e.contains("MANIFEST SIGNATURE INVALID"), "self_update.rs branches on this literal: {e}");
+    }
+
+    #[test]
+    fn other_bytes_or_junk_are_refused() {
+        assert!(check_release_sig("t", b"sigil release key rotation test vector 2026-10-24 (not a manifest)", SIG_KEY2).is_err());
+        assert!(check_release_sig("t", BODY, "").is_err());
+        assert!(check_release_sig("t", BODY, &SIG_KEY2[..126]).is_err());
+    }
+
+    #[test]
+    fn the_pin_is_key2_and_its_own_file() {
+        assert_ne!(RELEASE_SIGN_PUBKEY_HEX, "150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402", "key 1 is retired");
+        assert_eq!(RELEASE_SIG_SUFFIX, ".sig2", "key 1 keeps .sig for old installs during the bridge");
     }
 }
 

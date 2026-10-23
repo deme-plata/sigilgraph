@@ -5,8 +5,9 @@
 #   sigil-ai-latest.json      which ollama (url + Ollama's OWN sha256 + size) and which model
 #   sigil-skills-latest.json  flux-signed skill packs (SKILL.md inlined + blake3 each)
 #
-# Signing = scripts/sign-manifest.sh (pinned release ed25519 seed, root-only). The client
-# verifies both manifests with RELEASE_SIGN_PUBKEY_HEX — the same key the auto-updater uses.
+# Signing = scripts/sign-manifest.sh (pinned release ed25519 seeds, root-only): .sig2 with key 2,
+# and .sig with key 1 while the 2026-10-23 rotation bridge is on. The client verifies both
+# manifests with RELEASE_SIGN_PUBKEY_HEX — the same key the auto-updater uses.
 #
 # Usage: publish-ai-manifests.sh [OLLAMA_VER]      (default 0.33.3)
 set -euo pipefail
@@ -36,7 +37,6 @@ LEGACY_DL=/home/orobit/q-narwhalknight/dist-final/downloads
 ORG_DL=/home/orobit/sigilgraph-org-site/downloads
 BASE=https://sigilgraph.org/downloads
 GH="https://github.com/ollama/ollama/releases/download/v${OLLAMA_VER}"
-PINNED_PUB="150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402"
 SKILL_TGZ="${SKILL_TGZ:-$DL/slagteren-skill-latest.tar.gz}"
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 cd "$REPO"
@@ -160,32 +160,19 @@ for m in sigil-ai-latest.json sigil-skills-latest.json; do
   bash scripts/sign-manifest.sh "$WORK/$m"
   for d in "$DL" "$LEGACY_DL" "$ORG_DL"; do
     [ -d "$d" ] || { echo "✗ download root missing: $d"; exit 1; }
-    cp -f "$WORK/$m" "$d/$m.tmp" && mv -f "$d/$m.tmp" "$d/$m"; cp -f "$WORK/$m.sig" "$d/$m.sig"
+    # signatures first, then the manifest they sign; .sig exists only while the bridge is on
+    cp -f "$WORK/$m.sig2" "$d/$m.sig2"
+    [ -f "$WORK/$m.sig" ] && cp -f "$WORK/$m.sig" "$d/$m.sig"
+    cp -f "$WORK/$m" "$d/$m.tmp" && mv -f "$d/$m.tmp" "$d/$m"
   done
 done
 
-echo "▸ 5/5 re-fetch LIVE from EVERY CHANNEL_BASE and verify against the pinned key"
+echo "▸ 5/5 re-fetch LIVE from EVERY CHANNEL_BASE and verify (key 2; key 1 while the bridge is on)"
 # Every base in sigil-top's CHANNEL_BASES is checked. A base that serves the SPA fallback
 # (HTTP 200 + text/html) fails here loudly instead of silently at the client.
-python3 - "$PINNED_PUB" <<'PY'
-import sys,json,urllib.request,time
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-pub=bytes.fromhex(sys.argv[1])
-pk=Ed25519PublicKey.from_public_bytes(pub)
-BASES=["https://sigilgraph.org/downloads",
-       "https://sigilgraph.fluxapp.xyz/downloads",
-       "https://quillon.xyz/downloads"]
 bad=0
-for base in BASES:
-    g=lambda n: urllib.request.urlopen(f"{base}/{n}?t={int(time.time())}",timeout=30).read()
-    for n in ("sigil-ai-latest.json","sigil-skills-latest.json"):
-        try:
-            body=g(n); sig=bytes.fromhex(g(n+".sig").decode().strip())
-            pk.verify(sig,body); d=json.loads(body)
-            what=(d.get("models") or d.get("default_model")) or [s["name"] for s in d.get("skills",[])]
-            print(f"  ✓ {base.split('//')[1].split('/')[0]:28s} {n:26s} sig OK ({len(body)} B) {what}")
-        except Exception as e:
-            bad+=1; print(f"  ✗ {base} {n}: {type(e).__name__}: {e}")
-if bad: raise SystemExit(f"✗ {bad} manifest fetch/verify failure(s) — NOT publishable")
-PY
+for base in https://sigilgraph.org/downloads https://sigilgraph.fluxapp.xyz/downloads https://quillon.xyz/downloads; do
+  python3 -I scripts/verify-live-manifest.py "$base" sigil-ai-latest.json sigil-skills-latest.json || bad=$((bad+1))
+done
+[ "$bad" = 0 ] || { echo "✗ $bad channel base(s) failed to verify — NOT publishable"; exit 1; }
 echo "✓ published: $BASE/sigil-ai-latest.json  $BASE/sigil-skills-latest.json"

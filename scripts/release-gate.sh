@@ -52,8 +52,11 @@ CHANNEL_BASE="${CHANNEL_BASE:-https://sigilgraph.fluxapp.xyz/downloads}"
 GATE_STATUS_JSON="${GATE_STATUS_JSON:-/home/orobit/sigil-data/release-gate-status.json}"
 QFLUX_ACCESS_LOG="${QFLUX_ACCESS_LOG:-/home/storage/logs/q-flux/access.log}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/home/storage/tmp}"   # NEVER /tmp — Epsilon root disk is tiny
-# pinned release-manifest signing pubkey (sigil-top main.rs RELEASE_SIGN_PUBKEY_HEX)
-RELEASE_SIGN_PUBKEY_HEX="150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402"
+# pinned release-manifest signing pubkey (sigil-top release.rs RELEASE_SIGN_PUBKEY_HEX) — KEY 2 since
+# the 2026-10-23 rotation; clients read its signature from <manifest>.sig2. Key 1's .sig is the bridge
+# for pre-rotation installs (scripts/sign-manifest.sh) and is flipped alongside when present.
+RELEASE_SIGN_PUBKEY_HEX="a78061cfb9e2b2cdd5e876da5d737ba0edce6ef77ba3b91e83acb892741225ae"
+RELEASE_SIG_SUFFIX=".sig2"
 RUN_SECS="${RUN_SECS:-15}"          # the stays-up bar
 UPDATE_WAIT_SECS="${UPDATE_WAIT_SECS:-120}" # max wait for the update path to converge
 
@@ -201,10 +204,10 @@ channel_check() {
   # 0.77: `A || B && C` runs C even when A is true (bash precedence) — the old line
   # OVERWROTE an existing candidate .sig with the LIVE channel's sig → false RED
   # (InvalidSignature against the new manifest). Only fetch when no local .sig.
-  local sig="$mf.sig"
+  local sig="$mf$RELEASE_SIG_SUFFIX"
   if [ ! -f "$sig" ]; then
     sig=$(mktemp "$SCRATCH_ROOT/rg-sig.XXXXXX")
-    curl -fsS --max-time 30 "${CHANNEL_BASE}/${MANIFEST_NAME}.sig?t=${bust}" -o "$sig" 2>/dev/null
+    curl -fsS --max-time 30 "${CHANNEL_BASE}/${MANIFEST_NAME}${RELEASE_SIG_SUFFIX}?t=${bust}" -o "$sig" 2>/dev/null
   fi
   if [ -s "$sig" ] && python3 - "$mf" "$sig" "$RELEASE_SIGN_PUBKEY_HEX" <<'PYEOF'
 import sys
@@ -213,8 +216,8 @@ mf, sigf, pk = sys.argv[1], sys.argv[2], sys.argv[3]
 sig = bytes.fromhex(open(sigf).read().strip())
 Ed25519PublicKey.from_public_bytes(bytes.fromhex(pk)).verify(sig, open(mf,'rb').read())
 PYEOF
-  then ok_check "CHANNEL: manifest .sig verifies against pinned release pubkey"
-  else bad_check "CHANNEL: manifest .sig missing or does NOT verify (clients will reject the channel)"; g=1; fi
+  then ok_check "CHANNEL: manifest $RELEASE_SIG_SUFFIX verifies against pinned release pubkey (key 2)"
+  else bad_check "CHANNEL: manifest $RELEASE_SIG_SUFFIX missing or does NOT verify (clients will reject the channel)"; g=1; fi
   return $g
 }
 
@@ -328,12 +331,12 @@ case "$MODE" in
   publish)
     # full pipeline: gate 1+2 on the CANDIDATE manifest → flip channel → gate 3
     # → auto-revert flip if gate 3 fails.
-    CAND="${2:?usage: release-gate.sh publish <candidate-manifest.json> (with .sig next to it)}"
+    CAND="${2:?usage: release-gate.sh publish <candidate-manifest.json> (with .sig2 next to it)}"
     VER=$(json_get "$CAND" . "d['version']")
     LIVE_MF="$DOWNLOADS/$MANIFEST_NAME"
     PREV_VER=$(json_get "$LIVE_MF" . "d['version']")
     say "candidate v$VER (live channel currently v$PREV_VER)"
-    [ -f "$CAND.sig" ] || { bad_check "publish: $CAND.sig missing — sign-manifest.sh first"; verdict publish "$VER"; exit 1; }
+    [ -f "$CAND$RELEASE_SIG_SUFFIX" ] || { bad_check "publish: $CAND$RELEASE_SIG_SUFFIX missing — sign-manifest.sh first"; verdict publish "$VER"; exit 1; }
     version_gt "$VER" "$PREV_VER" || { bad_check "publish: candidate version v$VER is not newer than live channel v$PREV_VER"; verdict publish "$VER"; exit 1; }
 
     LBIN=$(mktemp "$SCRATCH_ROOT/rg-bin.XXXXXX")
@@ -350,20 +353,25 @@ case "$MODE" in
 
     say "── flipping channel v$PREV_VER → v$VER (backup kept; auto-revert on GATE 3 RED) ──"
     cp -a "$LIVE_MF" "$LIVE_MF.gate-backup" 2>/dev/null
-    cp -a "$LIVE_MF.sig" "$LIVE_MF.sig.gate-backup" 2>/dev/null
+    # .sig2 always; .sig (key 1) only while the rotation bridge still signs it
+    SUFFIXES=("$RELEASE_SIG_SUFFIX"); [ -f "$CAND.sig" ] && SUFFIXES+=(".sig")
+    for s in "${SUFFIXES[@]}"; do cp -a "$LIVE_MF$s" "$LIVE_MF$s.gate-backup" 2>/dev/null; done
     TMP_MF="$LIVE_MF.next.$$"
-    TMP_SIG="$LIVE_MF.sig.next.$$"
-    cp "$CAND" "$TMP_MF" && cp "$CAND.sig" "$TMP_SIG" \
-      && mv "$TMP_SIG" "$LIVE_MF.sig" \
-      && mv "$TMP_MF" "$LIVE_MF"
+    flip=1; cp "$CAND" "$TMP_MF" || flip=0
+    # signatures first, then the manifest they sign
+    for s in "${SUFFIXES[@]}"; do
+      [ $flip = 1 ] && cp "$CAND$s" "$LIVE_MF$s.next.$$" && mv "$LIVE_MF$s.next.$$" "$LIVE_MF$s" || flip=0
+    done
+    [ $flip = 1 ] && mv "$TMP_MF" "$LIVE_MF"
 
     if update_path "$PREV_BIN" "$VER" && [ ${#FAIL[@]} -eq 0 ]; then
-      rm -f "$LIVE_MF.gate-backup" "$LIVE_MF.sig.gate-backup"
+      rm -f "$LIVE_MF.gate-backup"
+      for s in "${SUFFIXES[@]}"; do rm -f "$LIVE_MF$s.gate-backup"; done
       verdict publish "$VER"
     else
       red "── GATE 3 RED → REVERTING channel to v$PREV_VER ──"
       [ -f "$LIVE_MF.gate-backup" ] && mv "$LIVE_MF.gate-backup" "$LIVE_MF"
-      [ -f "$LIVE_MF.sig.gate-backup" ] && mv "$LIVE_MF.sig.gate-backup" "$LIVE_MF.sig"
+      for s in "${SUFFIXES[@]}"; do [ -f "$LIVE_MF$s.gate-backup" ] && mv "$LIVE_MF$s.gate-backup" "$LIVE_MF$s"; done
       beacon_fail "release-gate: publish of v$VER REVERTED (update-path failed)"
       verdict publish "$VER"
     fi

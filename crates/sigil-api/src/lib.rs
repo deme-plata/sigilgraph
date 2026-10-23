@@ -561,15 +561,20 @@ pub struct EventsQuery {
     /// still delivered unless `kinds` excludes them.
     #[serde(default)]
     pub tx: Option<String>,
-    /// Comma-separated subset of `tx,certificate,tip`. Default: all three.
+    /// Comma-separated subset of `tx,certificate,tip,balance,note`. Default: `tx,certificate,tip` (plus `balance`
+    /// when `wallet` is given).
     #[serde(default)]
     pub kinds: Option<String>,
+    /// 2026-10-23: a wallet (64-hex). The stream then carries `balance` events for it — its public balance, pushed the
+    /// instant the node's state moves — starting with one that carries the balance right now.
+    #[serde(default)]
+    pub wallet: Option<String>,
 }
 
 /// Server-Sent Events: every settlement-relevant thing this node learns, as it
 /// learns it. `event:` is the kind, `id:` the node-local sequence number, `data:` the
 /// JSON. A 15 s keep-alive comment keeps proxies from closing an idle stream.
-#[flux_api_macros::api(GET, "/v1/events", summary = "Server-Sent Events stream of tx status changes, finality certificates and tips")]
+#[flux_api_macros::api(GET, "/v1/events", summary = "Server-Sent Events stream of tx status changes, finality certificates, tips, a wallet's balance and new notes")]
 pub async fn events_stream(
     State(st): State<AppState>,
     Query(q): Query<EventsQuery>,
@@ -578,21 +583,40 @@ pub async fn events_stream(
     use futures_util::StreamExt;
     use tokio_stream::wrappers::BroadcastStream;
     let want_tx = q.tx.as_deref().and_then(hex32).map(hex::encode);
+    let want_wallet = q.wallet.as_deref().and_then(hex32);
+    let want_wallet_hex = want_wallet.map(hex::encode);
     let kinds: Option<Vec<String>> = q.kinds.as_deref().map(|k| {
         k.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect()
     });
+    // Subscribe FIRST, then read the balance: a change in between arrives as an event as well (never lost).
     let rx = st.events.subscribe();
+    // 2026-10-23: while this stream wants `balance` / `note` events the node computes them; dropped with the stream.
+    let state_guard = events::stream_wants_state(kinds.as_deref(), want_wallet_hex.as_deref()).then(|| st.events.state_listener());
+    let first = want_wallet.and_then(|w| {
+        let balance = st.state.read().map(|s| s.balance_of(&w, &NATIVE)).unwrap_or(0);
+        let ev = events::Event::Balance {
+            wallet: hex::encode(w),
+            token: hex::encode(NATIVE),
+            balance: balance.to_string(),
+            height: crate::height::get().unwrap_or(0),
+            ts_ms: events::now_ms(),
+        };
+        if !events::stream_wants(kinds.as_deref(), None, want_wallet_hex.as_deref(), &ev) {
+            return None;
+        }
+        let data = serde_json::to_string(&events::Sequenced { seq: 0, event: ev }).unwrap_or_else(|_| "{}".into());
+        Some(Ok::<_, std::convert::Infallible>(SseEvent::default().event("balance").data(data)))
+    });
     let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        let _counted = &state_guard; // the stream stays a state listener for as long as it lives
         let want_tx = want_tx.clone();
+        let want_wallet = want_wallet_hex.clone();
         let kinds = kinds.clone();
         async move {
             match item {
                 Ok(item) => {
-                    if let Some(ks) = &kinds {
-                        if !ks.iter().any(|k| k == item.event.kind()) { return None; }
-                    }
-                    if let (Some(w), Some(h)) = (&want_tx, item.event.tx_hash()) {
-                        if h != w { return None; }
+                    if !events::stream_wants(kinds.as_deref(), want_tx.as_deref(), want_wallet.as_deref(), &item.event) {
+                        return None;
                     }
                     let data = serde_json::to_string(&*item).unwrap_or_else(|_| "{}".into());
                     Some(Ok(SseEvent::default().event(item.event.kind()).id(item.seq.to_string()).data(data)))
@@ -603,6 +627,7 @@ pub async fn events_stream(
             }
         }
     });
+    let stream = futures_util::stream::iter(first).chain(stream);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
 }
 

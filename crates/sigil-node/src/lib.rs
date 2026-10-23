@@ -1353,7 +1353,8 @@ fn run_start() -> Result<()> {
         // `a > 0` so it fires once per drain that actually applied something, never per idle tick.
         macro_rules! publish_money { () => {{
             if let Some(ms) = money_state.as_ref() {
-                if let Ok(mut w) = ms.write() { *w = chain.state_snapshot(); }
+                // 2026-10-23: the one hand-over, which also pushes `balance` / `note` events to listening wallets.
+                sigil_api::events::publish_state_change(&events_bus, ms, chain.state_snapshot(), chain.height());
             }
             sigil_api::height::set(chain.height());
         }}; }
@@ -2757,8 +2758,9 @@ fn run_start() -> Result<()> {
                                 {
                                     // publish the fresh SETTLED state so the money API serves
                                     // current balances (converges across nodes via the drain).
+                                    // 2026-10-23: + the `balance` / `note` events for listening wallets.
                                     if let Some(ms) = money_state.as_ref() {
-                                        if let Ok(mut w) = ms.write() { *w = chain.state_snapshot(); }
+                                        sigil_api::events::publish_state_change(&events_bus, ms, chain.state_snapshot(), chain.height());
                                     }
                                     // emission watermark: producer-local reward tracking (the
                                     // SETTLED supply is chain.native_supply(), converged via the

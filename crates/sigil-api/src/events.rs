@@ -41,7 +41,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -78,6 +78,25 @@ pub enum Event {
     },
     /// The producer published a new frontier tip.
     Tip { height: u64, ts_ms: u64 },
+    /// 2026-10-23: a public balance changed in the state the money API serves. `balance` is the NEW amount in glyphs
+    /// (a string: it is a u128) — the same number `/v1/balance` answers anyone. Delivered only to a stream that named
+    /// this `wallet`.
+    Balance { wallet: String, token: String, balance: String, height: u64, ts_ms: u64 },
+    /// 2026-10-23: a note entered the shielded pool at `(epoch, index)`. `vt` + `eph_pk` are its view tag (the same
+    /// 34 bytes `/v1/shielded/tags` serves); a wallet tests them against its own key and scans only when the note may
+    /// be its own. The node cannot tell whose note it is, and the event says nothing the pool does not already publish.
+    Note {
+        epoch: u32,
+        index: u64,
+        // flux-wire: allow — /v1/events SSE JSON only
+        #[serde(skip_serializing_if = "Option::is_none")]
+        vt: Option<u8>,
+        // flux-wire: allow — /v1/events SSE JSON only
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eph_pk: Option<String>,
+        height: u64,
+        ts_ms: u64,
+    },
 }
 
 impl Event {
@@ -86,6 +105,15 @@ impl Event {
             Event::Tx { .. } => "tx",
             Event::Certificate { .. } => "certificate",
             Event::Tip { .. } => "tip",
+            Event::Balance { .. } => "balance",
+            Event::Note { .. } => "note",
+        }
+    }
+    /// The wallet a `balance` event is about.
+    pub fn wallet(&self) -> Option<&str> {
+        match self {
+            Event::Balance { wallet, .. } => Some(wallet.as_str()),
+            _ => None,
         }
     }
     pub fn tx_hash(&self) -> Option<&str> {
@@ -120,6 +148,10 @@ pub struct EventBus {
     tx: broadcast::Sender<Arc<Sequenced>>,
     seq: AtomicU64,
     published: AtomicU64,
+    /// 2026-10-23: streams that want `balance` / `note` events (see [`StateListener`]).
+    state_listeners: AtomicUsize,
+    /// The height of the last state handed over by [`publish_state_change`]; `u64::MAX` before the first.
+    state_height: AtomicU64,
 }
 
 impl Default for EventBus {
@@ -131,7 +163,13 @@ impl Default for EventBus {
 impl EventBus {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(BUS_CAPACITY);
-        Self { tx, seq: AtomicU64::new(0), published: AtomicU64::new(0) }
+        Self {
+            tx,
+            seq: AtomicU64::new(0),
+            published: AtomicU64::new(0),
+            state_listeners: AtomicUsize::new(0),
+            state_height: AtomicU64::new(u64::MAX),
+        }
     }
 
     /// Publish one event. Never blocks, never fails: with no subscriber the event is
@@ -168,6 +206,116 @@ impl EventBus {
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+// ── state events: balances + new notes (2026-10-23) ──────────────────────────
+
+/// A hand-over that jumps more heights than this publishes no `balance` / `note` events: the node is catching up,
+/// a wallet reads its balance on (re)connect, and a burst of thousands of events would only make the streams lag.
+pub const STATE_DIFF_MAX_JUMP: u64 = 64;
+/// Most `balance` events, and separately most `note` events, from one hand-over.
+pub const STATE_EVENTS_CAP: usize = 1024;
+
+/// Held by every `/v1/events` stream that wants `balance` or `note` events. While none is held the node does not
+/// compute them at all, so a node nobody listens to pays nothing for them.
+pub struct StateListener(Arc<EventBus>);
+
+impl Drop for StateListener {
+    fn drop(&mut self) {
+        self.0.state_listeners.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl EventBus {
+    pub fn state_listener(self: &Arc<Self>) -> StateListener {
+        self.state_listeners.fetch_add(1, Ordering::Relaxed);
+        StateListener(Arc::clone(self))
+    }
+    pub fn state_listeners(&self) -> usize {
+        self.state_listeners.load(Ordering::Relaxed)
+    }
+}
+
+/// The `balance` and `note` events between two money states: every public balance that changed (internal reserved
+/// entries excluded), then every note that entered the pool, with its view tag.
+pub fn state_events(old: &sigil_state::SigilState, new: &sigil_state::SigilState, height: u64, ts_ms: u64) -> Vec<Event> {
+    let mut out: Vec<Event> = old
+        .changed_balances(new)
+        .into_iter()
+        .take(STATE_EVENTS_CAP)
+        .map(|(w, t, b)| Event::Balance { wallet: hex::encode(w), token: hex::encode(t), balance: b.to_string(), height, ts_ms })
+        .collect();
+    for (epoch, index, ct) in old.shielded().new_notes_since(new.shielded()).into_iter().take(STATE_EVENTS_CAP) {
+        let view = ct.and_then(sigil_shield::note_cipher::tag_view);
+        out.push(Event::Note {
+            epoch,
+            index,
+            vt: view.as_ref().and_then(|v| v.vt),
+            eph_pk: view.map(|v| hex::encode(v.eph_pk)),
+            height,
+            ts_ms,
+        });
+    }
+    out
+}
+
+/// The ONE hand-over of a newly applied state to the money API (`/v1/balance`, `/v1/integrity`, the bridges), with
+/// the `balance` / `note` events for what changed. The difference is computed only while a stream listens and only
+/// one short step at a time ([`STATE_DIFF_MAX_JUMP`]); it is read BEFORE the swap (under the read lock, so API
+/// readers are not held up) and published AFTER it, so a client that answers an event with a fetch sees the new state.
+pub fn publish_state_change(
+    bus: &EventBus,
+    shared: &std::sync::RwLock<sigil_state::SigilState>,
+    fresh: sigil_state::SigilState,
+    height: u64,
+) {
+    let prev = bus.state_height.swap(height, Ordering::Relaxed);
+    let near_tip = prev != u64::MAX && height > prev && height - prev <= STATE_DIFF_MAX_JUMP;
+    let events = if near_tip && bus.state_listeners() > 0 {
+        match shared.read() {
+            Ok(old) => state_events(&old, &fresh, height, now_ms()),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    if let Ok(mut w) = shared.write() {
+        *w = fresh;
+    }
+    for e in events {
+        bus.publish(e);
+    }
+}
+
+/// Does a `/v1/events` stream with these filters want this event? No `kinds` means the original three (`tx`,
+/// `certificate`, `tip`) — a client written before `balance` / `note` existed sees exactly what it saw — plus
+/// `balance` when the stream named a `wallet`. A `balance` event goes only to a stream that named that wallet.
+pub fn stream_wants(kinds: Option<&[String]>, want_tx: Option<&str>, want_wallet: Option<&str>, ev: &Event) -> bool {
+    let kind = ev.kind();
+    let listed = match kinds {
+        Some(ks) => ks.iter().any(|k| k == kind),
+        None => matches!(kind, "tx" | "certificate" | "tip") || (kind == "balance" && want_wallet.is_some()),
+    };
+    if !listed {
+        return false;
+    }
+    if let (Some(w), Some(h)) = (want_tx, ev.tx_hash()) {
+        if h != w {
+            return false;
+        }
+    }
+    match ev.wallet() {
+        Some(w) => want_wallet == Some(w),
+        None => true,
+    }
+}
+
+/// Does a stream with these filters receive any `balance` / `note` event, so the node must compute them?
+pub fn stream_wants_state(kinds: Option<&[String]>, want_wallet: Option<&str>) -> bool {
+    match kinds {
+        Some(ks) => ks.iter().any(|k| k == "note" || (k == "balance" && want_wallet.is_some())),
+        None => want_wallet.is_some(),
+    }
 }
 
 // ── webhooks ─────────────────────────────────────────────────────────────────
@@ -599,6 +747,82 @@ fn random_hex(n_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-23: a stream that names no kinds gets exactly the original three; `balance` goes only to the stream
+    /// that named that wallet; notes only when asked for.
+    #[test]
+    fn stream_filters_keep_old_clients_unchanged_and_scope_balances_to_the_named_wallet() {
+        let (me, other) = ("a".repeat(64), "b".repeat(64));
+        let (me, other) = (me.as_str(), other.as_str());
+        let bal = |w: &str| Event::Balance { wallet: w.into(), token: "0".repeat(64), balance: "5".into(), height: 1, ts_ms: 0 };
+        let note = Event::Note { epoch: 1, index: 0, vt: Some(7), eph_pk: Some("c".repeat(64)), height: 1, ts_ms: 0 };
+        let tip = Event::Tip { height: 1, ts_ms: 0 };
+        // a client from before: no kinds, no wallet
+        assert!(stream_wants(None, None, None, &tip));
+        assert!(!stream_wants(None, None, None, &bal(me)));
+        assert!(!stream_wants(None, None, None, &note));
+        assert!(!stream_wants_state(None, None));
+        // a wallet stream with the default kinds: its own balance, nobody else's, no notes unless asked
+        assert!(stream_wants(None, None, Some(me), &bal(me)));
+        assert!(!stream_wants(None, None, Some(me), &bal(other)));
+        assert!(!stream_wants(None, None, Some(me), &note));
+        assert!(stream_wants_state(None, Some(me)));
+        // explicit kinds
+        let ks = vec!["balance".to_string(), "note".to_string()];
+        let ks = ks.as_slice();
+        assert!(stream_wants(Some(ks), None, Some(me), &note));
+        assert!(!stream_wants(Some(ks), None, Some(me), &tip));
+        assert!(!stream_wants(Some(ks), None, None, &bal(me)), "a balance never goes to a stream that named no wallet");
+        assert!(stream_wants_state(Some(ks), None), "notes alone still need the difference computed");
+        assert!(!stream_wants_state(Some(&["tip".to_string()][..]), Some(me)));
+        // the wire shape a wallet parses
+        let v = serde_json::to_value(&note).unwrap();
+        assert_eq!((v["kind"].as_str(), v["vt"].as_u64(), v["epoch"].as_u64()), (Some("note"), Some(7), Some(1)));
+    }
+
+    /// 2026-10-23: the hand-over swaps the state always, computes events only for listeners and only near the tip,
+    /// and a listener sees the NEW balance.
+    #[test]
+    fn state_change_events_only_for_listeners_near_the_tip() {
+        use sigil_state::{commit_state_transition, SigilState, StateMutation, StateTransition, NATIVE};
+        let fund = |s: &mut SigilState, w: [u8; 32], amount: u128| {
+            commit_state_transition(
+                s,
+                &StateTransition { at_height: 0, mutations: vec![StateMutation::SetBalance { wallet: w, token: NATIVE, amount }] },
+                0,
+            )
+            .unwrap();
+        };
+        let bus = Arc::new(EventBus::new());
+        let shared = std::sync::RwLock::new(SigilState::new());
+        let mut rx = bus.subscribe();
+        let w = [0xABu8; 32];
+        let mut s = SigilState::new();
+        fund(&mut s, w, 10);
+        publish_state_change(&bus, &shared, s.clone(), 100); // first hand-over: no baseline yet
+        fund(&mut s, w, 20);
+        publish_state_change(&bus, &shared, s.clone(), 101);
+        assert_eq!(shared.read().unwrap().balance_of(&w, &NATIVE), 20, "the state is swapped either way");
+        assert!(rx.try_recv().is_err(), "nobody listens for state: nothing computed");
+
+        let guard = bus.state_listener();
+        fund(&mut s, w, 35);
+        publish_state_change(&bus, &shared, s.clone(), 102);
+        match &rx.try_recv().expect("one balance event").event {
+            Event::Balance { wallet, token, balance, height, .. } => {
+                assert_eq!((wallet.as_str(), token.as_str(), balance.as_str(), *height), (hex::encode(w).as_str(), hex::encode(NATIVE).as_str(), "35", 102));
+            }
+            other => panic!("expected a balance event, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one event for one changed balance");
+
+        fund(&mut s, w, 1);
+        publish_state_change(&bus, &shared, s.clone(), 102 + STATE_DIFF_MAX_JUMP + 1);
+        assert!(rx.try_recv().is_err(), "a catch-up jump publishes nothing");
+        assert_eq!(shared.read().unwrap().balance_of(&w, &NATIVE), 1);
+        drop(guard);
+        assert_eq!(bus.state_listeners(), 0);
+    }
 
     #[tokio::test]
     async fn bus_delivers_in_order_with_monotonic_seq() {

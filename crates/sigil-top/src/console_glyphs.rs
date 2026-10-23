@@ -62,15 +62,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    // 2026-10-23: one test, not two — both switch the process-global UI_ASCII, and run in parallel they raced
+    // (sa_maps_wide_glyphs_in_ascii_mode failed once in five runs when the other test flipped it back mid-way).
     #[test]
-    fn sa_passes_through_in_rich_mode() {
+    fn sa_maps_wide_glyphs_in_ascii_mode_and_passes_through_in_rich_mode() {
         // Rich terminals keep the real glyphs — sa must be an identity.
         UI_ASCII.store(false, Ordering::Relaxed);
         assert_eq!(sa("◆ mined ⛏ 100%"), "◆ mined ⛏ 100%");
-    }
-
-    #[test]
-    fn sa_maps_wide_glyphs_in_ascii_mode() {
         // Legacy conhost: emoji-presentation glyphs that smear layout become width-1 ASCII;
         // CP437-safe glyphs (box-drawing, blocks, ·) fall through untouched.
         UI_ASCII.store(true, Ordering::Relaxed);

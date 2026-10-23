@@ -721,8 +721,28 @@ const ONE_ACTION_SEND_JS: &str = r##"
     var addr = (el('uniAddr').value||'').trim().toLowerCase();
     var amtS = (el('uniAmt').value||'').trim();
     msg('');
-    // Payment codes carry receiving keys; preserve the browser's keyed-payment path.
-    if(!/^[0-9a-f]{64}$/.test(addr) && window.sigilParsePayee && window.sigilParsePayee(addr) && typeof legacy === 'function') return legacy.apply(this, arguments);
+    // Payment codes carry receiving keys. 2026-10-23 (Viktor: [W] asked for the phrase to pay a code): a code whose
+    // wallet published the SAME keys on chain is just a long address — pay it through sigil-top, no phrase. Different
+    // keys = refused (a tampered code), never a prompt. Keys-only codes / unregistered wallets keep the browser path.
+    if(!/^[0-9a-f]{64}$/.test(addr) && window.sigilParsePayee){
+      var pc = window.sigilParsePayee(addr);
+      if(pc && pc.wallet){
+        var chainKeys = null;
+        try{
+          var kr = await fetch('/v1/shielded/address?wallet='+pc.wallet, {cache:'no-store'});
+          var kj = await kr.json();
+          if(kj && kj.ok && kj.pk_shield && kj.pk_encrypt) chainKeys = kj;
+        }catch(e){}
+        if(chainKeys && (!pc.keyed || (String(chainKeys.pk_shield).toLowerCase() === pc.pk_shield
+                                       && String(chainKeys.pk_encrypt).toLowerCase() === pc.pk_encrypt))){
+          addr = pc.wallet;
+        } else if(chainKeys && pc.keyed){
+          msg('This payment code carries different keys than the ones '+pc.wallet.slice(0,10)+'… published on the chain — not paying it. Ask the recipient for a fresh code.', '#ff8a8a');
+          return;
+        }
+      }
+      if(!/^[0-9a-f]{64}$/.test(addr) && window.sigilParsePayee(addr) && typeof legacy === 'function') return legacy.apply(this, arguments);
+    }
     if(!/^[0-9a-f]{64}$/.test(addr)){ msg("Enter the recipient's 64-character SIGIL address first.", '#ff8a8a'); return; }
     if(!(new RegExp('^\\d+(\\.\\d{1,'+DP+'})?$')).test(amtS) || Number(amtS) <= 0){ msg('Enter an amount greater than 0 (up to '+DP+' decimals).', '#ff8a8a'); return; }
 

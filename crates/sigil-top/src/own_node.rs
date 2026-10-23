@@ -430,6 +430,9 @@ pub fn api() -> String {
 
 /// The node exits with this when another node already holds its data folder (BSD EX_TEMPFAIL).
 pub const EXIT_FOLDER_IN_USE: u8 = 75;
+/// A headless node stopped to update, but the new binary could not be started in place: exit so the service manager
+/// starts the program again (the new binary is in place, or the old one was put back).
+pub const EXIT_UPDATE_RESTART: u8 = 76;
 const LOCK_FILE: &str = "sigil-top-node.lock";
 const API_FILE: &str = "sigil-top-node.api";
 
@@ -529,13 +532,140 @@ pub fn run_headless() -> ExitCode {
                 p.data_dir.display(),
                 if p.api.is_empty() { "off".to_string() } else { p.api.clone() },
             );
+            // 2026-10-23: a server node updates itself too (the screen's updater gate never runs without a screen).
+            let exe = crate::INSTALL_EXE.get().cloned().or_else(|| std::env::current_exe().ok()).unwrap_or_default();
+            let blocker = if std::env::args().any(|a| a == "--no-update") {
+                Some("--no-update")
+            } else {
+                update_blocker(p.user_mode, |k| std::env::var(k).ok(), &exe, argv0_is_symlink())
+            };
+            match blocker {
+                None => {
+                    eprintln!("sigil-top: checks the signed release channel itself — first in ~10 min, then every ~6 h");
+                    spawn_headless_updater();
+                }
+                Some(why) => eprintln!("sigil-top: no automatic updates on this node — {why}"),
+            }
         }
         Err(e) => {
             eprintln!("sigil-top: cannot prepare the node's data folder: {e}");
             return ExitCode::from(1);
         }
     }
-    run_here()
+    let code = run_here();
+    if let Some(v) = UPDATE_PENDING.get() {
+        // relaunch_new_binary pre-flights again, then replaces this process (unix exec) or starts the new one and
+        // exits (windows). It only RETURNS on failure; the swapped binary (or the put-back old one) is then what the
+        // service manager starts next.
+        eprintln!("sigil-top: node stopped for the update — restarting as v{v}");
+        if !crate::self_update::relaunch_new_binary(v) {
+            eprintln!("sigil-top: could not start v{v} in place — exiting so the service manager starts the program again");
+            return ExitCode::from(EXIT_UPDATE_RESTART);
+        }
+    }
+    code
+}
+
+// ── headless auto-update (2026-10-23) ────────────────────────────────────────────────────────────────────────────
+
+/// The release the headless updater swapped in and pre-flighted; set just before it asks the node to stop.
+static UPDATE_PENDING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Why THIS headless node must not update itself, or `None` when it may. Pure, so the rules are pinned by tests.
+/// A node configured by its environment (Epsilon's block-maker and its copies) is deployed by its operator,
+/// follower-first, never by itself; a process holding a block-maker key never swaps its own binary; a binary started
+/// through a symlink or living in a build folder (`target/`) is someone's deploy path, not an install.
+fn update_blocker(
+    user_mode: bool,
+    env: impl Fn(&str) -> Option<String>,
+    exe: &Path,
+    started_via_symlink: bool,
+) -> Option<&'static str> {
+    let set = |k: &str| env(k).map(|v| !v.trim().is_empty()).unwrap_or(false);
+    if env("SIGIL_TOP_NO_AUTOUPDATE").as_deref() == Some("1") {
+        return Some("SIGIL_TOP_NO_AUTOUPDATE=1");
+    }
+    if !user_mode {
+        return Some("it is configured by its environment, so its operator deploys it");
+    }
+    if set("SIGIL_PRODUCER_SQISIGN_SK_HEX") || set("SIGIL_FINALITY_SIGN_SEED") || env("SIGIL_PRODUCER").as_deref() == Some("1") {
+        return Some("this process holds a block-maker key");
+    }
+    if started_via_symlink {
+        return Some("the program was started through a symlink");
+    }
+    if exe.as_os_str().is_empty() {
+        return Some("its install path is unknown");
+    }
+    if exe.components().any(|c| c.as_os_str() == "target") {
+        return Some("the program lives in a build folder (target/)");
+    }
+    None
+}
+
+/// Was this program started through a symlink? `argv[0]` as typed — a path, or a name found on PATH. (The running
+/// exe path the system reports is already resolved, so it cannot answer this.)
+fn argv0_is_symlink() -> bool {
+    let Some(a0) = std::env::args_os().next() else { return false };
+    let p = PathBuf::from(&a0);
+    let found = if p.components().count() > 1 {
+        Some(p)
+    } else {
+        std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(&a0)).find(|c| c.is_file()))
+    };
+    found.and_then(|f| std::fs::symlink_metadata(f).ok()).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
+/// Check the signed channel in the background: ~10 min after start, then every ~6 h (each with a little jitter so
+/// servers do not all ask at once; `SIGIL_TOP_UPDATE_EVERY_SECS` sets both, for a test). Stops after it hands over.
+fn spawn_headless_updater() {
+    std::thread::spawn(|| {
+        let every = std::env::var("SIGIL_TOP_UPDATE_EVERY_SECS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|s| *s > 0);
+        let jitter = |max: u64| {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0) % max
+        };
+        std::thread::sleep(Duration::from_secs(every.unwrap_or(600 + jitter(300))));
+        loop {
+            match headless_update_once() {
+                Ok(Some(v)) => {
+                    let _ = UPDATE_PENDING.set(v);
+                    request_own_stop();
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("sigil-top: update check: {e}"),
+            }
+            std::thread::sleep(Duration::from_secs(every.unwrap_or(6 * 3600 + jitter(1800))));
+        }
+    });
+}
+
+/// One check. `Ok(Some(v))` = v is swapped in at the install path and starts; `Ok(None)` = already current.
+fn headless_update_once() -> Result<Option<String>, String> {
+    let rel = crate::fetch_latest()?;
+    if !crate::version_gt(&rel.version, crate::VERSION) {
+        return Ok(None);
+    }
+    eprintln!("sigil-top: release v{} is out (running v{}) — downloading and checking it", rel.version, crate::VERSION);
+    let msg = crate::self_update::self_update(&rel)?;
+    if !msg.starts_with("swapped") {
+        return Err(format!("v{} was downloaded but not swapped into place ({msg}) — keeping v{}", rel.version, crate::VERSION));
+    }
+    let exe = crate::INSTALL_EXE.get().cloned().or_else(|| std::env::current_exe().ok()).ok_or("no install path")?;
+    match crate::preflight_binary(&exe) {
+        Ok(rep) if rep.is_empty() || rep == rel.version || crate::version_gt(&rep, crate::VERSION) => {
+            eprintln!("sigil-top: v{} is in place and starts ({msg}) — stopping the node (state first) to restart into it", rel.version);
+            Ok(Some(rel.version))
+        }
+        Ok(rep) => {
+            crate::self_update::revert_to_rollback(&exe);
+            Err(format!("the new binary reports v{rep}, not v{} — the old one is back, keeping v{}", rel.version, crate::VERSION))
+        }
+        Err(e) => {
+            crate::self_update::revert_to_rollback(&exe);
+            Err(format!("the new binary does not start ({e}) — the old one is back, keeping v{}", crate::VERSION))
+        }
+    }
 }
 
 /// Ask THIS process's node to stop the way systemd stops a node (SIGTERM / Ctrl-Break): it writes its state
@@ -1115,5 +1245,40 @@ mod tests {
         status::set_message("exited (exit status: 1): genesis mismatch");
         assert!(status::line().unwrap().contains("genesis mismatch"));
         status::set_phase(status::IDLE);
+    }
+}
+
+/// 2026-10-23: who may update itself without a screen. A user's server node may; Epsilon's block-maker and copies
+/// (configured by their environment), a process with a block-maker key, a symlinked or build-folder binary may not.
+#[cfg(test)]
+mod headless_update_tests {
+    use super::update_blocker;
+    use std::path::Path;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn only_a_users_own_install_updates_itself() {
+        let install = Path::new("/opt/sigil/sigil-top");
+        // a user's node: the settings sigil-top fills in itself (SIGIL_PRODUCER=0, a placeholder tip-proof path)
+        let user = [("SIGIL_PRODUCER", "0"), ("SIGIL_TIP_PROOF_KEY", "/var/lib/sigil/x/no-tip-proof-key")];
+        assert_eq!(update_blocker(true, env(&user), install, false), None);
+        // the operator's nodes: configured by their environment
+        assert!(update_blocker(false, env(&[]), install, false).unwrap().contains("operator"));
+        // block-maker keys, even in user mode
+        for k in [("SIGIL_PRODUCER_SQISIGN_SK_HEX", "ab"), ("SIGIL_FINALITY_SIGN_SEED", "/k"), ("SIGIL_PRODUCER", "1")] {
+            assert!(update_blocker(true, env(&[k]), install, false).unwrap().contains("block-maker"), "{k:?}");
+        }
+        // deploy paths, not installs
+        assert!(update_blocker(true, env(&user), install, true).unwrap().contains("symlink"));
+        let built = Path::new("/home/storage/sigil-g3-node-target/release/sigil-top");
+        assert_eq!(update_blocker(true, env(&user), built, false), None, "a folder merely NAMED like a target is fine");
+        let cargo = Path::new("/home/u/sigil/target/release/sigil-top");
+        assert!(update_blocker(true, env(&user), cargo, false).unwrap().contains("build folder"));
+        assert!(update_blocker(true, env(&user), Path::new(""), false).unwrap().contains("unknown"));
+        // the opt-out
+        assert!(update_blocker(true, env(&[("SIGIL_TOP_NO_AUTOUPDATE", "1")]), install, false).is_some());
     }
 }

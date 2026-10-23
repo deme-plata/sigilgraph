@@ -260,6 +260,16 @@ pub(crate) fn windows_swap_fallback(beside: &std::path::Path, rel: &Release, mb:
 /// user to restart manually, and the app keeps running on the current image. No more
 /// "app vanishes when it tries to restart after sync". Returns `false` on any non-handoff
 /// path; on unix a successful pre-flight + `exec` never returns.
+/// Put the rollback image (the binary that ran before the swap) back at `target`. Used when a swapped-in binary
+/// does not start (2026-10-23: the headless updater pre-flights before it stops the node).
+pub(crate) fn revert_to_rollback(target: &std::path::Path) {
+    if let Some(prev) = prev_binary_path() {
+        if prev.exists() && self_replace::self_replace(&prev).is_err() {
+            let _ = std::fs::copy(&prev, target);
+        }
+    }
+}
+
 pub(crate) fn relaunch_new_binary(version: &str) -> bool {
     // 2026-10-23: the node goes first — the new version starts its own node on the same port and folder.
     crate::own_node::stop_before_update();

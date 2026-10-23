@@ -552,7 +552,9 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
 
     // ── header: the whole pipeline in two lines ─────────────────────────
     // One extra header row when the unservable-frontier banner is present.
-    let head_rows = if app.p2p_state.unservable_frontier.is_some() { 5 } else { 4 };
+    // 2026-10-23: one more row while your own node runs — its line below (the queue itself is the light monitor's).
+    let node = crate::forge_ui::node_progress();
+    let head_rows = (if app.p2p_state.unservable_frontier.is_some() { 5 } else { 4 }) + u16::from(node.is_some());
     let [head, mid] = Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(inner);
     let mut hl: Vec<Line> = Vec::new();
     hl.push(Line::from(vec![
@@ -586,6 +588,20 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         // — this just says it out loud on the panel the operator is actually looking at.
         Span::styled(zero_peer_reason(s), Style::default().fg(C_NEON_PINK)),
     ]));
+    // 2026-10-23: YOUR NODE, the same numbers as the SYNC card on tab 1 (the rate above is the light monitor's tip pace).
+    if let Some((h, net, rate, measuring)) = node {
+        let togo = net.saturating_sub(h);
+        let speed = if measuring { "measuring…".to_string() } else { format!("{} blk/s", group(rate.round() as u64)) };
+        let eta = if !measuring && rate >= 1.0 && togo > 0 { fmt_eta_secs((togo as f64 / rate) as u64) } else { "—".into() };
+        hl.push(Line::from(vec![
+            Span::styled("⛓ your node ", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim("height "), Span::styled(group(h), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim(" of "), Span::styled(group(net), Style::default().fg(C_VBRIGHT)),
+            dim("   applying "), Span::styled(speed, Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+            dim("   eta "), Span::styled(eta, Style::default().fg(C_NEON_CYAN)),
+            dim("   (tab 1)"),
+        ]));
+    }
     // frontier bar: verified → fetched → tip, so the two watermarks are visible as one picture
     {
         let w = (head.width as usize).saturating_sub(2).max(10);

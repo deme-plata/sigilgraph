@@ -52,6 +52,24 @@ fn observe(height: u64) -> Beat {
     Beat { t: now.duration_since(m.t0).as_secs_f64(), rate: m.rate }
 }
 
+/// 2026-10-23 (Viktor: "make sure tab 1 and tab 4 shows the correct block pr second number"): your node's height, the
+/// network tip, its apply speed and whether that speed is still being measured — for other tabs, from the SAME
+/// measurement and the same rule as the SYNC card, so tab 1 and tab 4 never show two different numbers.
+pub(crate) fn node_progress() -> Option<(u64, u64, f64, bool)> {
+    #[cfg(feature = "producer")]
+    {
+        if !band_visible() {
+            return None;
+        }
+        let height = ps::height();
+        let net = ps::net_tip().max(height);
+        let beat = observe(height);
+        return Some((height, net, beat.rate, beat.t < 30.0 || beat.rate < 1.0));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Your own node runs (always since 10.6.0, unless SIGIL_TOP_NODE=0) — the SYNC card then shows it.
 pub(crate) fn band_visible() -> bool {
     #[cfg(feature = "producer")]

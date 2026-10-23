@@ -105,12 +105,19 @@ grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version
 # address AFTER the version bump so the stamp names the exact source that ships, and commit
 # .flux-rev/HEAD alongside Cargo.toml so the stamp is reproducible from git.
 FLUX_REV_BIN="${FLUX_REV_BIN:-/home/storage/deepseek-codewhale/flux/target/debug/flux-rev}"
-if [ "$BUILD_ONLY" != "1" ] && [ -x "$FLUX_REV_BIN" ] && "$FLUX_REV_BIN" snapshot crates/sigil-top -m "release v$VER" >/dev/null 2>&1 \
+# 2026-10-23: the error is SHOWN now. From v10.2.1 to v10.6.6 every snapshot failed silently — the fixed release
+# folder held the tracked .flux-rev/HEAD pointer but not the untracked object store, so the parent revision was
+# missing — and every binary shipped with a git: stamp only. The store lives in .flux-rev/objects (not in git); seed
+# a new release folder from the main tree's crates/sigil-top/.flux-rev/objects before its first release.
+FLUX_REV_LOG=crates/sigil-top/.flux-rev/last-snapshot.log
+if [ "$BUILD_ONLY" != "1" ] && [ -x "$FLUX_REV_BIN" ] && "$FLUX_REV_BIN" snapshot crates/sigil-top -m "release v$VER" >"$FLUX_REV_LOG" 2>&1 \
    && [ -s crates/sigil-top/.flux-rev/HEAD ]; then
   export SIGIL_TOP_FLUX_REV="full:$(cat crates/sigil-top/.flux-rev/HEAD)"
+  echo "  ✓ flux-rev revision $(head -c 16 crates/sigil-top/.flux-rev/HEAD)"
 else
   export SIGIL_TOP_FLUX_REV="git:$(git rev-parse --short HEAD)"
-  echo "  ! flux-rev snapshot unavailable — stamping $SIGIL_TOP_FLUX_REV instead"
+  echo "  ! flux-rev snapshot FAILED — stamping $SIGIL_TOP_FLUX_REV instead. flux-rev said:"
+  tail -3 "$FLUX_REV_LOG" 2>/dev/null | sed 's/^/      /'
 fi
 echo "  provenance stamp: $SIGIL_TOP_FLUX_REV"
 WIN_TARGET_DIR="${WIN_TARGET_DIR:-/home/storage/sigil-target-win}"

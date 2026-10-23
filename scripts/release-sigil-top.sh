@@ -288,6 +288,9 @@ if [ "$WANT_ARM" = 1 ]; then
   ARM_TARGET_JSON=",
     \"linux-arm64\":     { \"url\": \"$BASE/sigil-top-v${VER}-linux-arm64\",     \"proof_url\": \"$BASE/sigil-top-v${VER}-linux-arm64.proof\",     \"blake3_hex\": \"$AB3\", \"size_bytes\": $ASZ }"
 fi
+# 2026-10-23: the note goes in JSON-ESCAPED. v10.6.6's note held "busy" in quotes, the manifest was written and
+# SIGNED as invalid JSON, and every install's update check read the channel as unreadable for ~4.5 min.
+NOTE_JSON=$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$NOTE")
 cat > "$DL/sigil-top-latest.json" <<EOF
 {
   "product": "sigil-top", "version": "$VER", "channel": "stable",
@@ -296,7 +299,7 @@ cat > "$DL/sigil-top-latest.json" <<EOF
   "verify": "fluxc verify-proof <artifact> <artifact>.proof   (require-both SQIsign-L5 + Ed25519)",
   "builder_keys": "$BASE/sigil-builder-keys.json",
   "source_archive": "$BASE/sigil-top-v${VER}-src.tar.gz",
-  "notes": "$NOTE",
+  "notes": $NOTE_JSON,
   "targets": {
     "linux-x64":       { "url": "$BASE/sigil-top-v${VER}-linux-x64",       "proof_url": "$BASE/sigil-top-v${VER}-linux-x64.proof",       "blake3_hex": "$LB3", "size_bytes": $LSZ },
     "linux-x64-gpu":   { "url": "$BASE/sigil-top-v${VER}-linux-x64",       "proof_url": "$BASE/sigil-top-v${VER}-linux-x64.proof",       "blake3_hex": "$LB3", "size_bytes": $LSZ },
@@ -305,6 +308,8 @@ cat > "$DL/sigil-top-latest.json" <<EOF
   }
 }
 EOF
+python3 -I -c 'import json, sys; json.load(open(sys.argv[1]))' "$DL/sigil-top-latest.json" \
+  || { echo "✗ the manifest is not valid JSON — refusing to sign it"; exit 1; }
 bash scripts/sign-manifest.sh "$DL/sigil-top-latest.json"
 # legacy channel + canonical home get the identical signed manifest
 cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$LEGACY_DL/"

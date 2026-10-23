@@ -1109,7 +1109,23 @@ body.view-desktop .desktop{display:flex}
     const S=window.__sigilShieldScan, M=window.__sigilShield;
     if(!S||!M){ el.textContent='—'; if(nt) nt.textContent='scanner unavailable'; return; }
     let mn=window.__sigilMnemonic; if(!mn){ try{ mn=localStorage.getItem('sigil-wallet-mnemonic'); }catch(e){} }
-    if(!mn){ el.textContent='locked'; if(nt) nt.textContent='unlock to view'; return; }
+    if(!mn){
+      // 2026-10-23: in sigil-top's [W] the key stays in sigil-top — its own scanner answers (same origin only).
+      if(typeof _sigilIsLocalW==='function' && _sigilIsLocalW()){
+        try{
+          const pr=await fetch('/api/v1/private-balance',{cache:'no-store'}).then(function(r){ return r.json(); });
+          if(pr && pr.ok){
+            SHIELD_RAW = pr.balance; try{ window.__sigilShieldRaw = pr.balance; }catch(_){}
+            el.textContent=glyphStr(pr.balance)+' SIGIL';
+            if(nt) nt.textContent=pr.notes+' note'+(pr.notes===1?'':'s')+' · scanned by sigil-top';
+            try{ render(); }catch(_){}
+            return;
+          }
+          if(pr && pr.scanning){ el.textContent='scanning…'; if(nt) nt.textContent='sigil-top is scanning the private pool'; return; }
+        }catch(_){}
+      }
+      el.textContent='locked'; if(nt) nt.textContent='unlock to view'; return;
+    }
     // 2026-09-08: derive the way the ADDRESS was derived. sigilDeriveFrom() treats a 64-hex
     // raw seed as a phrase, so a wallet opened from a raw seed (MCP, sigil-top, mine-rig)
     // scanned the pool with the WRONG key and showed 0 private balance while holding

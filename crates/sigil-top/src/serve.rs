@@ -51,6 +51,12 @@ pub fn start_with_api(
     thread::spawn(move || {
         serve_loop(listener, dir, stop_clone, local_api);
     });
+    // 2026-10-23: the [W] page reads the private balance from this process's scanner (/api/v1/private-balance);
+    // once per seed, so the screen's own start of it is not doubled.
+    #[cfg(feature = "shield-register")]
+    if let Some(seed_hex) = crate::top_core::miner_seed().map(hex::encode) {
+        let _ = crate::shield_setup::spawn_shielded_scanner(&crate::top_core::engine_node_url(), &seed_hex);
+    }
     Ok(stop)
 }
 
@@ -239,6 +245,33 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     // local endpoints take it as text, the node proxy forwards the bytes untouched.
     let req_body = String::from_utf8_lossy(&req_body_bytes).into_owned();
     let req_content_type = request_header(req, "content-type").unwrap_or_else(|| "application/json".into());
+
+    // 2026-10-23 (Viktor: "add private balance to [W]"): the private balance from this process's own scanner — the
+    // page never holds the key, so a locked [W] cannot scan. SAME ORIGIN ONLY: no CORS header, and a request carrying
+    // any other web origin is refused, so only the [W] page itself can read a wallet's private balance.
+    if method == "GET" && path.split('?').next() == Some("/api/v1/private-balance") {
+        let host = request_header(req, "host").unwrap_or_default();
+        let same_origin = request_header(req, "origin").map_or(true, |o| o.trim() == format!("http://{}", host.trim()));
+        let (status, body) = if !same_origin {
+            ("403 Forbidden", r#"{"ok":false,"error":"same-origin only"}"#.to_string())
+        } else {
+            #[cfg(feature = "shield-register")]
+            let snap = crate::shield_setup::latest_shielded();
+            #[cfg(feature = "shield-register")]
+            let body = match snap {
+                Some(s) => format!(r#"{{"ok":true,"balance":"{}","notes":{},"spent":{}}}"#, s.balance, s.owned, s.spent),
+                None => r#"{"ok":false,"scanning":true}"#.to_string(),
+            };
+            #[cfg(not(feature = "shield-register"))]
+            let body = r#"{"ok":false,"error":"this build has no private scanner"}"#.to_string();
+            ("200 OK", body)
+        };
+        let _ = stream.write_all(format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ).as_bytes());
+        return;
+    }
 
     // 2026-08-26: LOCAL-ONLY fast-path signing/shield endpoints — pressing Shield/Send/
     // Swap/Bridge from THIS box's own wallet (opened via [W], localhost:9800) completes

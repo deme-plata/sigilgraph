@@ -2064,6 +2064,8 @@ fn run_start() -> Result<()> {
                         infl.insert(key);
                     }
                     if let Some(peer) = chosen {
+                        // 2026-10-23: noted for sigil-top's Queues tab (`/v1/sync/queue`); bookkeeping only.
+                        sigil_api::sync_queue::started(from, to, &peer.to_string(), chunk);
                         let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw() };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
@@ -2149,6 +2151,7 @@ fn run_start() -> Result<()> {
                                             // 202 / 224 holes ↔ 79 / 136 / 203 / 193 s. The range stays in flight while we
                                             // wait, so neither the window nor the gap path asks for it twice.
                                             busy_tries += 1;
+                                            sigil_api::sync_queue::busy(from, to);
                                             if busy_tries <= 20 {
                                                 tokio::time::sleep(std::time::Duration::from_millis((25u64 << busy_tries.min(4)).min(400))).await;
                                                 continue;
@@ -2184,6 +2187,7 @@ fn run_start() -> Result<()> {
                                     Vec::new()
                                 }
                             };
+                            sigil_api::sync_queue::finished(from, to, blocks.len() as u64);
                             let _ = bf_tx2.send(checked_blocks(blocks)).await;
                             inflight_ad.fetch_sub(1, AOrd::Relaxed);
                             // Release the range so it can be retried (after its backoff) or

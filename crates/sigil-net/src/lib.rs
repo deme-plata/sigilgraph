@@ -180,7 +180,9 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
     // 10+ minutes on :9501 alone with no way to self-heal (nothing to dial),
     // while :853 was independently confirmed reachable and forwarding.
     "/ip4/89.149.241.126/tcp/853",
-    "/ip4/159.195.108.96/tcp/9501", // happysrv (second producer, confirmed reachable, no firewall block on 9501)
+    // 2026-10-23: happysrv (159.195.108.96) no longer answers on 9501 (probed from Epsilon) — Viktor's Stockholm
+    // server takes its place: a full g3 node since 10-23, chain.log ≡ the producer, port 9501 open.
+    "/ip4/199.19.76.102/tcp/9501", // sigil-se1 (Stockholm, Viktor's second server)
 ];
 
 /// Parse the comma-separated env var into a list of multiaddrs. Whitespace is trimmed, empty entries

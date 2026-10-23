@@ -727,6 +727,10 @@ pub mod status {
     pub fn take_resync() -> bool { RESYNC.swap(false, Ordering::Relaxed) }
     static MESSAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     static LOG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    /// 2026-10-23: the node's last `/v1/sync/queue` answer (its history downloader), for the Queues tab.
+    static QUEUE: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+    pub fn set_queue(v: Option<serde_json::Value>) { if let Ok(mut g) = QUEUE.lock() { *g = v; } }
+    pub fn queue() -> Option<serde_json::Value> { QUEUE.lock().ok().and_then(|g| g.clone()) }
 
     /// Our node's newest `(height, block hash)` pairs, for the DATA INTEGRITY card's exact-at-height comparison
     /// against the network (from the node's own `/v1/dagknight/recent`, the same route the card reads from Epsilon).
@@ -819,6 +823,8 @@ fn poll(api: &str, with_hashes: bool) -> bool {
     if let Some(c) = get_json(&format!("{api}/v1/finality/certificate")) {
         if let Some(ch) = c.get("certificate").and_then(|x| x.get("height")).and_then(|x| x.as_u64()) { status::note_net_tip(ch); }
     }
+    // 2026-10-23: its download queue, for tab 4 (a node older than 10.7.1 has no such route → None).
+    status::set_queue(get_json(&format!("{api}/v1/sync/queue")).filter(|q| q.get("in_flight").is_some()));
     if with_hashes {
         if let Some(r) = get_json(&format!("{api}/v1/dagknight/recent")) {
             let d = r.get("data").unwrap_or(&r);

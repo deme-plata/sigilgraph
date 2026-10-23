@@ -519,19 +519,85 @@ fn reap_completed(rows: &[sigil_sync::RangeRow], tip: u64) {
     }
 }
 
+/// 2026-10-23 (Viktor: "queue stopped working the table is empty while syncing"): YOUR NODE's download queue — what it
+/// asked which peer for, and what it finished — from its `/v1/sync/queue`, as the same rows the light monitor fills.
+/// `None` while no node of yours answers that route (light mode, or a node older than 10.7.1).
+fn node_queue(tip: u64) -> Option<(sigil_sync::Telemetry, Vec<DoneRange>)> {
+    if !crate::forge_ui::band_visible() {
+        return None;
+    }
+    let q = crate::own_node::status::queue()?;
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let num = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let txt = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let mut rows: Vec<sigil_sync::RangeRow> = q.get("in_flight")?.as_array()?.iter().map(|r| {
+        let since = num(r, "since_ms");
+        let busy = num(r, "busy");
+        let peer = if busy > 0 { format!("{} busy×{busy}", txt(r, "peer")) } else { txt(r, "peer") };
+        sigil_sync::RangeRow {
+            start: num(r, "from"),
+            end: num(r, "to"),
+            state: sigil_sync::RangeState::InFlight { peer, since_ms: since, fanout: 1 },
+            age_ms: now_ms.saturating_sub(since),
+        }
+    }).collect();
+    rows.sort_by_key(|r| r.start);
+    let now = Instant::now();
+    let done: Vec<DoneRange> = q.get("done").and_then(|d| d.as_array()).map(|d| d.iter().map(|r| DoneRange {
+        start: num(r, "from"),
+        end: num(r, "to"),
+        peer: txt(r, "peer"),
+        wait_ms: num(r, "ms"),
+        at: now.checked_sub(Duration::from_millis(now_ms.saturating_sub(num(r, "at_ms")))).unwrap_or(now),
+        verified: r.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+        tip,
+    }).collect()).unwrap_or_default();
+    let recent: u64 = q.get("done").and_then(|d| d.as_array()).map(|d| d.iter()
+        .filter(|r| now_ms.saturating_sub(num(r, "at_ms")) <= 10_000).map(|r| num(r, "blocks")).sum()).unwrap_or(0);
+    let fetched_to = rows.iter().map(|r| r.end).chain(done.iter().map(|d| d.end)).max().unwrap_or(0);
+    let t = sigil_sync::Telemetry {
+        chunk: num(&q, "chunk"),
+        fetched_to,
+        verified_to: crate::own_node::status::height(),
+        fetched_blocks: num(&q, "received_blocks"),
+        rate: recent as f64 / 10.0,
+        rows,
+    };
+    Some((t, done))
+}
+
 pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = &app.p2p_state;
-    let t = sigil_sync::live_telemetry();
     let net_tip = s.peer_best_height.max(app.target_height);
-    // Move anything that left the live queue since the last frame into the retained log,
-    // so the table keeps showing completed work instead of blanking it instantly.
-    reap_completed(&t.rows, net_tip);
+    // 2026-10-23: your own node's queue when it runs (and answers), the light monitor's otherwise.
+    let from_node = node_queue(net_tip);
+    let t = match &from_node {
+        Some((t, done)) => {
+            // The node reports its finished ranges itself (a fast sync finishes most of them between two frames).
+            if let Ok(mut d) = done_log().lock() {
+                *d = done.iter().cloned().take(DONE_CAP).collect();
+            }
+            t.clone()
+        }
+        None => {
+            let t = sigil_sync::live_telemetry();
+            // Move anything that left the live queue since the last frame into the retained log,
+            // so the table keeps showing completed work instead of blanking it instantly.
+            reap_completed(&t.rows, net_tip);
+            t
+        }
+    };
 
     // `card_block` wants a &'static str. Build the title once and keep it — leaking on
     // every frame would be a slow memory leak in a program that redraws continuously.
     static QUEUES_TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static NODE_QUEUE_TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let block = card_block(
-        QUEUES_TITLE.get_or_init(|| format!(" ◈ FETCH QUEUES · {} · light monitor (your node: tab 1)", build_network_id())).as_str(),
+        if from_node.is_some() {
+            NODE_QUEUE_TITLE.get_or_init(|| format!(" ◈ FETCH QUEUES · {} · your node's downloads", build_network_id())).as_str()
+        } else {
+            QUEUES_TITLE.get_or_init(|| format!(" ◈ FETCH QUEUES · {} · light monitor (your node: tab 1)", build_network_id())).as_str()
+        },
         C_NEON_CYAN,
     );
     let inner = block.inner(area);
@@ -578,7 +644,11 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         dim("   fetched→ "), Span::styled(group(t.fetched_to), Style::default().fg(C_GOLD)),
         dim("   tip "), Span::styled(group(tip), Style::default().fg(C_VBRIGHT)),
         dim("   gap "), Span::styled(group(gap), Style::default().fg(if gap > 100_000 { C_NEON_PINK } else { C_DIM })),
-        dim("   peers "), Span::styled(format!("{}", s.peer_count), Style::default().fg(if s.peer_count > 0 { C_NEON_GREEN } else { C_RED })),
+        // 2026-10-23: your node's own peers when the table is your node's (the light monitor dials others).
+        dim("   peers "), Span::styled(
+            if from_node.is_some() { format!("{}", crate::own_node::status::peers()) } else { format!("{}", s.peer_count) },
+            Style::default().fg(if s.peer_count > 0 || crate::own_node::status::peers() > 0 { C_NEON_GREEN } else { C_RED }),
+        ),
         // "peers 0" on its own is mute: it cannot distinguish "the dials are being
         // REFUSED by this network" from "we simply have not dialled yet". Both look
         // identical and both stall the queue below at "nothing in flight", which is
@@ -658,7 +728,8 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     lines.push(Line::from(Span::styled(hdr, Style::default().fg(C_DIM).add_modifier(Modifier::BOLD))));
     if t.rows.is_empty() {
         lines.push(Line::from(Span::styled(
-            if t.chunk == 0 { "  idle — the sync engine is not running (light monitor; press F for full sync)" }
+            if from_node.is_some() { "  empty — your node has nothing to download right now (it is at the tip)" }
+            else if t.chunk == 0 { "  idle — the sync engine is not running (light monitor; press F for full sync)" }
             else { "  empty — nothing in flight (at tip, or the wire is idle)" },
             Style::default().fg(C_DIM),
         )));

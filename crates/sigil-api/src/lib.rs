@@ -78,6 +78,7 @@ pub mod nation;
 pub mod shielded;
 /// Push delivery of settlement: event bus, SSE, long-poll wait, signed webhooks.
 pub mod events;
+pub mod sync_queue;
 /// Signed ACCEPTANCE receipts returned synchronously by the submit paths.
 /// Acceptance is not settlement — read that module's docs before using it.
 pub mod receipt;
@@ -629,6 +630,12 @@ pub async fn events_stream(
     });
     let stream = futures_util::stream::iter(first).chain(stream);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
+}
+
+/// 2026-10-23: what this node's history downloader is fetching right now (sigil-top's Queues tab).
+#[flux_api_macros::api(GET, "/v1/sync/queue", summary = "Ranges this node's history downloader is fetching, and the last ones it finished")]
+pub async fn sync_queue_handler() -> Json<sync_queue::Snapshot> {
+    Json(sync_queue::snapshot())
 }
 
 #[derive(Debug, Serialize)]
@@ -2743,6 +2750,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/transactions/:hash", get(tx_status))
         .route("/v1/transactions/:hash/wait", get(tx_wait))
         .route("/v1/events", get(events_stream))
+        .route("/v1/sync/queue", get(sync_queue_handler))
         .route("/v1/events/status", get(events_status))
         .route("/v1/webhooks", post(webhook_register))
         .route("/v1/webhooks/:id", get(webhook_get).delete(webhook_delete))

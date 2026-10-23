@@ -163,7 +163,84 @@ pub(crate) fn start_balance_poller() {
             }
             std::thread::sleep(std::time::Duration::from_secs(30));
         });
+        // 2026-10-23: and LISTEN — the node pushes this wallet's balance the instant it moves.
+        std::thread::spawn(balance_stream);
     });
+}
+
+/// Hold `/v1/events?kinds=balance&wallet=<mining wallet>` open and store each pushed balance in [`POLLED_BAL`].
+/// Reconnects with a growing pause (2 s … 60 s), and for a new wallet when the mining wallet changes (checked at most
+/// every 15 s — reading it opens a file and derives a key; the node sends a keep-alive line every 15 s).
+fn balance_stream() {
+    use std::io::BufRead;
+    use std::sync::atomic::Ordering;
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(None::<std::time::Duration>)
+        .build()
+    else {
+        return;
+    };
+    let mut pause = 2u64;
+    loop {
+        let base = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+        let wallet = crate::miner_wallet();
+        if is_wallet(&wallet) {
+            let url = format!("{}/v1/events?kinds=balance&wallet={wallet}", base.trim_end_matches('/'));
+            if let Ok(resp) = client.get(&url).header("Accept", "text/event-stream").send() {
+                if resp.status().is_success() {
+                    pause = 2;
+                    let mut checked = std::time::Instant::now();
+                    for line in std::io::BufReader::new(resp).lines() {
+                        let Ok(line) = line else { break };
+                        if let Some(g) = line.strip_prefix("data:").and_then(|d| pushed_balance(d.trim(), &wallet)) {
+                            POLLED_BAL.store(g, Ordering::Relaxed);
+                            POLLED_BAL_KNOWN.store(true, Ordering::Relaxed);
+                        }
+                        if checked.elapsed() >= std::time::Duration::from_secs(15) {
+                            checked = std::time::Instant::now();
+                            if crate::miner_wallet() != wallet {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(pause));
+        pause = (pause * 2).min(60);
+    }
+}
+
+/// The native balance in one pushed `balance` event for `wallet`, if that is what it is.
+fn pushed_balance(data: &str, wallet: &str) -> Option<u64> {
+    let v: Value = serde_json::from_str(data).ok()?;
+    let native = "0".repeat(64);
+    (v["kind"].as_str() == Some("balance")
+        && v["wallet"].as_str().map(|w| w.eq_ignore_ascii_case(wallet)) == Some(true)
+        && v["token"].as_str() == Some(native.as_str()))
+    .then(|| v["balance"].as_str()?.parse::<u64>().ok())
+    .flatten()
+}
+
+#[cfg(test)]
+mod balance_push_tests {
+    use super::pushed_balance;
+
+    #[test]
+    fn a_pushed_balance_for_our_wallet_is_taken_and_nothing_else_is() {
+        let me = "ab".repeat(32);
+        let ev = |kind: &str, w: &str, token: &str, bal: &str| {
+            serde_json::json!({"seq": 3, "kind": kind, "wallet": w, "token": token, "balance": bal, "height": 9, "ts_ms": 0}).to_string()
+        };
+        let native = "0".repeat(64);
+        assert_eq!(pushed_balance(&ev("balance", &me, &native, "1234500000"), &me), Some(1_234_500_000));
+        assert_eq!(pushed_balance(&ev("balance", &me.to_uppercase(), &native, "7"), &me), Some(7), "hex case does not matter");
+        assert_eq!(pushed_balance(&ev("balance", &"cd".repeat(32), &native, "7"), &me), None, "another wallet");
+        assert_eq!(pushed_balance(&ev("balance", &me, &"11".repeat(32), "7"), &me), None, "another token");
+        assert_eq!(pushed_balance(&ev("note", &me, &native, "7"), &me), None, "another kind");
+        assert_eq!(pushed_balance("not json", &me), None);
+    }
 }
 
 /// `None` until the node has answered once — the card then shows "—", never a false 0.00.

@@ -724,15 +724,102 @@ pub fn spawn_shielded_scanner(node_url: &str, seed_hex: &str) -> Option<std::thr
         };
         let mut get = crate::shield_scan::http_getter(client);
         let mut scanner = crate::shield_scan::ShieldedScanner::new(&node, seed);
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+        spawn_note_listener(node.clone(), seed, wake_tx);
         loop {
             if let Some(snap) = scanner.cycle(&mut get) {
                 if let Ok(mut g) = latest_cell().lock() {
                     *g = Some(snap);
                 }
             }
-            std::thread::sleep(SHIELDED_SCAN_EVERY);
+            // 2026-10-23: at once when a note that may be ours lands (pushed by the node), else every 45 s.
+            match wake_rx.recv_timeout(SHIELDED_SCAN_EVERY) {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(SHIELDED_SCAN_EVERY),
+                _ => while wake_rx.try_recv().is_ok() {},
+            }
         }
     }))
+}
+
+/// 2026-10-23: hold `/v1/events?kinds=note` open on the scanner's node and wake the scanner (`wake`) for every new
+/// note whose view tag says it may be ours. Reconnects with a growing pause (2 s … 60 s); a node that publishes no
+/// `note` events simply never wakes it, and the scanner keeps its 45 s cycle.
+fn spawn_note_listener(node: String, seed: [u8; 32], wake: std::sync::mpsc::Sender<()>) {
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let id = sigil_shield::note_cipher::enc_identity_from_seed(&seed);
+        let mine = |v: &sigil_shield::note_cipher::TagView| sigil_shield::note_cipher::may_be_ours(v, &id);
+        // No overall timeout: the stream is meant to stay open (the node sends a keep-alive every 15 s).
+        let Ok(client) = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(None::<Duration>)
+            .build()
+        else {
+            return;
+        };
+        let url = format!("{}/v1/events?kinds=note", node.trim_end_matches('/'));
+        let mut pause = 2u64;
+        loop {
+            if let Ok(resp) = client.get(&url).header("Accept", "text/event-stream").send() {
+                if resp.status().is_success() {
+                    pause = 2;
+                    for line in std::io::BufReader::new(resp).lines() {
+                        let Ok(line) = line else { break };
+                        let Some(data) = line.strip_prefix("data:") else { continue };
+                        if note_may_be_ours(data.trim(), &mine) && wake.send(()).is_err() {
+                            return; // the scanner is gone
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(pause));
+            pause = (pause * 2).min(60);
+        }
+    });
+}
+
+/// One `note` event's JSON: may this note be ours? A tagged note is tested with `mine` (the view-tag test with our
+/// key); a note without a readable envelope says yes (only a scan can tell).
+fn note_may_be_ours(data: &str, mine: impl Fn(&sigil_shield::note_cipher::TagView) -> bool) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { return false };
+    if v["kind"].as_str() != Some("note") {
+        return false;
+    }
+    let eph = v["eph_pk"].as_str().and_then(|h| hex::decode(h).ok()).and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok());
+    let Some(eph_pk) = eph else { return true };
+    let vt = v["vt"].as_u64().and_then(|t| u8::try_from(t).ok());
+    mine(&sigil_shield::note_cipher::TagView { eph_pk, vt })
+}
+
+#[cfg(test)]
+mod note_listener_tests {
+    use super::note_may_be_ours;
+    use sigil_shield::note_cipher::{enc_identity_from_seed, may_be_ours, seal_note, tag_view, NotePlaintext};
+    use sigil_shield::wallet::ShieldedAccount;
+
+    /// The event a node sends for a note sealed to us wakes the scanner; the same note seen with a stranger's key
+    /// almost never does (a one-byte tag: 1 in 256 false wakes, each costing one cheap incremental scan).
+    #[test]
+    fn a_note_sealed_to_us_wakes_the_scanner_and_strangers_mostly_do_not() {
+        let seed = [7u8; 32];
+        let acct = ShieldedAccount::from_seed(seed);
+        let me = enc_identity_from_seed(&seed);
+        let mine = |v: &sigil_shield::note_cipher::TagView| may_be_ours(v, &me);
+        let mut false_wakes = 0;
+        for i in 0..64u8 {
+            let ct = seal_note(&NotePlaintext::new(5, acct.blinding(i as u64)), &acct.address(&seed)).expect("seal").0;
+            let v = tag_view(&ct).expect("a tagged envelope");
+            assert!(v.vt.is_some(), "seal_note writes a view tag");
+            let ev = serde_json::json!({"seq": 1, "kind": "note", "epoch": 1, "index": i,
+                "vt": v.vt, "eph_pk": hex::encode(v.eph_pk), "height": 9, "ts_ms": 0}).to_string();
+            assert!(note_may_be_ours(&ev, mine), "our own note must wake the scanner");
+            let stranger = enc_identity_from_seed(&[i.wrapping_add(100); 32]);
+            if note_may_be_ours(&ev, |v: &sigil_shield::note_cipher::TagView| may_be_ours(v, &stranger)) { false_wakes += 1; }
+        }
+        assert!(false_wakes <= 4, "{false_wakes} of 64 false wakes");
+        assert!(!note_may_be_ours(r#"{"kind":"tip","height":1}"#, mine), "other kinds never wake it");
+        assert!(note_may_be_ours(r#"{"kind":"note","epoch":1,"index":0}"#, mine), "no envelope: only a scan can tell");
+    }
 }
 
 /// Is this wallet published in the shielded registry?

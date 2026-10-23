@@ -439,17 +439,27 @@ impl LiveEpochV7 {
     fn root_fast(&mut self) -> [u8; 32] {
         self.tree_mut().root(POOL_CAPACITY).to_wire()
     }
-    /// The root from the notes alone (no cache), memoized by note count.
+    /// The root, memoized by note count.
+    ///
+    /// 2026-10-23: from the incremental frontier when it holds exactly these notes — `append` keeps it in step and the
+    /// anchors already come from it — instead of rebuilding the tree from every note. The rebuild ran on each block
+    /// that added a note (the fifth-root check empties the memo) and was ~80 % of a syncing node's main thread on the
+    /// payment-heavy stretch of g3. A copy without a frontier (loaded from disk) still rebuilds: same bytes either way.
     fn root_memoized(&self) -> [u8; 32] {
         let n = self.notes.len();
         match self.root_memo.0.get() {
             Some((k, r)) if *k == n => *r,
             _ => {
-                let mut t = IncrementalTreeV7::new();
-                for cm in self.notes.iter() {
-                    t.append(Digest4::from_wire(cm).unwrap_or_else(|_| padding_leaf_v7()));
-                }
-                let r = t.root(POOL_CAPACITY).to_wire();
+                let r = match &self.tree {
+                    Some(t) if t.len() == n => t.root(POOL_CAPACITY).to_wire(),
+                    _ => {
+                        let mut t = IncrementalTreeV7::new();
+                        for cm in self.notes.iter() {
+                            t.append(Digest4::from_wire(cm).unwrap_or_else(|_| padding_leaf_v7()));
+                        }
+                        t.root(POOL_CAPACITY).to_wire()
+                    }
+                };
                 let _ = self.root_memo.0.set((n, r));
                 r
             }
@@ -2290,5 +2300,56 @@ mod g3_tests {
             Err(ShieldedError::UntaggedEnvelope)
         ));
         assert_eq!(p.append_note_with_delivery(v7_cm(6), Some(tagged_envelope())).unwrap(), 0);
+    }
+}
+
+/// 2026-10-23: `LiveEpochV7::root_memoized` takes the frontier's root instead of rebuilding from every note. A wrong
+/// root here is a consensus split (it is the fifth root every block header carries), so it is pinned against the full
+/// rebuild after EVERY append, on a clone (which keeps the frontier) and on a frontier-less copy (a pool from disk).
+#[cfg(test)]
+mod v7_root_frontier_tests {
+    use super::{LiveEpochV7, Memo, POOL_CAPACITY};
+    use sigil_shield::note_v7::{padding_leaf, Digest4, IncrementalTreeV7};
+
+    fn full_rebuild(e: &LiveEpochV7) -> [u8; 32] {
+        let mut t = IncrementalTreeV7::new();
+        for cm in e.notes.iter() {
+            t.append(Digest4::from_wire(cm).unwrap_or_else(|_| padding_leaf()));
+        }
+        t.root(POOL_CAPACITY).to_wire()
+    }
+
+    fn wire(i: u64) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        for (k, limb) in [i + 1, 7 + i * 5, 11, i * 3 + 2].iter().enumerate() {
+            w[k * 8..k * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        w
+    }
+
+    #[test]
+    fn v7_root_memo_from_the_frontier_equals_a_full_rebuild_at_every_size() {
+        let mut e = LiveEpochV7::default();
+        assert_eq!(e.root_memoized(), full_rebuild(&e), "empty pool");
+        for i in 0..300u64 {
+            let cm = wire(i);
+            let leaf = Digest4::from_wire(&cm).expect("canonical test digest");
+            e.tree_mut().append(leaf);
+            e.notes.push(cm);
+            e.root_memo = Memo::default();
+            let want = full_rebuild(&e);
+            assert_eq!(e.root_memoized(), want, "after {} notes", i + 1);
+            assert_eq!(e.root_memoized(), want, "memoized answer, after {} notes", i + 1);
+            let c = e.clone();
+            assert_eq!(c.root_memoized(), want, "a clone keeps the frontier, after {} notes", i + 1);
+        }
+        let mut cold = e.clone();
+        cold.tree = None;
+        cold.root_memo = Memo::default();
+        assert_eq!(cold.root_memoized(), full_rebuild(&e), "a pool without a frontier still rebuilds the same root");
+        let mut stale = e.clone();
+        stale.tree = Some(IncrementalTreeV7::new());
+        stale.root_memo = Memo::default();
+        assert_eq!(stale.root_memoized(), full_rebuild(&e), "a frontier out of step with the notes is never trusted");
     }
 }

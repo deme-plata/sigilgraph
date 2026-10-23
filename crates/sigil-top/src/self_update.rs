@@ -30,6 +30,7 @@ pub(crate) fn maybe_auto_update(argv: &[String]) -> Option<String> {
         Ok(msg) if msg.starts_with("staged v") => {
             // Windows lock-fallback path: a detached helper will move the staged binary over the
             // install path AFTER this process exits, then relaunch it. Exit now so it can proceed.
+            crate::own_node::stop_before_update();
             std::process::exit(0);
         }
         Ok(_) => {
@@ -260,6 +261,8 @@ pub(crate) fn windows_swap_fallback(beside: &std::path::Path, rel: &Release, mb:
 /// "app vanishes when it tries to restart after sync". Returns `false` on any non-handoff
 /// path; on unix a successful pre-flight + `exec` never returns.
 pub(crate) fn relaunch_new_binary(version: &str) -> bool {
+    // 2026-10-23: the node goes first — the new version starts its own node on the same port and folder.
+    crate::own_node::stop_before_update();
     // Use the startup-captured install path — current_exe() points at the
     // moved-aside OLD inode after self_replace (a "(deleted)" path), which would
     // make the pre-flight spawn fail with ENOENT even though the NEW binary is in

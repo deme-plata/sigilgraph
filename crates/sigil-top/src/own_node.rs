@@ -91,6 +91,16 @@ pub fn screen_log() -> Option<String> {
     HOST.lock().ok().and_then(|g| g.as_ref().map(|n| n.plan.log.display().to_string()))
 }
 
+/// Before an update hands over to the new version (2026-10-23): stop this screen's node first, so the new
+/// version's node finds its port and data folder free. Says so, because it can take up to 30 s.
+pub fn stop_before_update() {
+    let running = HOST.lock().map(|g| g.is_some()).unwrap_or(false);
+    if running {
+        println!("  stopping your node before the update (it writes its state first, up to 30 s)…");
+        screen_stop_at_exit();
+    }
+}
+
 /// At exit: stop the node politely (state snapshot first).
 pub fn screen_stop_at_exit() {
     let h = HOST.lock().ok().and_then(|mut g| g.take());
@@ -111,15 +121,38 @@ pub fn toggle_light_mode() -> String {
         crate::startup_util::persist_sync_mode("light");
         let h = HOST.lock().ok().and_then(|mut g| g.take());
         if let Some(mut n) = h {
-            let _ = std::thread::Builder::new().name("own-node-stop".into()).spawn(move || n.stop(Duration::from_secs(30)));
+            // 2026-10-23: tell the watcher to quit FIRST, then flip the screen now — the stop itself can take up to 30 s
+            // (Windows), and until it finished the screen kept showing the node, so [F] looked ignored.
+            n.quit.store(true, Ordering::Relaxed);
+            status::set_phase(status::IDLE);
+            if let Ok(j) = std::thread::Builder::new().name("own-node-stop".into()).spawn(move || n.stop(Duration::from_secs(30))) {
+                if let Ok(mut g) = STOPPING.lock() { *g = Some(j); }
+            }
         }
         "◇ LIGHT MODE — your node stops (its data is kept). sigil-top mines and watches the network with its quick tip check, holding no chain. [F] again = full node".into()
     } else {
         write_mode("full");
-        screen_start();
-        "◆ FULL NODE — your node starts and checks every block itself; it resumes where it stopped. [F] again = light mode".into()
+        // 2026-10-23: a stop still running (pressed [F] twice quickly) must finish before a new node starts — two nodes
+        // on one folder made the new one attach to the dying old one, and the screen never changed.
+        let pending = STOPPING.lock().ok().and_then(|mut g| g.take());
+        match pending {
+            Some(j) if !j.is_finished() => {
+                let _ = std::thread::Builder::new().name("own-node-restart".into()).spawn(move || {
+                    let _ = j.join();
+                    screen_start();
+                });
+                "◆ FULL NODE — your node starts as soon as the old one has finished stopping (a few seconds); it resumes where it stopped. [F] again = light mode".into()
+            }
+            _ => {
+                screen_start();
+                "◆ FULL NODE — your node starts and checks every block itself; it resumes where it stopped. [F] again = light mode".into()
+            }
+        }
     }
 }
+
+/// The stop [F] started for light mode, while it runs (2026-10-23).
+static STOPPING: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 /// This process is the node child of a screen.
 pub fn is_child() -> bool {

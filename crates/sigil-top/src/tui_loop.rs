@@ -1021,6 +1021,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
                             println!("\n  {msg}\n  applying update — relaunching…");
+                            crate::own_node::stop_before_update();
                             std::process::exit(0);
                         }
                         let is_update_ok = msg.contains("swapped") || msg.contains("saved v");
@@ -1029,7 +1030,9 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
                             if !relaunch_new_binary(&app.latest) {
-                                // relaunch failed — re-enter the TUI, don't crash out
+                                // relaunch failed — re-enter the TUI, don't crash out; the node was stopped for the
+                                // handover (2026-10-23), so start it again.
+                                crate::own_node::screen_start();
                                 let _ = enable_raw_mode();
                                 let _ = execute!(std::io::stdout(), EnterAlternateScreen);
                                 relaunch_failed = true;

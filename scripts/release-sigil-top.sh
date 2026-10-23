@@ -209,6 +209,27 @@ tar --sort=name --mtime='2026-01-01 00:00:00' --owner=0 --group=0 --numeric-owne
     -C .. gui/sigil-wallet-tron-embedded.html gui/sigil-wallet-codex.css \
     gui/enter-sigil.html gui/sigil-explorer.html gui/vite-engine-embedded.html \
     gui/sigil-exchange.js gui/sigil-metamask.js gui/wsigil-market.js gui/sigil-send.js gui/sigil-address-book.js
+# BUILDER KEY 2 (2026-10-23): the proofs are signed with /root/.config/sigil/builder-key-v2.json, not
+# ~/.flux-agent-key.json (key 1: SQIsign 5da2d3b6… / Ed25519 36ae1e64…, on Epsilon during the 2026-09-23
+# compromise; other lanes' fluxc builds still use that file, so it is not overwritten). `verify-proof`
+# checks a proof against the keys INSIDE the proof, so each proof is also compared with the pinned key
+# below, and sigil-builder-keys.json (pubkeys only) is published with its blake3 in the signed manifest.
+export FLUX_AGENT_KEY_PATH="${SIGIL_BUILDER_KEY:-/root/.config/sigil/builder-key-v2.json}"
+[ -f "$FLUX_AGENT_KEY_PATH" ] || { echo "✗ builder key missing: $FLUX_AGENT_KEY_PATH"; exit 1; }
+python3 -I - "$FLUX_AGENT_KEY_PATH" "$S/sigil-builder-keys.json" <<'PY'
+import json, subprocess, sys
+k = json.load(open(sys.argv[1]))
+b3 = lambda hx: subprocess.run(["b3sum", "--no-names"], input=bytes.fromhex(hx), capture_output=True, check=True).stdout.decode().strip()
+json.dump({
+    "product": "sigil-top",
+    "purpose": "PINNED builder provenance keys — compare a downloaded .proof's keys against these",
+    "key": "builder key 2 since 2026-10-23; key 1 (Ed25519 36ae1e64…) retired after the 2026-09-23 compromise of Epsilon",
+    "sqisign_l5_pubkey_hex": k["pk_hex"], "sqisign_l5_pubkey_blake3": b3(k["pk_hex"]), "sqisign_l5_pubkey_bytes": len(k["pk_hex"]) // 2,
+    "ed25519_pubkey_hex": k["ed_pk_hex"], "ed25519_pubkey_blake3": b3(k["ed_pk_hex"]), "ed25519_pubkey_bytes": len(k["ed_pk_hex"]) // 2,
+    "verify": "fluxc verify-proof <artifact> <artifact>.proof, then compare the proof's two pubkeys with these",
+}, open(sys.argv[2], "w"), ensure_ascii=False, indent=2)
+PY
+BKB3=$(b3sum --no-names "$S/sigil-builder-keys.json")
 for t in "${TARGETS[@]}"; do
   f="$S/sigil-top-v${VER}-${t}"
   # Capture, THEN grep. `fluxc ... | grep -q` is a SIGPIPE race: grep -q exits on the
@@ -223,6 +244,12 @@ for t in "${TARGETS[@]}"; do
   verify_out=$("$FLUXC" verify-proof "$f" "$f.proof" 2>&1) \
     || { echo "✗ verify failed $t"; echo "$verify_out"; exit 1; }
   grep -q "✓ require-both" <<<"$verify_out" || { echo "✗ verify failed $t"; echo "$verify_out"; exit 1; }
+  python3 -I - "$f.proof" "$S/sigil-builder-keys.json" <<'PY' || { echo "✗ $t: the proof is not signed by the pinned builder key"; exit 1; }
+import json, sys
+p, k = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+sys.exit(0 if bytes(p["ed25519_pubkey"]).hex() == k["ed25519_pubkey_hex"]
+         and bytes(p["sqisign_pubkey"]).hex() == k["sqisign_l5_pubkey_hex"] else 1)
+PY
 done
 LB3=$(b3sum "$S/sigil-top-v${VER}-linux-x64" | awk '{print $1}'); LSZ=$(stat -c %s "$S/sigil-top-v${VER}-linux-x64")
 WB3=$(b3sum "$S/sigil-top-v${VER}-windows-x64.exe" | awk '{print $1}'); WSZ=$(stat -c %s "$S/sigil-top-v${VER}-windows-x64.exe")
@@ -270,6 +297,7 @@ cp "$S"/sigil-top-v${VER}-* "$ORG_DL/"
 # The .proof rides along, or the stable binary would be unverifiable.
 # ADDITIVE ONLY — nothing is ever deleted from downloads/ (CLAUDE.md rule 9).
 for root in "$DL" "$LEGACY_DL" "$ORG_DL"; do
+  cp -f "$S/sigil-builder-keys.json" "$root/sigil-builder-keys.json.tmp" && mv -f "$root/sigil-builder-keys.json.tmp" "$root/sigil-builder-keys.json"
   if [ "$WANT_ARM" = 1 ]; then
     echo "$ASHA  sigil-top-linux-arm64" > "$root/sigil-top-linux-arm64.sha256"
     [ -s /home/storage/claude-code/sigil-top-arm64.sh ] && cp -f /home/storage/claude-code/sigil-top-arm64.sh "$root/sigil-top-arm64.sh"
@@ -305,7 +333,7 @@ cat > "$DL/sigil-top-latest.json" <<EOF
   "url": "$BASE/sigil-top-v${VER}-linux-x64", "blake3_hex": "$LB3", "size_bytes": $LSZ,
   "flux_rev": "$REV", "source_tag": "v$VER",
   "verify": "fluxc verify-proof <artifact> <artifact>.proof   (require-both SQIsign-L5 + Ed25519)",
-  "builder_keys": "$BASE/sigil-builder-keys.json",
+  "builder_keys": "$BASE/sigil-builder-keys.json", "builder_keys_blake3": "$BKB3",
   "source_archive": "$BASE/sigil-top-v${VER}-src.tar.gz",
   "notes": $NOTE_JSON,
   "targets": {

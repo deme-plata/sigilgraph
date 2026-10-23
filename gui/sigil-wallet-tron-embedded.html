@@ -719,10 +719,9 @@ body.view-desktop .desktop{display:flex}
   // Live balance of the wallet that actually accrues coins (mining wallet, else session).
   // LANE-Q: when mining credits a DIFFERENT address than the session wallet, surface BOTH so the
   // operator always sees where their coins are (the "Mining tab shows X but [W] shows 0" split).
-  async function refresh(){
-    const who = MINE_ADDR || ADDR; if(!who) return;
-    const mb = await fetchBal(who);
-    if(mb!=null){
+  // 2026-10-23: one balance, from a fetch OR pushed by the node (/v1/events `balance`) — same bookkeeping both ways.
+  function applyBal(mb){
+    {
       // LANE-AC: any RAISE of the live balance (P2P-triggered refetch OR the
       // fallback poll) flashes the amount green + floats a coinbase pop. One
       // flash path — works even when the P2P channel is down.
@@ -738,6 +737,11 @@ body.view-desktop .desktop{display:flex}
       SIGIL_BAL=Number(BigInt(SIGIL_RAW))/1e10;
       try{ if(window.bhSample) window.bhSample(mb); }catch(e){}
     }
+  }
+  async function refresh(){
+    const who = MINE_ADDR || ADDR; if(!who) return;
+    const mb = await fetchBal(who);
+    if(mb!=null) applyBal(mb);
     if(MINE_ADDR && MINE_ADDR!==ADDR){ const sb=await fetchBal(ADDR); if(sb!=null) SESSION_RAW=sb; }
     render();
     refreshShielded();
@@ -1155,6 +1159,46 @@ body.view-desktop .desktop{display:flex}
   }
   window.refreshShielded=refreshShielded;
 
+  // ── LIVE STREAM (2026-10-23, Viktor: "balances … show instantly") ──────────────
+  // The node PUSHES this wallet's public balance and every new note over /v1/events. A balance event repaints at
+  // once; a note re-scans the private pool at once. The poll in liveLoop stays as the fallback (every 15 s while the
+  // stream is up). sigilgraph.org only: sigil-top's [W] proxy cannot pass an endless stream through.
+  var __sigilLive={es:null, who:'', up:false, noteTimer:null, balAt:0, balNext:null, balTimer:null};
+  var NATIVE_TOKEN_HEX='0'.repeat(64);
+  // A pushed balance repaints AT ONCE when it is the first in a second (an incoming payment shows instantly); a miner's
+  // balance moves every block, so further ones within the second are folded into one repaint (no pile of pop-ups).
+  function sigilPushBal(b){
+    var L=__sigilLive, wait=1000-(Date.now()-L.balAt);
+    if(wait<=0){ L.balAt=Date.now(); applyBal(b); render(); return; }
+    L.balNext=b;
+    if(!L.balTimer) L.balTimer=setTimeout(function(){
+      L.balTimer=null; L.balAt=Date.now(); var v=L.balNext; L.balNext=null; if(v!=null){ applyBal(v); render(); }
+    }, wait);
+  }
+  function sigilLiveStream(){
+    if(!window.EventSource || !/(^|\.)sigilgraph\.org$/.test(location.hostname)) return;
+    var who=((MINE_ADDR||ADDR)||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(who) || (__sigilLive.es && __sigilLive.who===who)) return;
+    try{ if(__sigilLive.es) __sigilLive.es.close(); }catch(_){}
+    var es;
+    try{ es=new EventSource('/v1/events?kinds=balance,note&wallet='+who); }catch(_){ return; }
+    __sigilLive.es=es; __sigilLive.who=who; __sigilLive.up=false;
+    // "live" only once the node has sent the balance it sends on connect: a node without these events never does,
+    // and the page then keeps its fast poll instead of waiting on a stream that will stay silent.
+    es.onerror=function(){ __sigilLive.up=false; }; // EventSource reconnects by itself
+    es.addEventListener('balance', function(ev){
+      try{ var d=JSON.parse(ev.data);
+        if(d && d.wallet===__sigilLive.who && d.token===NATIVE_TOKEN_HEX && d.balance!=null){ __sigilLive.up=true; sigilPushBal(String(d.balance)); }
+      }catch(_){}
+    });
+    es.addEventListener('note', function(){
+      if(__sigilLive.noteTimer) return;
+      __sigilLive.noteTimer=setTimeout(function(){ __sigilLive.noteTimer=null; try{ refreshShielded(); }catch(_){} }, 250);
+    });
+    es.addEventListener('lagged', function(){ try{ refresh(); }catch(_){} });
+  }
+  window.sigilLiveStream=sigilLiveStream;
+
   window.refresh=refresh;
 
   window.setView=setView;
@@ -1176,13 +1220,18 @@ body.view-desktop .desktop{display:flex}
   // realtime channel; HTTP is the fallback. While P2P is NOT connected (peers=0 —
   // e.g. the AB dial hasn't landed or the bridge is down) poll at 1s so it still
   // feels live; 1.5s while mining (coinbase within 2 min); 3s otherwise.
-  loadMineWallet().then(()=>{ refresh(); pollStatus(); });
+  let LAST_FULL_REFRESH=0;
+  loadMineWallet().then(()=>{ refresh(); pollStatus(); sigilLiveStream(); });
   (function liveLoop(){
     let p2pUp=false;
     try{ const st=window.SigilTronP2P&&window.SigilTronP2P.status(); p2pUp=!!(st&&st.started&&st.peers>0); }catch(e){}
     const mining=(Date.now()-LAST_COINBASE_TS)<120000;
     const ms = !p2pUp ? 1000 : (mining ? 1500 : 3000);
-    setTimeout(()=>{ refresh(); pollStatus(); liveLoop(); }, ms);
+    setTimeout(()=>{
+      // 2026-10-23: while the node pushes balance + note events, the full re-read is a 15 s safety net.
+      if(!__sigilLive.up || Date.now()-LAST_FULL_REFRESH>15000){ LAST_FULL_REFRESH=Date.now(); refresh(); }
+      pollStatus(); sigilLiveStream(); liveLoop();
+    }, ms);
   })();
   // deep-link: ?explorer opens the SIGIL Explorer panel straight away
   if(_qp.has('explorer')){ document.body.classList.add('view-desktop'); setTimeout(showExplorer, 80); }

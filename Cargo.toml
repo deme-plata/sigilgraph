@@ -130,7 +130,7 @@ codegen-units = 16
 [profile.release-fast]
 inherits = "release"
 opt-level = 1
-lto = false
+# lto: set below to "off" (2026-10-23) — `false` still ran a crate-local ThinLTO pass.
 codegen-units = 256
 # 2026-10-08 (Viktor: "reduce compile times"). Measured in an isolated worktree on Epsilon,
 # load ~37: a one-line sigil-top edit cost 62 s of rustc CPU at release-fast (the whole
@@ -140,6 +140,19 @@ codegen-units = 256
 # sigil-tx 69, sigil-top-sync 83, sigil-top 250 tests pass. Costs ~1.5 GB of
 # target/release-fast/incremental. Shipping (`release`) stays non-incremental.
 incremental = true
+# 2026-10-23 (Viktor: "sigil should be under 12.4 s"). `lto = false` above is NOT "no LTO":
+# with codegen-units > 1 and opt-level > 0 it means *thin local LTO* — every codegen unit of
+# a crate is re-optimized together with the ones it imports from, so one edited unit drags
+# its neighbours back through LLVM and incremental reuse is largely undone. "off" really
+# turns it off. Measured on Epsilon (load ~55, NVMe lane, unique edit text, both profiles
+# built back to back on every edit): a one-line edit costs sigil-shield 14.5 → 2.0 s of
+# rustc CPU, sigil-api 15 → 4 s, sigil-node (inside run_start) 40–51 → 26–36 s; wall for a
+# sigil-api edit 15–16 → 11–14 s; a cold build of the 130 local crates 15m00s → 12m24s CPU.
+# Cost: no cross-unit inlining inside a crate. bench_spend_v7, 3 alternating rounds: the
+# 32,768-leaf note-tree hashing (sigil-shield's own code) ~10 % slower (1.85 → 2.04 s),
+# prove and verify unchanged within noise; binaries ~20 % larger. Throughput numbers and
+# shipping keep using `--release`, which this does not touch.
+lto = "off"
 
 # release-fast inherits release's per-package overrides, including sigil-top's
 # codegen-units = 16 (set for shipping builds). With incremental on, 16 forces rustc to

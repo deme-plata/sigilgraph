@@ -154,6 +154,17 @@ struct BackfillReq {
     // flux-wire: allow — BackfillReq is serde_json; a skipped field here is what lets old servers ignore it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     by_hash: Option<Vec<String>>,
+    /// 2026-10-23 (option 1): answer full blocks as the STORED chain.log records (`SIGILR1`, see
+    /// `serve_read::encode_raw_records_resp`). Omitted when false, so an old server sees identical JSON; an old server
+    /// that ignores it answers in the old format, which the client still decodes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    raw: bool,
+}
+
+/// Ask for stored records on full-block range requests (option 1). `SIGIL_BACKFILL_RAW=0` turns it off (A/B tests).
+fn want_raw() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SIGIL_BACKFILL_RAW").map(|v| v.trim() != "0").unwrap_or(true))
 }
 
 #[cfg(test)]
@@ -170,7 +181,7 @@ mod by_hash_wire_tests {
 
     #[test]
     fn a_range_request_serializes_exactly_as_before() {
-        let r = BackfillReq { from: 5, to: 9, headers_only: false, codec: 0, handshake: None, zstd: true, by_hash: None };
+        let r = BackfillReq { from: 5, to: 9, headers_only: false, codec: 0, handshake: None, zstd: true, by_hash: None, raw: false };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("by_hash"), "None must be omitted so old servers see identical JSON: {s}");
     }
@@ -181,6 +192,7 @@ mod by_hash_wire_tests {
         let r = BackfillReq {
             from: 1, to: 0, headers_only: false, codec: 0, handshake: None, zstd: true,
             by_hash: Some(hashes.iter().map(crate::parent_fetch::to_hex).collect()),
+            raw: false,
         };
         let back: BackfillReq = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
         assert!(back.from > back.to, "an old server must see an empty range");
@@ -334,6 +346,7 @@ fn spawn_parent_fetch(
         handshake: Some((**hs).clone()),
         zstd: true,
         by_hash: Some(hashes.iter().map(crate::parent_fetch::to_hex).collect()),
+        raw: false, // answered from the in-RAM DAG body store, not chain.log
     };
     let mgr2 = std::sync::Arc::clone(mgr);
     let tx2 = tx.clone();
@@ -585,6 +598,18 @@ fn trusted_release_keys() -> Vec<Vec<u8>> {
         }
     }
     keys
+}
+
+/// Blocks of a range answer whose producer signatures were checked (`verify_at_height`, all cores), the failures
+/// dropped. Only [`checked_blocks`] makes one, and the catch-up channel carries nothing else — so every path that
+/// fetches a range checks it where it arrives, and the main loop never waits for those checks. (2026-10-23, Viktor:
+/// "do 1 and 2"; before, the main loop checked each answer and waited for the parallel pass, phase after phase.)
+pub(crate) struct CheckedBlocks(Vec<crate::block::Block>);
+
+/// Check a range answer's producer signatures on the calling (network) task and keep the blocks that pass.
+pub(crate) fn checked_blocks(blocks: Vec<crate::block::Block>) -> CheckedBlocks {
+    let ok = crate::dag::verify_all_parallel(&blocks);
+    CheckedBlocks(blocks.into_iter().zip(ok).filter_map(|(b, ok)| ok.then_some(b)).collect())
 }
 
 /// A range request in flight already covers height `h` (ranges are inclusive at both ends).
@@ -1591,7 +1616,7 @@ fn run_start() -> Result<()> {
         // back into `pending` via `bf_rx` (the request is awaited off the select loop
         // in a spawned task so it never blocks production/drain).
         let mut pending: std::collections::BTreeMap<u64, crate::block::Block> = std::collections::BTreeMap::new();
-        let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<Vec<crate::block::Block>>(64);
+        let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<CheckedBlocks>(64);
         // 2026-10-07 (roadmap step 1): answers to by-hash DAG-parent asks (`parent_fetch`)
         // land HERE, never in the linear `pending` buffer: a side block from the other
         // producer has no slot on our settled chain, it belongs only in the braid.
@@ -2038,7 +2063,7 @@ fn run_start() -> Result<()> {
                         infl.insert(key);
                     }
                     if let Some(peer) = chosen {
-                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None };
+                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw() };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
                         let chunk_ad = std::sync::Arc::clone(&fetch_chunk);
@@ -2147,7 +2172,7 @@ fn run_start() -> Result<()> {
                                     Vec::new()
                                 }
                             };
-                            let _ = bf_tx2.send(blocks).await;
+                            let _ = bf_tx2.send(checked_blocks(blocks)).await;
                             inflight_ad.fetch_sub(1, AOrd::Relaxed);
                             // Release the range so it can be retried (after its backoff) or
                             // advanced past. Held for the life of the request, never longer.
@@ -3209,7 +3234,7 @@ fn run_start() -> Result<()> {
                             let immutable = hi >= lo && hi < wbase && sigil_header::is_header_page_codec(req.codec);
                             // The zstd flag lives in the key: a compressed body replayed to a peer
                             // that asked for raw would be undecodable to it (and vice versa).
-                            let ckey = (lo, hi, req.headers_only, req.codec as u32 | if req.zstd { 0x100 } else { 0 });
+                            let ckey = (lo, hi, req.headers_only, req.codec as u32 | if req.zstd { 0x100 } else { 0 } | if req.raw { 0x200 } else { 0 });
 
                             // ── Drain off-thread serves that finished since the last request,
                             // so their bytes populate the caches checked immediately below.
@@ -3401,14 +3426,21 @@ fn run_start() -> Result<()> {
                                 let release_key = full_peer_key;
                                 let peer2 = peer;
                                 let want_zstd = req.zstd;
+                                let want_raw_records = req.raw;
                                 tokio::task::spawn_blocking(move || {
-                                    let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
-                                    blocks.extend(window_blocks);
-                                    let n = blocks.len();
-                                    let resp = BackfillResp { blocks };
-                                    let blob = std::sync::Arc::new(
-                                        crate::serve_read::encode_backfill_resp_opts(&resp, want_zstd),
-                                    );
+                                    // 2026-10-23 (option 1): stored records, copied — no decode, no re-encode — when
+                                    // the client asked for them; the in-RAM window tail is encoded as chain.log would.
+                                    let (n, blob) = if want_raw_records {
+                                        let mut recs = crate::serve_read::read_records_range(&dir, lo, disk_hi);
+                                        recs.extend(window_blocks.iter().filter_map(|b| crate::chain_log::encode_record(b).ok()));
+                                        (recs.len(), std::sync::Arc::new(crate::serve_read::encode_raw_records_resp(&recs)))
+                                    } else {
+                                        let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
+                                        blocks.extend(window_blocks);
+                                        let n = blocks.len();
+                                        let resp = BackfillResp { blocks };
+                                        (n, std::sync::Arc::new(crate::serve_read::encode_backfill_resp_opts(&resp, want_zstd)))
+                                    };
                                     // Respond FIRST — the peer must not wait on our caching.
                                     mgr2.respond(request_id, blob.as_ref().clone());
                                     eprintln!("↩ rr-backfill(off-thread): served {} BLOCKS [{}..={}] to {} ({} B)",
@@ -3981,6 +4013,7 @@ fn run_start() -> Result<()> {
                                                         handshake: Some((*sync_hs).clone()),
                                                         zstd: true,
                                                         by_hash: None,
+                                                        raw: want_raw(),
                                                     };
                                                     // 2026-08-19 (deep-catchup freeze investigation): this used to fire
                                                     // unconditionally every time the 15ms request-throttle allowed a
@@ -4040,7 +4073,7 @@ fn run_start() -> Result<()> {
                                                                 Ok(Err(e)) => fail(format!("send_request: {e}")),
                                                                 Ok(Ok(bytes)) => match crate::serve_read::decode_backfill_resp(&bytes) {
                                                                     Ok(resp) if resp.blocks.is_empty() => fail(format!("empty response ({} B)", bytes.len())),
-                                                                    Ok(resp) => { let _ = bf_tx2.send(resp.blocks).await; }
+                                                                    Ok(resp) => { let _ = bf_tx2.send(checked_blocks(resp.blocks)).await; }
                                                                     Err(e) if e == crate::serve_read::BUSY_ERR => {
                                                                         // the producer said "not now" at once; the next
                                                                         // missing-parent event re-asks (gossip usually
@@ -4126,7 +4159,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw() };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -4138,7 +4171,7 @@ fn run_start() -> Result<()> {
                                                 };
                                                 if let Ok(bytes) = mgr2.send_request(peer, payload).await {
                                                     if let Ok(resp) = crate::serve_read::decode_backfill_resp(&bytes) {
-                                                        let _ = bf_tx2.send(resp.blocks).await;
+                                                        let _ = bf_tx2.send(checked_blocks(resp.blocks)).await;
                                                     }
                                                 }
                                             });
@@ -4363,6 +4396,7 @@ fn run_start() -> Result<()> {
                                             handshake: Some((*sync_hs).clone()),
                                             zstd: true,
                                             by_hash: None,
+                                            raw: want_raw(),
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);
@@ -4410,7 +4444,7 @@ fn run_start() -> Result<()> {
                                                             } else {
                                                                 ph_win();
                                                             }
-                                                            let _ = bf_tx2.send(resp.blocks).await;
+                                                            let _ = bf_tx2.send(checked_blocks(resp.blocks)).await;
                                                         }
                                                         Err(e) if e == crate::serve_read::BUSY_ERR => {
                                                             // "too soon", not "too big": keep the size, ask again next heartbeat
@@ -4613,7 +4647,7 @@ fn run_start() -> Result<()> {
                         }
                     }
                 }
-                Some(vals) = bf_rx.recv() => {
+                Some(CheckedBlocks(vals)) = bf_rx.recv() => {
                     // Point-to-point backfill response arrived: buffer each block by
                     // height, then drain `pending` contiguously into the chain via the
                     // same apply path the live-block branch uses.
@@ -4631,10 +4665,10 @@ fn run_start() -> Result<()> {
                         // measured, these checks were 40 % of this thread — one at a time, and ~1/3 on
                         // copies pending_insert drops anyway. Drop those first, check the rest on all
                         // cores; the same blocks reach `pending` in the same order.
+                        // 2026-10-23 (option 2): the signatures were checked on the network task that decoded the
+                        // answer (`CheckedBlocks`), so this thread no longer waits for them.
                         let vals = crate::dag::backfill_candidates(vals, &pending, chain.height());
-                        let ok = crate::dag::verify_all_parallel(&vals);
-                        for (block, ok) in vals.into_iter().zip(ok) {
-                            if !ok { continue; }
+                        for block in vals {
                             let h = block.header.height;
                             pending_insert(&mut pending, chain.height(), h, block);
                         }

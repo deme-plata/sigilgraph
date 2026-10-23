@@ -282,6 +282,96 @@ pub fn read_blocks_range(dir: &Path, from: u64, to: u64) -> Vec<crate::block::Bl
     out
 }
 
+/// [`read_blocks_range`]'s twin for option 1 (2026-10-23): the STORED record bytes of `from..=to`, in log order,
+/// never decoded — the server only reads and copies. A record whose height cannot be probed (legacy JSON) is decoded
+/// once for its height; torn tails and unreadable records end or skip exactly as in `read_blocks_range`.
+pub fn read_records_range(dir: &Path, from: u64, to: u64) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if to < from {
+        return out;
+    }
+    let start = idx_seek_offset(dir, from).unwrap_or(0);
+    let Ok(f) = File::open(log_path(dir)) else {
+        return out;
+    };
+    let mut r = BufReader::new(f);
+    if r.seek(SeekFrom::Start(start)).is_err() {
+        return out;
+    }
+    loop {
+        let mut lb = [0u8; 4];
+        if r.read_exact(&mut lb).is_err() {
+            break; // clean EOF
+        }
+        let n = u32::from_le_bytes(lb) as usize;
+        let take = n.min(PROBE_WINDOW);
+        let mut buf = vec![0u8; take];
+        if r.read_exact(&mut buf).is_err() {
+            break; // torn tail record
+        }
+        let probed = probe_height(&buf);
+        if let Some(h) = probed {
+            if h < from {
+                if r.seek_relative((n - take) as i64).is_err() {
+                    break;
+                }
+                continue;
+            }
+            if h > to {
+                break;
+            }
+        }
+        if n > take {
+            let mut rest = vec![0u8; n - take];
+            if r.read_exact(&mut rest).is_err() {
+                break;
+            }
+            buf.extend_from_slice(&rest);
+        }
+        if probed.is_none() {
+            match crate::chain_log::decode_record(&buf) {
+                Some(b) if b.header.height < from => continue,
+                Some(b) if b.header.height > to => break,
+                Some(_) => {}
+                None => continue,
+            }
+        }
+        out.push(buf);
+    }
+    out
+}
+
+/// Option 1 wire: `SIGILR1\0` then `[u32 LE len][stored chain.log record]` per block, in height order.
+const BACKFILL_RAW_MAGIC: &[u8; 8] = b"SIGILR1\0";
+
+/// Frame stored records as an option-1 answer.
+pub fn encode_raw_records_resp(records: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + records.iter().map(|r| r.len() + 4).sum::<usize>());
+    out.extend_from_slice(BACKFILL_RAW_MAGIC);
+    for r in records {
+        out.extend_from_slice(&(r.len() as u32).to_le_bytes());
+        out.extend_from_slice(r);
+    }
+    out
+}
+
+/// Decode an option-1 answer: every record through the node's own chain.log decoder. A record that does not decode
+/// is skipped (the range catch-up re-asks for what is missing); a frame cut short ends the answer.
+fn decode_raw_records(mut b: &[u8]) -> Vec<crate::block::Block> {
+    let mut out = Vec::new();
+    while b.len() >= 4 {
+        let n = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        if b.len() < 4 + n {
+            break;
+        }
+        if let Some(block) = crate::chain_log::decode_record(&b[4..4 + n]) {
+            out.push(block);
+        }
+        b = &b[4 + n..];
+    }
+    out
+}
+
 /// Encode a header run onto the backfill wire for `codec` 0, 1 or 2.
 ///
 /// ONE implementation, called from both the inline serve path and the
@@ -483,6 +573,20 @@ mod tests {
         );
         // A range past the log's end returns short/empty, never mis-served data.
         assert!(read_blocks_range(&dir, genesis.header.height + 1, genesis.header.height + 5).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Option 1: the stored bytes of a range, never decoded on the server — they decode to the stored block.
+    #[test]
+    fn read_records_range_returns_the_stored_record_bytes() {
+        let dir = tmpdir("records-range");
+        let genesis = crate::genesis::build_genesis().expect("genesis");
+        write_log_v1(&dir, std::slice::from_ref(&genesis));
+        let recs = read_records_range(&dir, genesis.header.height, genesis.header.height);
+        assert_eq!(recs.len(), 1);
+        let back = crate::chain_log::decode_record(&recs[0]).expect("the stored record decodes");
+        assert_eq!(back.header.hash(), genesis.header.hash());
+        assert!(read_records_range(&dir, genesis.header.height + 1, genesis.header.height + 5).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -831,6 +935,9 @@ pub fn decode_backfill_resp(bytes: &[u8]) -> Result<crate::BackfillResp, String>
     if bytes == BACKFILL_BUSY_MAGIC {
         return Err(BUSY_ERR.to_string());
     }
+    if bytes.len() >= BACKFILL_RAW_MAGIC.len() && &bytes[..BACKFILL_RAW_MAGIC.len()] == BACKFILL_RAW_MAGIC {
+        return Ok(crate::BackfillResp { blocks: decode_raw_records(&bytes[BACKFILL_RAW_MAGIC.len()..]) });
+    }
     if bytes.len() >= BACKFILL_ZSTD_MAGIC.len() && &bytes[..BACKFILL_ZSTD_MAGIC.len()] == BACKFILL_ZSTD_MAGIC {
         let raw = zstd::decode_all(&bytes[BACKFILL_ZSTD_MAGIC.len()..]).map_err(|e| format!("zstd: {e}"))?;
         return rmp_serde::from_slice(&raw).map_err(|e| e.to_string());
@@ -868,6 +975,25 @@ mod backfill_body_wire {
         assert_eq!(back.blocks[63].header.height, resp.blocks[63].header.height);
         let back_raw = decode_backfill_resp(&raw).expect("raw body decodes");
         assert_eq!(back_raw.blocks.len(), 64);
+    }
+
+    /// Option 1 (2026-10-23): stored records framed as `SIGILR1` decode to exactly the blocks the old format carries,
+    /// every block in full; a frame cut short ends the answer after the last whole record.
+    #[test]
+    fn raw_records_answer_decodes_to_the_same_blocks_as_the_old_format() {
+        let blocks: Vec<crate::block::Block> = crate::block::__test_chain(64);
+        let records: Vec<Vec<u8>> = blocks.iter().map(|b| crate::chain_log::encode_record(b).expect("encode")).collect();
+        let blob = encode_raw_records_resp(&records);
+        assert_eq!(&blob[..8], BACKFILL_RAW_MAGIC);
+        let got = decode_backfill_resp(&blob).expect("raw records decode").blocks;
+        let old = decode_backfill_resp(&encode_backfill_resp_opts(&crate::BackfillResp { blocks: blocks.clone() }, true))
+            .expect("old format").blocks;
+        assert_eq!(got.len(), 64);
+        for (a, b) in got.iter().zip(&old) {
+            assert_eq!(serde_json::to_vec(a).unwrap(), serde_json::to_vec(b).unwrap(), "the whole block, not just the header");
+        }
+        let cut = decode_backfill_resp(&blob[..blob.len() - 3]).expect("a cut answer still decodes").blocks;
+        assert_eq!(cut.len(), 63, "the cut record is dropped, the whole ones kept");
     }
 
     #[test]

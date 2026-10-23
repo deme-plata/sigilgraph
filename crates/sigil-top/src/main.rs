@@ -408,6 +408,12 @@ fn main() -> std::process::ExitCode {
     // Started after the update check and the wallet question, so a self-update never strands a fresh node.
     #[cfg(feature = "producer")]
     own_node::screen_start();
+    // 2026-10-23 (Viktor: a 1000-SIGIL private payment "never arrived"): look for your private coins from the start —
+    // until now the scanner started only with [M], so a wallet that was not mining never saw a private payment.
+    #[cfg(feature = "shield-register")]
+    if let Some(seed_hex) = top_core::miner_seed().map(hex::encode) {
+        let _ = shield_setup::spawn_shielded_scanner(&top_core::engine_node_url(), &seed_hex);
+    }
     boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
         boot_trace(&format!("run_tui returned Err: {e}"));

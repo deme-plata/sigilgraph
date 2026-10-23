@@ -705,6 +705,16 @@ const SHIELDED_SCAN_EVERY: Duration = Duration::from_secs(45);
 /// pool is hiding values from everyone who cannot open them, which very much includes us.
 pub fn spawn_shielded_scanner(node_url: &str, seed_hex: &str) -> Option<std::thread::JoinHandle<()>> {
     let seed = seed_bytes(seed_hex)?;
+    // 2026-10-23: one scanner per seed per process. It now starts with the screen, and every [M] press used to start
+    // another one scanning the same wallet.
+    static STARTED: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
+    {
+        let mut g = match STARTED.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+        if g.contains(&seed) {
+            return None;
+        }
+        g.push(seed);
+    }
     let node = node_url.to_string();
     Some(std::thread::spawn(move || {
         // A whole sealed generation is ~45 MB of JSON before compression; on a slow line the

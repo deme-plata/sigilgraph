@@ -465,10 +465,21 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
 
     // ── telemetry (left): network economics + YOUR mining ────────────────
     let est_earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
-    let wallet_bal = if app.wallet_balance > 0 || crate::ai_tools::polled_balance().is_some() {
-        fmt_glyphs(app.wallet_balance, 2)
+    // 2026-10-23: public AND private — a private payment is a note, invisible in the public balance; the line showed
+    // only the public part, so a received 1000-SIGIL private payment looked like it never arrived.
+    #[cfg(feature = "shield-register")]
+    let private = crate::shield_setup::latest_shielded().map(|s| s.balance);
+    #[cfg(not(feature = "shield-register"))]
+    let private: Option<u128> = None;
+    let wallet_bal = if app.wallet_balance > 0 || crate::ai_tools::polled_balance().is_some() || private.is_some() {
+        fmt_glyphs(app.wallet_balance + private.unwrap_or(0), 2)
     } else {
         "—".to_string()   // the node has not answered yet: never show a false 0.00
+    };
+    let private_note = match private {
+        Some(p) if p > 0 => format!(" (private {})", fmt_glyphs(p, 2)),
+        Some(_) => String::new(),
+        None => " (private: scanning…)".to_string(),
     };
     let tlines = vec![
         Line::from(vec![
@@ -484,6 +495,7 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
         ]),
         Line::from(vec![
             dim("wallet "), Span::styled(format!("{wallet_bal} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+            dim(&private_note),
             dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
             dim("   est earn "), Span::styled(est_earn, Style::default().fg(C_GOLD)),
             dim("   [M] mine"),

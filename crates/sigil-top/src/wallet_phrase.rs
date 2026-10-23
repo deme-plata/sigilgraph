@@ -343,7 +343,7 @@ fn publish_receiving_key() {
         .and_then(|h| derive_secret(h.trim()).ok()).map(hex::encode) else { return };
     let (Some(sk), Some(pk)) = (ss::wallet_signing_key(&seed_hex), ss::expected_pk_shield(&seed_hex)) else { return };
     let wallet = hex::encode(sk.verifying_key().to_bytes());
-    let node = crate::engine_node_url();
+    let node = crate::top_core::money_node_url();
     match ss::registration_state(&node, &wallet, &pk) {
         RegistrationState::Ours => println!("  ✓ it can receive private payments (receiving key already on the chain)."),
         RegistrationState::Foreign { .. } => println!("  ⚠ the chain holds a DIFFERENT receiving key for this address — payments to it could not be spent here."),

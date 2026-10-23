@@ -55,7 +55,7 @@ pub fn start_with_api(
     // once per seed, so the screen's own start of it is not doubled.
     #[cfg(feature = "shield-register")]
     if let Some(seed_hex) = crate::top_core::miner_seed().map(hex::encode) {
-        let _ = crate::shield_setup::spawn_shielded_scanner(&crate::top_core::engine_node_url(), &seed_hex);
+        let _ = crate::shield_setup::spawn_shielded_scanner(&crate::top_core::money_node_url(), &seed_hex);
     }
     Ok(stop)
 }
@@ -1475,7 +1475,7 @@ pub mod pay {
     /// registered only the first can be paid to in the circuit but could never OPEN the
     /// note, so refusing here is the honest answer, not a limitation to route around.
     fn recipient_keys(to: &str) -> Result<(String, String), String> {
-        let node = crate::engine_node_url();
+        let node = crate::top_core::money_node_url();
         let url = format!(
             "{}/v1/shielded/address?wallet={to}",
             node.trim_end_matches('/')
@@ -1515,7 +1515,7 @@ pub mod pay {
     }
 
     fn transparent_balance(wallet: &str) -> Result<u128, String> {
-        let node = crate::engine_node_url();
+        let node = crate::top_core::money_node_url();
         let url = format!("{}/v1/balance?wallet={wallet}", node.trim_end_matches('/'));
         let c = client()?;
         let v: serde_json::Value = c
@@ -1622,7 +1622,7 @@ pub mod pay {
     /// unreachable for six minutes turned a PAID payment into stage `failed`, and the wallet then
     /// told the user "Press SEND again" — a second payment. "Could not ask" is not "no".
     fn nullifier_check(nf_hex: &str) -> Result<bool, String> {
-        nullifier_check_at(&crate::engine_node_url(), nf_hex)
+        nullifier_check_at(&crate::top_core::money_node_url(), nf_hex)
     }
 
     fn nullifier_check_at(node: &str, nf_hex: &str) -> Result<bool, String> {

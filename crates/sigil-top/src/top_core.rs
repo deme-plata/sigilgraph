@@ -566,10 +566,10 @@ pub(crate) fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
             // enough). Cloning the mpsc sender lets it report state changes into the same
             // TUI log line the miner uses, long after [M] was pressed.
             let reg_tx = tx.clone();
-            shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, move |line| {
+            shield_setup::spawn_registration_keeper(&money_node_url(), &seed_hex, move |line| {
                 let _ = reg_tx.send(line);
             });
-            shield_setup::spawn_shielded_scanner(&engine_node_url(), &seed_hex);
+            shield_setup::spawn_shielded_scanner(&money_node_url(), &seed_hex);
         }
         let mut req_nonce: u64 = 0; // strictly-increasing per-wallet replay guard (ms floor)
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
@@ -666,6 +666,22 @@ pub(crate) fn engine_node_url() -> String {
     // depends on one URL. See `mining_relay.rs` for what this does and does not decentralise.
     if mining_relay::relay_is_up() {
         return mining_relay::url();
+    }
+    "http://sigilgraph.quillon.xyz:18181".into()
+}
+
+/// 2026-10-23 (Viktor: "i still cant send from web ui?"): the node every MONEY call talks to — payments, deposits,
+/// recipient keys, nullifier checks, key registration, the private-coin scanner. NOT [`engine_node_url`]: that is
+/// the mining node, and once this node has verified the chain it answers with the local mining relay, which serves
+/// only the miner protocol and refused every payment ("mining relay: only /api/v1/mining/…"). Same choice minus the
+/// relay: an explicit `SIGIL_MINE_NODE` (an operator choice — a rehearsal launch still points everything at one
+/// node), else `SIGIL_NODE_URL` (the node [W]'s page proxy reads), else the network's producer.
+pub(crate) fn money_node_url() -> String {
+    if let Ok(v) = std::env::var("SIGIL_MINE_NODE") {
+        return v;
+    }
+    if let Ok(v) = std::env::var("SIGIL_NODE_URL") {
+        return v;
     }
     "http://sigilgraph.quillon.xyz:18181".into()
 }

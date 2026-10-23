@@ -145,7 +145,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
         if let Some(seed_hex) = miner_seed().map(hex::encode) {
             BOOT_REG.call_once(|| {
                 boot_trace("shield-register: publishing this wallet's receiving key (boot keeper)");
-                shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, |line| {
+                shield_setup::spawn_registration_keeper(&crate::top_core::money_node_url(), &seed_hex, |line| {
                     log_line(format!("shield-register: {line}"));
                 });
             });

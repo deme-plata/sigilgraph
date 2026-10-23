@@ -140,7 +140,8 @@ mod shield_ops {
     }
     #[cfg(not(test))]
     fn ctx_node() -> String {
-        crate::engine_node_url()
+        // 2026-10-23: the money node, never the mining relay (see `top_core::money_node_url`).
+        crate::top_core::money_node_url()
     }
 
     #[cfg(test)]

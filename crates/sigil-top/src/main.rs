@@ -412,7 +412,7 @@ fn main() -> std::process::ExitCode {
     // until now the scanner started only with [M], so a wallet that was not mining never saw a private payment.
     #[cfg(feature = "shield-register")]
     if let Some(seed_hex) = top_core::miner_seed().map(hex::encode) {
-        let _ = shield_setup::spawn_shielded_scanner(&top_core::engine_node_url(), &seed_hex);
+        let _ = shield_setup::spawn_shielded_scanner(&top_core::money_node_url(), &seed_hex);
     }
     boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {

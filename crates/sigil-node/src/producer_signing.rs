@@ -499,6 +499,140 @@ pub fn verify_self_mined_hybrid(header: &SigilBlockHeaderV0) -> Result<(), Strin
     Ok(())
 }
 
+// ── this node's own block-making keys (2026-10-23) ─────────────────────────────────────────────────────────────
+
+/// File names of a node's own block-making keys, in its data folder. The two secrets are owner-only.
+pub const OWN_SIGNING_SEED_FILE: &str = "producer-signing.seed";
+pub const OWN_SQISIGN_SK_FILE: &str = "producer-sqisign.sk";
+pub const OWN_SQISIGN_PK_FILE: &str = "producer-sqisign.pk";
+/// The node's public block-making identity (64 hex), for the screen.
+pub const OWN_ID_FILE: &str = "producer-id";
+
+/// What [`ensure_own_keys`] found or made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnKeys {
+    /// `header.producer` of a block this node signs with them.
+    pub id: [u8; 32],
+    /// Made during this call (the node's first start).
+    pub created: bool,
+    /// The signing settings now point at them (`SIGIL_PRODUCER=1` and no operator keys).
+    pub in_use: bool,
+}
+
+/// 2026-10-23 (Viktor: "nodes should automatically produce the key when startup"; "i want sigil to be
+/// permissionless"): every node owns a block-making identity — an Ed25519 key for ordinary blocks and an SQIsign key
+/// for the post-quantum checkpoints — made the first time it starts, in its own data folder, the secrets readable only
+/// by its owner, never copied anywhere. An IDENTITY, not a permission: it only says who signed a block. The signing
+/// settings are pointed at it only when this node is told to make blocks (`SIGIL_PRODUCER=1`); an operator's own keys
+/// (`SIGIL_PRODUCER_SIGNING_SEED_HEX|_FILE`, `SIGIL_PRODUCER_SQISIGN_SK_HEX`) always win, and then nothing is made
+/// (`Ok(None)`). Call before any thread reads the environment.
+pub fn ensure_own_keys(dir: &std::path::Path) -> std::io::Result<Option<OwnKeys>> {
+    if [SEED_ENV, SEED_ENV_FILE, SQISIGN_SK_ENV].iter().any(|k| std::env::var_os(k).is_some()) {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(dir)?;
+    let (edp, skp, pkp) = (dir.join(OWN_SIGNING_SEED_FILE), dir.join(OWN_SQISIGN_SK_FILE), dir.join(OWN_SQISIGN_PK_FILE));
+    let mut created = false;
+    if !(edp.exists() && skp.exists() && pkp.exists()) {
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        let (sk, pk) = flux_sqisign::keygen();
+        write_key_file(&edp, &hex::encode(seed), true)?;
+        write_key_file(&skp, &hex::encode(&sk), true)?;
+        write_key_file(&pkp, &hex::encode(&pk), false)?;
+        created = true;
+    }
+    let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{what} in {} is not a key", dir.display()));
+    let seed: [u8; 32] = hex::decode(std::fs::read_to_string(&edp)?.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .ok_or_else(|| bad(OWN_SIGNING_SEED_FILE))?;
+    let sk_hex = std::fs::read_to_string(&skp)?.trim().to_string();
+    let pk_hex = std::fs::read_to_string(&pkp)?.trim().to_string();
+    let pk = hex::decode(&pk_hex)
+        .ok()
+        .filter(|p| p.len() == flux_sqisign::public_key_size())
+        .ok_or_else(|| bad(OWN_SQISIGN_PK_FILE))?;
+    let id = hybrid_producer_id(&pk, &SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    write_key_file(&dir.join(OWN_ID_FILE), &hex::encode(id), false)?;
+    let in_use = matches!(std::env::var("SIGIL_PRODUCER").ok().as_deref().map(str::trim), Some("1") | Some("true"));
+    if in_use {
+        std::env::set_var(SEED_ENV_FILE, &edp);
+        std::env::set_var(SQISIGN_SK_ENV, sk_hex);
+        std::env::set_var(SQISIGN_PK_ENV, pk_hex);
+    }
+    Ok(Some(OwnKeys { id, created, in_use }))
+}
+
+/// Write `text` to `path` through a temporary file beside it; `secret` = owner-only from the first byte.
+fn write_key_file(path: &std::path::Path, text: &str, secret: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(if secret { 0o600 } else { 0o644 });
+    }
+    #[cfg(not(unix))]
+    let _ = secret;
+    let mut f = o.open(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod own_keys_tests {
+    use super::*;
+
+    /// Made once and kept, owner-only, unused while the node is not a block-maker, in use (with the identity a
+    /// signed block names) when it is — and an operator's keys always win.
+    #[test]
+    fn a_node_makes_its_keys_once_and_uses_them_only_when_it_makes_blocks() {
+        let _g = locked();
+        let names = [SEED_ENV, SEED_ENV_FILE, SQISIGN_SK_ENV, SQISIGN_PK_ENV, "SIGIL_PRODUCER"];
+        let saved: Vec<(&str, Option<String>)> = names.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in names {
+            std::env::remove_var(k);
+        }
+        let dir = std::env::temp_dir().join(format!("sigil-own-keys-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let first = ensure_own_keys(&dir).unwrap().expect("made on first start");
+        assert!(first.created && !first.in_use);
+        assert!(std::env::var_os(SQISIGN_SK_ENV).is_none(), "not a block-maker: the keys stay in their files");
+        let again = ensure_own_keys(&dir).unwrap().unwrap();
+        assert_eq!((again.id, again.created), (first.id, false), "made once, kept after");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [OWN_SIGNING_SEED_FILE, OWN_SQISIGN_SK_FILE] {
+                assert_eq!(std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777, 0o600, "{f}");
+            }
+        }
+        assert_eq!(std::fs::read_to_string(dir.join(OWN_ID_FILE)).unwrap(), hex::encode(first.id));
+
+        std::env::set_var("SIGIL_PRODUCER", "1");
+        let used = ensure_own_keys(&dir).unwrap().unwrap();
+        assert!(used.in_use && !used.created);
+        assert_eq!(configured_hybrid_producer_wallet(), Some(first.id), "a block it signs names this identity");
+        assert_eq!(ensure_own_keys(&dir).unwrap(), None, "keys are configured now — the operator path, nothing made");
+
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 // Rust runs tests in parallel within one process, and any test anywhere in
 // this crate that touches `SIGIL_PRODUCER_SIGNING_SEED_HEX` mutates the SAME
 // process-wide env var — without serializing, they race. `pub(crate)` (not

@@ -362,10 +362,14 @@ pub fn prepare() -> std::io::Result<Plan> {
         if !api.is_empty() {
             std::env::set_var(API_ENV, &api);
         }
+        if !data_dir.as_os_str().is_empty() {
+            own_keys(&data_dir);
+        }
         return Ok(Plan { log: data_dir.join("sigil-top-node.log"), data_dir, api, user_mode: false });
     }
     let data_dir = default_data_dir();
     std::fs::create_dir_all(&data_dir)?;
+    own_keys(&data_dir);
     if std::env::var_os("SIGIL_NODE_ID").is_none() {
         match node_identity(&data_dir) {
             Ok(id) => fill("SIGIL_NODE_ID", &id),
@@ -668,6 +672,27 @@ fn headless_update_once() -> Result<Option<String>, String> {
     }
 }
 
+/// 2026-10-23 (Viktor: "nodes should automatically produce the key when startup"): this node's own block-making
+/// identity, made on first start (`sigil_node::producer_signing::ensure_own_keys` — an identity, not a permission).
+fn own_keys(dir: &Path) {
+    if !dir.join(sigil_node::producer_signing::OWN_ID_FILE).exists() {
+        eprintln!("sigil-top: making this node's own block-making keys (first start only, a few seconds)…");
+    }
+    match sigil_node::producer_signing::ensure_own_keys(dir) {
+        Ok(Some(k)) => {
+            let id = hex::encode(k.id);
+            eprintln!(
+                "sigil-top: this node's block-making identity {id} ({}{})",
+                if k.created { "made now" } else { "kept" },
+                if k.in_use { ", in use — this node makes blocks" } else { "" }
+            );
+            status::set_identity(id);
+        }
+        Ok(None) => {} // the operator's own keys
+        Err(e) => eprintln!("sigil-top: could not make this node's block-making keys: {e}"),
+    }
+}
+
 /// Ask THIS process's node to stop the way systemd stops a node (SIGTERM / Ctrl-Break): it writes its state
 /// snapshot and exits.
 fn request_own_stop() {
@@ -731,6 +756,14 @@ pub mod status {
     static QUEUE: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
     pub fn set_queue(v: Option<serde_json::Value>) { if let Ok(mut g) = QUEUE.lock() { *g = v; } }
     pub fn queue() -> Option<serde_json::Value> { QUEUE.lock().ok().and_then(|g| g.clone()) }
+    /// 2026-10-23: this node's public block-making identity (64 hex), once made.
+    static IDENTITY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    pub fn set_identity(id: impl Into<String>) { if let Ok(mut g) = IDENTITY.lock() { *g = id.into(); } }
+    pub fn identity() -> String { IDENTITY.lock().map(|g| g.clone()).unwrap_or_default() }
+    fn id_suffix() -> String {
+        let id = identity();
+        if id.len() >= 12 { format!(" · block-making id {}…", &id[..12]) } else { String::new() }
+    }
 
     /// Our node's newest `(height, block hash)` pairs, for the DATA INTEGRITY card's exact-at-height comparison
     /// against the network (from the node's own `/v1/dagknight/recent`, the same route the card reads from Epsilon).
@@ -791,7 +824,7 @@ pub mod status {
             } else {
                 format!("your node: starting — h={h} · peers {}", peers())
             }),
-            LIVE => Some(format!("your node: LIVE — h={h} · finalized h={} · peers {} · the same program the network runs", settled(), peers())),
+            LIVE => Some(format!("your node: LIVE — h={h} · finalized h={} · peers {} · the same program the network runs{}", settled(), peers(), id_suffix())),
             _ => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 let retry = match retry_at() { 0 => String::new(), t => format!(" · restarting in {}s", t.saturating_sub(now)) };

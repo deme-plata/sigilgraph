@@ -1693,7 +1693,8 @@ impl P2PBlockSync {
                             // Successful fetch: record it so the range stops costing an
                             // in-flight slot but still counts against the
                             // fetched-but-unverified BUDGET (the real backpressure signal).
-                            sync_store.mark_fetched(start, CHUNK);
+                            // 2026-10-23: the rate counts what arrived (4-8 blocks at the tip), not the chunk.
+                            sync_store.mark_fetched_n(start, CHUNK, delivered as u64);
                         }
                     }
 

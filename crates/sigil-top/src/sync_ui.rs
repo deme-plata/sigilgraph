@@ -531,7 +531,7 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     // every frame would be a slow memory leak in a program that redraws continuously.
     static QUEUES_TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let block = card_block(
-        QUEUES_TITLE.get_or_init(|| format!(" ◈ FETCH QUEUES · {}", build_network_id())).as_str(),
+        QUEUES_TITLE.get_or_init(|| format!(" ◈ FETCH QUEUES · {} · light monitor (your node: tab 1)", build_network_id())).as_str(),
         C_NEON_CYAN,
     );
     let inner = block.inner(area);

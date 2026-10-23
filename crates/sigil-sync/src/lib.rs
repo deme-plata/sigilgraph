@@ -346,6 +346,15 @@ impl SyncStore {
 
     /// A reply landed and was committed. `blocks` feeds the rate selector.
     pub fn mark_fetched(&self, start: u64, blocks: u64) {
+        self.mark_fetched_n(start, blocks, blocks);
+    }
+
+    /// 2026-10-23: as `mark_fetched`, with the watermark credit (`credit`) and the RATE count (`delivered`) apart.
+    /// The light engine credits a whole chunk to its watermark (that plans its next requests), but at the tip an
+    /// answer carries 4-8 blocks — counting the chunk made the Queues tab read 26,000-37,000 blk/s while the engine
+    /// committed ~8-13 blk/s.
+    pub fn mark_fetched_n(&self, start: u64, credit: u64, delivered: u64) {
+        let blocks = credit;
         {
             let mut g = self.write();
             g.ranges.insert(start, RangeState::Fetched { at_ms: now_ms() });
@@ -362,7 +371,7 @@ impl SyncStore {
                 g.fetched_to = end;
             }
         }
-        self.fetched_blocks.fetch_add(blocks, Ordering::Relaxed);
+        self.fetched_blocks.fetch_add(delivered, Ordering::Relaxed);
         self.persist_range(start);
         self.persist_watermarks();
         self.mirror();
@@ -638,6 +647,18 @@ mod tests {
              rejected chunk wedges sync permanently"
         );
         assert!(!st.retry_range(999_999), "retrying an untracked range reports false");
+    }
+
+    /// 2026-10-23 (Viktor: "in tab 4 it says 35kblks but only 13blks commit"): the light engine credits a whole chunk
+    /// to its watermark, but the RATE must count what arrived — 4 blocks at the tip, not 10,000.
+    #[test]
+    fn rate_counts_delivered_blocks_not_the_chunk() {
+        let st = SyncStore::new(10_000);
+        st.claim(90_000, "p");
+        st.mark_fetched_n(90_000, 10_000, 4);
+        let t = st.snapshot();
+        assert_eq!(t.fetched_blocks, 4, "the rate counts delivered blocks, not the chunk");
+        assert_eq!(t.fetched_to, 100_000, "the watermark keeps the credit it is given");
     }
 
     /// `fetched_to` must reflect blocks that actually arrived.

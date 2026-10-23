@@ -42,9 +42,83 @@ pub const CHILD_ENV: &str = "SIGIL_TOP_NODE_CHILD";
 /// Where the node's local API answers (`http://127.0.0.1:<port>`), for the screen's own code.
 pub const API_ENV: &str = "SIGIL_TOP_NODE_API";
 
-/// The node runs unless `SIGIL_TOP_NODE=0`.
+/// The node runs unless `SIGIL_TOP_NODE=0` — or, with no such setting, unless light mode was chosen with [F] (10.6.5).
 pub fn enabled() -> bool {
-    !matches!(std::env::var("SIGIL_TOP_NODE").as_deref().map(str::trim), Ok("0") | Ok("off") | Ok("false") | Ok("no"))
+    match env_choice() {
+        Some(on) => on,
+        None => !chosen_light(),
+    }
+}
+
+/// `SIGIL_TOP_NODE` in the environment, if set: true = node on.
+fn env_choice() -> Option<bool> {
+    std::env::var("SIGIL_TOP_NODE").ok().map(|v| !matches!(v.trim(), "0" | "off" | "false" | "no"))
+}
+
+/// 10.6.5 (Viktor 2026-10-23: "some users are going to use sigil just as miner not full archive"): the remembered
+/// choice, beside the node's folder — "light" (no node: mine and watch the network with the quick tip check) or "full"
+/// (the default).
+fn mode_file() -> PathBuf {
+    default_data_dir().with_file_name(format!("sigil-top-node-{}.mode", sigil_header::NETWORK_ID_STR))
+}
+
+fn chosen_light() -> bool {
+    std::fs::read_to_string(mode_file()).map(|s| s.trim() == "light").unwrap_or(false)
+}
+
+fn write_mode(mode: &str) {
+    let p = mode_file();
+    let tmp = p.with_extension("mode.tmp");
+    if std::fs::write(&tmp, mode).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// The screen's node, where [F] can reach it.
+static HOST: std::sync::Mutex<Option<NodeHost>> = std::sync::Mutex::new(None);
+
+/// Start the screen's node (when the mode wants one) and keep it where [F] can reach it.
+pub fn screen_start() {
+    if let Some(h) = start_for_screen() {
+        if let Ok(mut g) = HOST.lock() {
+            *g = Some(h);
+        }
+    }
+}
+
+/// The running node's log, if one runs (for the exit message).
+pub fn screen_log() -> Option<String> {
+    HOST.lock().ok().and_then(|g| g.as_ref().map(|n| n.plan.log.display().to_string()))
+}
+
+/// At exit: stop the node politely (state snapshot first).
+pub fn screen_stop_at_exit() {
+    let h = HOST.lock().ok().and_then(|mut g| g.take());
+    if let Some(mut n) = h {
+        n.stop(Duration::from_secs(30));
+    }
+}
+
+/// [F]: switch between your full node and light mode, remember the choice, and say what changed.
+pub fn toggle_light_mode() -> String {
+    if env_choice().is_some() {
+        return "your node is set by SIGIL_TOP_NODE in this program's environment — remove it to switch with [F]".into();
+    }
+    let running = HOST.lock().map(|g| g.is_some()).unwrap_or(false);
+    if running {
+        write_mode("light");
+        // 10.5.0 remembered "full archive" for the old light engine; light mode must not wake it.
+        crate::startup_util::persist_sync_mode("light");
+        let h = HOST.lock().ok().and_then(|mut g| g.take());
+        if let Some(mut n) = h {
+            let _ = std::thread::Builder::new().name("own-node-stop".into()).spawn(move || n.stop(Duration::from_secs(30)));
+        }
+        "◇ LIGHT MODE — your node stops (its data is kept). sigil-top mines and watches the network with its quick tip check, holding no chain. [F] again = full node".into()
+    } else {
+        write_mode("full");
+        screen_start();
+        "◆ FULL NODE — your node starts and checks every block itself; it resumes where it stopped. [F] again = light mode".into()
+    }
 }
 
 /// This process is the node child of a screen.

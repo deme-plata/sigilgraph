@@ -407,7 +407,7 @@ fn main() -> std::process::ExitCode {
     // 10.6.0: your own node — sigil-node's code as this program's child, its output in a log beside its data.
     // Started after the update check and the wallet question, so a self-update never strands a fresh node.
     #[cfg(feature = "producer")]
-    let own_node = own_node::start_for_screen();
+    own_node::screen_start();
     boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
         boot_trace(&format!("run_tui returned Err: {e}"));
@@ -416,9 +416,9 @@ fn main() -> std::process::ExitCode {
         eprintln!("sigil-top: TUI error: {e}");
     }
     #[cfg(feature = "producer")]
-    if let Some(mut n) = own_node {
-        println!("⏹ stopping your node — it writes its state first (log: {})", n.plan.log.display());
-        n.stop(Duration::from_secs(30));
+    if let Some(log) = own_node::screen_log() {
+        println!("⏹ stopping your node — it writes its state first (log: {log})");
+        own_node::screen_stop_at_exit();
     }
     std::process::ExitCode::SUCCESS
 }

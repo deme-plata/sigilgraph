@@ -220,8 +220,8 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         if light {
             Line::from(vec![
                 dim("backfill "), Span::styled("off — light monitor", Style::default().fg(C_DIM)),
-                dim("   F "), Span::styled("= FULL ARCHIVE", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-                dim(" (genesis→tip, holder hele kæden ~1GB)"),
+                dim("   F "), Span::styled("= your full node", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                dim(" (checks every block itself)"),
             ])
         } else {
             Line::from(vec![
@@ -1055,7 +1055,7 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
     ]));
     // 0.77 (#156): name the live mode + exactly what it holds ([F] flips it live).
     let (mlabel, mcol) = if s.light_mode {
-        (sa("  mode ◇ LIGHT MONITOR — verifies tip, holds nothing ([F] = full archive)"), C_CYAN)
+        (sa("  mode ◇ LIGHT MONITOR — verifies tip, holds nothing ([F] = your full node)"), C_CYAN)
     } else {
         (sa("  mode ⛓ FULL ARCHIVE — genesis→tip, holds everything ([F] = light monitor)"), C_GOLD)
     };

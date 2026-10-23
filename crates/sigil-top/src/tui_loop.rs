@@ -564,9 +564,10 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
-                                // 10.6.0: your own node already keeps the whole chain — nothing to switch.
-                                if own_node_on() {
-                                    app.toast = own_node_f_toast();
+                                // 10.6.5 (Viktor: light mode for users who only mine): [F] switches your full node
+                                // off and on; the choice is remembered. (10.6.0–10.6.4 only said "nothing to switch".)
+                                if cfg!(feature = "producer") {
+                                    app.toast = node_mode_key();
                                     app.toast_sticky = false;
                                 } else
                                 // 0.77 GENESIS ARCHIVE (#156): [F] is the explicit "hold the whole
@@ -1399,4 +1400,15 @@ fn node_resync_key(app: &mut App) -> bool {
     }
     let _ = app;
     false
+}
+
+
+/// [F] (10.6.5): switch your full node off (light mode) and on; the message says what changed.
+fn node_mode_key() -> String {
+    #[cfg(feature = "producer")]
+    {
+        return crate::own_node::toggle_light_mode();
+    }
+    #[allow(unreachable_code)]
+    String::new()
 }

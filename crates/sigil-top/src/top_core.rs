@@ -362,9 +362,6 @@ pub(crate) fn own_node_on() -> bool {
 }
 
 /// [F] while your own node runs: there is nothing to switch.
-pub(crate) fn own_node_f_toast() -> String {
-    "◆ Your node keeps and checks the whole chain itself — nothing to switch. (Before 10.6.0 F started a full node; now one always runs.)".to_string()
-}
 
 /// v0.7.0: Poll each fleet node's status API to check uptime, height, and version.
 /// Runs on the UI thread (quick timeout per node — 3s each). AI operators depend on

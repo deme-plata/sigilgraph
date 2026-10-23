@@ -2121,7 +2121,7 @@ fn run_start() -> Result<()> {
                             // permanent sync stall look silent for hours. Log every branch
                             // that isn't a clean non-empty success.
                             let blocks = match serde_json::to_vec(&req) {
-                                Ok(payload) => match mgr2.send_request(peer, payload).await {
+                                Ok(payload) => { let mut busy_tries: u32 = 0; loop { break match mgr2.send_request(peer, payload.clone()).await {
                                     Ok(bytes) => match crate::serve_read::decode_backfill_resp(&bytes) {
                                         Ok(r) => {
                                             if r.blocks.is_empty() {
@@ -2141,8 +2141,19 @@ fn run_start() -> Result<()> {
                                             r.blocks
                                         }
                                         Err(e) if e == crate::serve_read::BUSY_ERR => {
-                                            // "not now" — same size next time, no penalty; the slot
-                                            // frees at once instead of after an 8 s timeout.
+                                            // "not now" — same size, no penalty. 2026-10-23: and ask AGAIN, from here.
+                                            // Returning empty left a HOLE: the window was already past this range and
+                                            // nothing marked it for a redo, so the chain waited at this height for the
+                                            // peer-heights gap path (~1 s per hole). Measured on fresh syncs: 88 / 149 /
+                                            // 202 / 224 holes ↔ 79 / 136 / 203 / 193 s. The range stays in flight while we
+                                            // wait, so neither the window nor the gap path asks for it twice.
+                                            busy_tries += 1;
+                                            if busy_tries <= 20 {
+                                                tokio::time::sleep(std::time::Duration::from_millis((25u64 << busy_tries.min(4)).min(400))).await;
+                                                continue;
+                                            }
+                                            eprintln!("⚠ rr-backfill(windowed): {peer} still busy after {} asks for [{from}..={to})", busy_tries);
+                                            fail("still busy");
                                             Vec::new()
                                         }
                                         Err(e) => {
@@ -2165,7 +2176,7 @@ fn run_start() -> Result<()> {
                                         fail("send failed");
                                         Vec::new()
                                     }
-                                },
+                                }; } }
                                 Err(e) => {
                                     eprintln!("⚠ rr-backfill(windowed): request serialize failed: {e}");
                                     fail("serialize failed");

@@ -465,6 +465,22 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
 
     // ── telemetry (left): network economics + YOUR mining ────────────────
     let est_earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
+    // 2026-10-23 (Viktor: "make the wallet use my own node"): say where the wallet reads from.
+    fn wallet_source_note() -> &'static str {
+        #[cfg(feature = "producer")]
+        {
+            if std::env::var_os("SIGIL_NODE_URL").is_some() {
+                return "";
+            }
+            if crate::own_node::caught_up_api().is_some() {
+                return "  · read from your node";
+            }
+            if crate::forge_ui::band_visible() {
+                return "  · read from the network until your node catches up";
+            }
+        }
+        ""
+    }
     // 2026-10-23: public AND private — a private payment is a note, invisible in the public balance; the line showed
     // only the public part, so a received 1000-SIGIL private payment looked like it never arrived.
     #[cfg(feature = "shield-register")]
@@ -496,6 +512,7 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
         Line::from(vec![
             dim("wallet "), Span::styled(format!("{wallet_bal} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
             dim(&private_note),
+            dim(wallet_source_note()),
             dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
             dim("   est earn "), Span::styled(est_earn, Style::default().fg(C_GOLD)),
             dim("   [M] mine"),

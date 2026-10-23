@@ -151,7 +151,8 @@ pub(crate) fn start_balance_poller() {
     use std::sync::atomic::Ordering;
     POLLER.call_once(|| {
         std::thread::spawn(|| loop {
-            let base = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+            // 2026-10-23: your own node when it is caught up, the network otherwise.
+            let base = crate::top_core::wallet_read_url("http://sigilgraph.quillon.xyz:18181");
             let wallet = crate::miner_wallet();
             if is_wallet(&wallet) {
                 if let Ok(j) = get(base.trim_end_matches('/'), &format!("/v1/balance?wallet={wallet}")) {
@@ -183,7 +184,7 @@ fn balance_stream() {
     };
     let mut pause = 2u64;
     loop {
-        let base = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+        let base = crate::top_core::wallet_read_url("http://sigilgraph.quillon.xyz:18181");
         let wallet = crate::miner_wallet();
         if is_wallet(&wallet) {
             let url = format!("{}/v1/events?kinds=balance&wallet={wallet}", base.trim_end_matches('/'));
@@ -199,8 +200,10 @@ fn balance_stream() {
                         }
                         if checked.elapsed() >= std::time::Duration::from_secs(15) {
                             checked = std::time::Instant::now();
-                            if crate::miner_wallet() != wallet {
-                                break;
+                            if crate::miner_wallet() != wallet
+                                || crate::top_core::wallet_read_url("http://sigilgraph.quillon.xyz:18181") != base
+                            {
+                                break; // another wallet, or your node caught up / fell behind: reconnect there
                             }
                         }
                     }

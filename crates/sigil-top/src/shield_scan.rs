@@ -180,6 +180,18 @@ pub(crate) struct ShieldedScanner {
 }
 
 impl ShieldedScanner {
+    /// 2026-10-23: switch the node this scanner reads from (your own node once it is caught up, the network
+    /// otherwise). Safe between cycles: both serve the same chain, and a node a few blocks behind just answers a
+    /// little less until the next cycle.
+    pub(crate) fn set_base(&mut self, node_url: &str) -> bool {
+        let b = node_url.trim_end_matches('/').to_string();
+        if b == self.base {
+            return false;
+        }
+        self.base = b;
+        true
+    }
+
     pub(crate) fn new(node_url: &str, seed: [u8; 32]) -> Self {
         Self {
             base: node_url.trim_end_matches('/').to_string(),

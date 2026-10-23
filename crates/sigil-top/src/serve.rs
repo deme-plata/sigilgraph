@@ -404,9 +404,18 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
                 return;
             }
         }
-        let (status, body, ct) = proxy_api(&method, path, &req_body_bytes, &req_content_type);
+        // 2026-10-23: state reads go to your own node when it is caught up; the answer says which node gave it.
+        let (node, source) = proxy_target(&method, path);
+        let (mut status, mut body, mut ct) = proxy_api_to(&node, &method, path, &req_body_bytes, &req_content_type);
+        let mut source = source;
+        if source == "your-node" && (status.starts_with("502") || status.starts_with("504")) {
+            // your node stopped between two looks — ask the network instead of showing an error
+            let net = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+            (status, body, ct) = proxy_api_to(&net, &method, path, &req_body_bytes, &req_content_type);
+            source = "network";
+        }
         let resp = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nX-Sigil-Node: {source}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         let _ = stream.write_all(resp.as_bytes());
@@ -1051,6 +1060,36 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
 /// session, sigil-api/src/lib.rs) so this port actually serves what the wallet
 /// asks for now — status/recent/search/send are NOT yet ported (separate,
 /// larger follow-up: sigil-api has no transaction-history indexing yet).
+/// 2026-10-23 (Viktor: "make the wallet use my own node"): the wallet's state READS that your own node answers as well
+/// as the network's server — balances, the private pool, recipients' published keys, finality, supply, integrity.
+/// Everything else keeps going to the network: payments and deposits, "has my payment landed" (the block-maker tracks
+/// it), mining and door statistics (block-maker only), search, and any route not listed here.
+fn own_node_may_answer(method: &str, path: &str) -> bool {
+    if method != "GET" {
+        return false;
+    }
+    let p = path.split('?').next().unwrap_or(path);
+    let p = p.strip_prefix("/api").unwrap_or(p);
+    const READS: &[&str] = &[
+        "/v1/balance", "/v1/shielded/anchor", "/v1/shielded/leaves", "/v1/shielded/tags", "/v1/shielded/nullifiers",
+        "/v1/shielded/address", "/v1/shielded/has_bucket", "/v1/finality/certificate", "/v1/supply", "/v1/integrity",
+    ];
+    READS.contains(&p)
+}
+
+/// Where the [W] page's request goes, and the label its answer carries (`X-Sigil-Node`).
+fn proxy_target(method: &str, path: &str) -> (String, &'static str) {
+    let network = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+    if std::env::var_os("SIGIL_NODE_URL").is_none() && own_node_may_answer(method, path) {
+        #[cfg(feature = "producer")]
+        if let Some(a) = crate::own_node::caught_up_api() {
+            return (a, "your-node");
+        }
+    }
+    (network, "network")
+}
+
+#[allow(dead_code)]
 fn proxy_api(method: &str, path_and_query: &str, req_body: &[u8], content_type: &str) -> (String, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
         .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
@@ -2251,6 +2290,13 @@ mod tests {
     #[test]
     fn pay_paths_route_locally_and_nothing_else_does() {
         assert!(pay::is_local_path("/api/v1/pay"));
+        // 2026-10-23: only state READS may come from your own node; sending, payment status, mining stay on the network
+        assert!(own_node_may_answer("GET", "/api/v1/balance?wallet=ab"));
+        assert!(own_node_may_answer("GET", "/v1/shielded/leaves?epoch=1&from=0"));
+        assert!(!own_node_may_answer("POST", "/v1/shielded/anchor"), "never a write");
+        for p in ["/v1/shielded_send", "/v1/transactions/abc", "/v1/mining/miners", "/v1/shielded/door", "/v1/balance/history", "/v1/search?q=x", "/v1/events"] {
+            assert!(!own_node_may_answer("GET", p), "{p}");
+        }
         assert!(pay::is_local_path("/api/v1/pay/status"));
         assert!(!pay::is_local_path("/api/v1/payload"));
         assert!(!pay::is_local_path("/api/v1/pay?x=1"));

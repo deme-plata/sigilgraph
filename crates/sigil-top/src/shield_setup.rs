@@ -727,6 +727,11 @@ pub fn spawn_shielded_scanner(node_url: &str, seed_hex: &str) -> Option<std::thr
         let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
         spawn_note_listener(node.clone(), seed, wake_tx);
         loop {
+            // 2026-10-23: read from your own node when it is caught up, the network otherwise.
+            let src = crate::top_core::wallet_read_url(&node);
+            if scanner.set_base(&src) {
+                crate::boot_trace(&format!("private scan: now reading from {src}"));
+            }
             if let Some(snap) = scanner.cycle(&mut get) {
                 if let Ok(mut g) = latest_cell().lock() {
                     *g = Some(snap);
@@ -757,14 +762,23 @@ fn spawn_note_listener(node: String, seed: [u8; 32], wake: std::sync::mpsc::Send
         else {
             return;
         };
-        let url = format!("{}/v1/events?kinds=note", node.trim_end_matches('/'));
         let mut pause = 2u64;
         loop {
+            // 2026-10-23: your own node's events when it is caught up, the network's otherwise (re-checked every 15 s).
+            let src = crate::top_core::wallet_read_url(&node);
+            let url = format!("{}/v1/events?kinds=note", src.trim_end_matches('/'));
             if let Ok(resp) = client.get(&url).header("Accept", "text/event-stream").send() {
                 if resp.status().is_success() {
                     pause = 2;
+                    let mut checked = std::time::Instant::now();
                     for line in std::io::BufReader::new(resp).lines() {
                         let Ok(line) = line else { break };
+                        if checked.elapsed() >= Duration::from_secs(15) {
+                            checked = std::time::Instant::now();
+                            if crate::top_core::wallet_read_url(&node) != src {
+                                break;
+                            }
+                        }
                         let Some(data) = line.strip_prefix("data:") else { continue };
                         if note_may_be_ours(data.trim(), &mine) && wake.send(()).is_err() {
                             return; // the scanner is gone

@@ -428,6 +428,23 @@ pub fn prepare() -> std::io::Result<Plan> {
 }
 
 /// The node's own local API, once the screen started one (empty otherwise).
+/// How far behind the network's tip your node may be for the wallet to read from it: 64 blocks ≈ 8 s on g3. Stricter
+/// than the node line's "LIVE" (600): a balance must not be a minute old.
+pub const WALLET_SLACK: u64 = 64;
+
+/// 2026-10-23 (Viktor: "make the wallet use my own node"): your node's local API when the wallet may read from it —
+/// it runs, it is caught up (≤ [`WALLET_SLACK`] behind the tip it has seen certified), and it answers locally.
+pub fn caught_up_api() -> Option<String> {
+    // the address the screen last heard back from (attached windows read another window's node), not the planned one
+    let api = status::polled_api();
+    wallet_may_read(&api, status::phase(), status::height(), status::net_tip()).then_some(api)
+}
+
+/// The rule behind [`caught_up_api`], pure so it is pinned by a test.
+pub fn wallet_may_read(api: &str, phase: u8, height: u64, net_tip: u64) -> bool {
+    !api.is_empty() && phase == status::LIVE && net_tip > 0 && height + WALLET_SLACK >= net_tip
+}
+
 pub fn api() -> String {
     std::env::var(API_ENV).unwrap_or_default()
 }
@@ -760,6 +777,11 @@ pub mod status {
     static IDENTITY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     pub fn set_identity(id: impl Into<String>) { if let Ok(mut g) = IDENTITY.lock() { *g = id.into(); } }
     pub fn identity() -> String { IDENTITY.lock().map(|g| g.clone()).unwrap_or_default() }
+    /// 2026-10-23: the node API the screen last heard back from — its own node, or the node of another sigil-top
+    /// window it attached to. The wallet reads from THIS address (one proven to answer), never from a planned one.
+    static POLLED_API: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    pub fn set_polled_api(a: &str) { if let Ok(mut g) = POLLED_API.lock() { if *g != a { *g = a.to_string(); } } }
+    pub fn polled_api() -> String { POLLED_API.lock().map(|g| g.clone()).unwrap_or_default() }
     fn id_suffix() -> String {
         let id = identity();
         if id.len() >= 12 { format!(" · block-making id {}…", &id[..12]) } else { String::new() }
@@ -846,6 +868,7 @@ fn get_json(url: &str) -> Option<serde_json::Value> {
 /// One look at the node's local API → [`status`].
 fn poll(api: &str, with_hashes: bool) -> bool {
     let Some(v) = get_json(&format!("{api}/v1/integrity")) else { return false };
+    status::set_polled_api(api);
     let h = v.get("height").and_then(|x| x.as_u64()).or_else(|| v.get("applied_height").and_then(|x| x.as_u64())).unwrap_or(0);
     status::set_height(h);
     if let Some(f) = v.get("finalized_height").and_then(|x| x.as_u64()) { status::set_settled(f); }
@@ -1284,6 +1307,25 @@ mod tests {
         status::set_message("exited (exit status: 1): genesis mismatch");
         assert!(status::line().unwrap().contains("genesis mismatch"));
         status::set_phase(status::IDLE);
+    }
+}
+
+/// 2026-10-23: the wallet reads from your node only when it runs, answers locally and is at most 64 blocks behind.
+#[cfg(test)]
+mod wallet_reads_tests {
+    use super::{status, wallet_may_read, WALLET_SLACK};
+
+    #[test]
+    fn the_wallet_reads_from_your_node_only_when_it_is_caught_up() {
+        let api = "http://127.0.0.1:18182";
+        assert!(wallet_may_read(api, status::LIVE, 1_000_000, 1_000_000));
+        assert!(wallet_may_read(api, status::LIVE, 1_000_000 - WALLET_SLACK, 1_000_000), "64 behind: still yes");
+        assert!(!wallet_may_read(api, status::LIVE, 1_000_000 - WALLET_SLACK - 1, 1_000_000), "65 behind: the network");
+        assert!(!wallet_may_read(api, status::SYNCING, 1_000_000, 1_000_000), "still catching up");
+        assert!(!wallet_may_read(api, status::STOPPED, 1_000_000, 1_000_000), "your node stopped");
+        assert!(!wallet_may_read(api, status::IDLE, 1_000_000, 1_000_000), "light mode: no node of yours");
+        assert!(!wallet_may_read("", status::LIVE, 1_000_000, 1_000_000), "no local API");
+        assert!(!wallet_may_read(api, status::LIVE, 5, 0), "no certified tip seen yet");
     }
 }
 

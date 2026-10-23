@@ -670,6 +670,22 @@ pub(crate) fn engine_node_url() -> String {
     "http://sigilgraph.quillon.xyz:18181".into()
 }
 
+/// 2026-10-23 (Viktor: "yes make the wallet use my own node"): where the wallet READS chain state from — balances,
+/// the private pool, finality. Your own node when it runs and is caught up (see `own_node::caught_up_api`), so the
+/// wallet keeps working when the network's server is down and nobody outside your machine learns which wallet you look
+/// at; otherwise `fallback` (the network). An explicit `SIGIL_NODE_URL` always wins. Payments never use this: they go
+/// where blocks are made ([`money_node_url`]).
+pub(crate) fn wallet_read_url(fallback: &str) -> String {
+    if let Ok(v) = std::env::var("SIGIL_NODE_URL") {
+        return v;
+    }
+    #[cfg(feature = "producer")]
+    if let Some(a) = crate::own_node::caught_up_api() {
+        return a;
+    }
+    fallback.to_string()
+}
+
 /// 2026-10-23 (Viktor: "i still cant send from web ui?"): the node every MONEY call talks to — payments, deposits,
 /// recipient keys, nullifier checks, key registration, the private-coin scanner. NOT [`engine_node_url`]: that is
 /// the mining node, and once this node has verified the chain it answers with the local mining relay, which serves

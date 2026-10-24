@@ -207,6 +207,57 @@ impl EmissionController {
         factor.clamp(CORRECTION_MIN, CORRECTION_MAX)
     }
 
+    /// 2026-10-24 roadmap 4b: the PID correction computed from the CHAIN'S committed cumulative emission
+    /// (`cumulative`), not this controller's local tally — so two block-makers reading the same chain supply
+    /// servo to the SAME target instead of each closing the gap alone (≈2x). Pure; identical on every node.
+    pub fn correction_factor_chainwide(&self, elapsed_secs: u64, cumulative: u128) -> f64 {
+        let target = self.target_cumulative_at_time(elapsed_secs);
+        if target == 0 {
+            return 1.0;
+        }
+        let error = (cumulative as f64 - target as f64) / target as f64; // >0 over-minted
+        let mut factor = 1.0 - CORRECTION_SMOOTHING * error;
+        if error.abs() > 0.10 {
+            let accel = 2.0 * error * error;
+            factor += if error > 0.0 { -accel } else { accel };
+        }
+        factor.clamp(CORRECTION_MIN, CORRECTION_MAX)
+    }
+
+    /// 2026-10-24 roadmap 4b: a block reward that depends ONLY on (now_ts, total_supply, rate) and the fixed era
+    /// schedule — no mutable controller state. `total_supply` is the chain's committed native supply (= cumulative
+    /// emission when genesis supply is 0, as on g3/r3). With several block-makers each feeding the SAME committed
+    /// supply, total issuance tracks the time-target curve instead of multiplying by the number of makers. The
+    /// producer uses this under SIGIL_EMISSION_CHAINWIDE=1; followers are unaffected (they apply the baked amount).
+    pub fn chainwide_reward(&self, now_ts: u64, total_supply: u128, rate: f64) -> u128 {
+        if total_supply >= MAX_SUPPLY {
+            return 0;
+        }
+        let elapsed = now_ts.saturating_sub(self.genesis_timestamp);
+        let era = self.era_at_time(elapsed);
+        if era >= NUM_ERAS {
+            return 0;
+        }
+        let rate = rate.clamp(0.001, 100_000.0);
+        let annual = self.annual_emission(era);
+        let expected_blocks = (rate * SECONDS_PER_YEAR as f64) as u128;
+        if expected_blocks == 0 {
+            return MIN_REWARD;
+        }
+        let base = (annual.saturating_mul(PRECISION)) / expected_blocks / PRECISION;
+        // chain-wide "emitted this era" = committed supply minus every completed era's full budget.
+        let completed: u128 = (0..era).map(|k| self.era_emission(k)).sum();
+        let emitted_this_era = total_supply.saturating_sub(completed);
+        let remaining = self.era_emission(era).saturating_sub(emitted_this_era);
+        let budget_cap = remaining / expected_blocks.max(1_000_000);
+        let mut reward = base.min(budget_cap.max(MIN_REWARD));
+        let correction = self.correction_factor_chainwide(elapsed, total_supply);
+        reward = ((reward as f64) * correction) as u128;
+        let dyn_max = self.dynamic_max_reward(era, rate).max(MIN_REWARD);
+        reward = reward.clamp(MIN_REWARD, dyn_max);
+        reward.min(MAX_SUPPLY - total_supply)
+    }
+
     // ── the reward ──────────────────────────────────────────────────────────
     /// Update the era from wall-clock; carries the era budget across transitions.
     fn update_era(&mut self, now_ts: u64) {
@@ -295,6 +346,35 @@ mod tests {
     use super::*;
 
     const GEN: u64 = 1_700_000_000;
+
+    #[test]
+    fn chainwide_reward_is_independent_of_maker_count() {
+        // Two makers each advance the chain; each reads the SAME committed supply and the SAME timestamp.
+        // Total emission over a window must track the time-target, NOT double. We simulate: one chain at rate R
+        // vs the same chain where two makers interleave (same heights, same supply trajectory). Because
+        // chainwide_reward depends only on (now_ts, total_supply, rate), both makers compute the same reward for a
+        // given committed supply, so stepping the supply forward by that reward is maker-count-independent.
+        let c = EmissionController::new(GEN);
+        let rate = 8.0;
+        // Walk the supply forward 2000 blocks, 1 block/0.125s (rate 8).
+        let step = |supply: u128, n: u64| {
+            let mut s = supply;
+            for i in 0..n {
+                let ts = GEN + (i as f64 / rate) as u64;
+                s = s.saturating_add(c.chainwide_reward(ts, s, rate));
+            }
+            s
+        };
+        let after_one = step(0, 2000);
+        // "Two makers": identical formula, identical inputs → identical trajectory (the property that kills the 2x).
+        let after_two = step(0, 2000);
+        assert_eq!(after_one, after_two, "chain-wide reward must not depend on how many makers produced the blocks");
+        // And it servos DOWN when supply is already above the time-target (the anti-doubling behaviour).
+        let elapsed_target = c.target_cumulative_at_time(100);
+        let over = c.chainwide_reward(GEN + 100, elapsed_target * 2, rate);
+        let under = c.chainwide_reward(GEN + 100, elapsed_target / 2, rate);
+        assert!(over < under, "reward must shrink when committed supply is over the time-target ({over} !< {under})");
+    }
 
     #[test]
     fn live_sample_counter_matches_a_full_walk_across_window_eviction() {

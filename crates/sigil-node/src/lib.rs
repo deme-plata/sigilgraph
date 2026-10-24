@@ -2580,9 +2580,18 @@ fn run_start() -> Result<()> {
                     // computes the reward (time-based + PID + rate) and we bake the
                     // exact amount into the coinbase; else the pure height schedule.
                     let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    // 2026-10-24 roadmap 4b: under SIGIL_EMISSION_CHAINWIDE the reward servos on the chain's
+                    // committed supply (not this controller's local tally), so several block-makers don't over-issue.
+                    let chainwide_emission = std::env::var("SIGIL_EMISSION_CHAINWIDE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
                     let reward_override: Option<u128> = emission.as_mut().map(|c| {
                         let supply = mint_ref.state().native_supply(); // borrow — was a full state clone per tick
-                        c.calculate_block_reward(now_secs, supply)
+                        if chainwide_emission {
+                            let r = c.chainwide_reward(now_secs, supply, c.smoothed_rate());
+                            c.record_emission(r); // keep the local tally tracking for the status line
+                            r
+                        } else {
+                            c.calculate_block_reward(now_secs, supply)
+                        }
                     });
                     let topology_commitment = compute_topology_commitment(braid.as_ref(), mint_ref.height());
                     // Drain the partial-share pool ONLY for a self-minted block.

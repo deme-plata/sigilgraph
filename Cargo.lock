@@ -3642,6 +3642,7 @@ dependencies = [
  "sha3 0.10.9",
  "tokio",
  "tracing",
+ "void",
 ]
 
 [[package]]
@@ -9449,7 +9450,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "10.7.1"
+version = "10.7.2"
 dependencies = [
  "anyhow",
  "argon2",

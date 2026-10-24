@@ -50,6 +50,11 @@ pub struct GrandpaNode {
 /// `(hash, height, round)` of every block the voter finalizes.
 pub type FinalizedRx = tokio::sync::mpsc::UnboundedReceiver<(Hash, Number, u64)>;
 
+/// Blocks the voter needs (2026-10-20, restart-liveness D3): a vote, commit or catch-up it holds
+/// names them and its finality tree lacks them. The main loop hands over what the node already
+/// holds and asks peers BY HASH for the rest (`spawn_parent_fetch`, the braid's own path).
+pub type WantedRx = tokio::sync::mpsc::UnboundedReceiver<Vec<Hash>>;
+
 impl GrandpaNode {
     /// Start the voter. `base` must be a FINAL block the node holds (its settled tip).
     /// `None` (with a log line) if the committee or this node's key is not configured.
@@ -58,7 +63,7 @@ impl GrandpaNode {
         genesis: Hash,
         base: (Hash, Number),
         snap_dir: &Path,
-    ) -> Option<(Self, FinalizedRx)> {
+    ) -> Option<(Self, FinalizedRx, WantedRx)> {
         let (committee, key, _) = match sigil_finality::observer::env_config::from_env() {
             Ok(c) => c,
             Err(e) => {
@@ -107,6 +112,13 @@ impl GrandpaNode {
         let (tx, finalized_rx) = tokio::sync::mpsc::unbounded_channel();
         env.set_on_finalize(Box::new(move |h, n, r| {
             let _ = tx.send((h, n, r));
+        }));
+        // D3 (2026-10-20): the voter asks for blocks its held messages name. Before this, a
+        // voter whose tree lacked a vote's block waited for it forever — the 10-17 r1 freeze
+        // (round 1531), reproduced and fixed in `sigil-grandpa/tests/gossip_sim.rs` (S1b).
+        let (want_tx, wanted_rx) = tokio::sync::mpsc::unbounded_channel();
+        env.set_block_fetcher(Box::new(move |hs| {
+            let _ = want_tx.send(hs);
         }));
 
         // Blocks in: one hook for every block the DAG store accepts.
@@ -165,7 +177,14 @@ impl GrandpaNode {
                 .ok()?;
         }
         eprintln!("🏁 grandpa: finality protocol ON (set {SET_ID}, base H={}, guard {})", base.1, guard_path.display());
-        Some((Self { env, net }, finalized_rx))
+        Some((Self { env, net }, finalized_rx, wanted_rx))
+    }
+
+    /// A block the node already holds, handed to the finality tree directly (D3): the block-store
+    /// hook only reports blocks stored AFTER the voter started, and a by-hash fetch of a block the
+    /// braid already has comes back as a duplicate that is never stored again.
+    pub fn note_block(&self, hash: Hash, parent: Hash, height: Number) {
+        self.env.tree.lock().insert_or_park(hash, parent, height);
     }
 
     /// A message from the finality-votes topic. Non-GRANDPA payloads are ignored.
@@ -201,12 +220,13 @@ impl GrandpaNode {
         let pref = *self.env.preferred.lock();
         let n = self.net.my_round();
         format!(
-            "round {} · last completed {:?} · finalized H={} · prefers {} · votes held this round {:?}",
+            "round {} · last completed {:?} · finalized H={} · prefers {} · votes held this round {:?} · blocks asked {}",
             n,
             self.net.completed_round(),
             fin.1,
             pref.map(|(h, n)| format!("H={n} {}", hex::encode(&h[..4]))).unwrap_or_else(|| "nothing".into()),
             self.net.round_summary(n),
+            self.env.blocks_requested.load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 }

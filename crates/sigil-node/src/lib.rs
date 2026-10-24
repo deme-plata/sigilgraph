@@ -1717,22 +1717,22 @@ fn run_start() -> Result<()> {
         eprintln!("{}", finality.gate_mode().banner());
         // 2026-10-08 (roadmap step 1, M2.2): GRANDPA finality, rehearsal only. Its base is
         // the settled tip (settled = final). See grandpa_node.rs.
-        let (grandpa, mut grandpa_fin_rx) = if grandpa_node::enabled() && braid.is_some() {
+        let (grandpa, mut grandpa_fin_rx, mut grandpa_want_rx) = if grandpa_node::enabled() && braid.is_some() {
             let tip_h = chain.height().saturating_sub(1);
             let base = chain.get(tip_h).map(|b| (b.hash(), tip_h));
             let genesis = build_genesis().ok().map(|g| g.hash());
             match (base, genesis) {
                 (Some(base), Some(genesis)) => match grandpa_node::GrandpaNode::start(mgr.clone(), genesis, base, &snap_dir) {
-                    Some((g, rx)) => (Some(g), Some(rx)),
-                    None => (None, None),
+                    Some((g, rx, want)) => (Some(g), Some(rx), Some(want)),
+                    None => (None, None, None),
                 },
                 _ => {
                     eprintln!("🏁 grandpa: NOT started — no settled tip or genesis to anchor on");
-                    (None, None)
+                    (None, None, None)
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
         let mut grandpa_pending_final: Option<(u64, BlockHash)> = None;
         // Fail-loud finality monitoring (2026-08-15, the P=6 k=1 investigation):
@@ -4703,6 +4703,44 @@ fn run_start() -> Result<()> {
                             chain.height().saturating_sub(1), grandpa_pending_final.map(|(n, _)| n));
                     }
                 }
+                Some(want) = async {
+                    match grandpa_want_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // 2026-10-20 (restart-liveness D3): the GRANDPA voter holds a vote, commit or
+                    // catch-up naming blocks its finality tree lacks (already reduced to the bottom
+                    // of each parked run). What this node holds goes to the tree at once; the rest
+                    // is asked for BY HASH like the braid's DAG parents, and lands through `bh_rx`
+                    // → braid → block store → the tree. Peers rotate per ask, so a peer that lacks
+                    // the block does not get every retry. Before D3 nothing asked: the 10-17 r1 freeze.
+                    let mut ask: Vec<BlockHash> = Vec::new();
+                    let mut had = 0usize;
+                    for h in want {
+                        match (dag_bodies.get(&h), grandpa.as_ref()) {
+                            (Some(b), Some(g)) => {
+                                g.note_block(h, b.header.parent_hash, b.header.height);
+                                had += 1;
+                            }
+                            _ => ask.push(h),
+                        }
+                    }
+                    let ask = parents_in_flight.take_new(&ask, std::time::Instant::now());
+                    static GRANDPA_ASKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let n = GRANDPA_ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if !ask.is_empty() {
+                        let connected = mgr.connected_peers();
+                        if !connected.is_empty() {
+                            let peer = connected[(n as usize) % connected.len()];
+                            spawn_parent_fetch(&mgr, peer, &ask, &sync_hs, &bh_tx);
+                        }
+                    }
+                    if n % 32 == 0 {
+                        eprintln!("🏁 grandpa: needs blocks — {had} handed over from our store, {} asked by hash ({} asks so far)",
+                            ask.len(), n + 1);
+                    }
+                }
                 Some(vals) = bh_rx.recv() => {
                     // 2026-10-07 (roadmap step 1): DAG parents fetched BY HASH. They go into the
                     // BRAID and the body store, never into the linear `pending` buffer — a side
@@ -4729,6 +4767,15 @@ fn run_start() -> Result<()> {
                                     parked += 1;
                                     dag_store_body_ranked(&mut dag_bodies, dag_max_bodies, bhash, block, &|h| body_use(br, h));
                                     still_missing.extend(m);
+                                }
+                                InsertOutcome::Duplicate => {
+                                    // 2026-10-20 (D3): the braid already had it, so it is not stored
+                                    // again and the block-store hook stays silent — but the GRANDPA
+                                    // voter may have asked for exactly this block. Hand it over.
+                                    other += 1;
+                                    if let Some(g) = grandpa.as_ref() {
+                                        g.note_block(bhash, block.header.parent_hash, block.header.height);
+                                    }
                                 }
                                 _ => other += 1,
                             }

@@ -445,6 +445,13 @@ impl SigilState {
         self.native_supply
     }
 
+    /// The quantity the 21M cap governs: public balances PLUS the value locked in the shielded pool
+    /// (sigil-state's own invariant — a deposit moves value from `native_supply` into `value_locked`, it does not
+    /// burn it). Emission must servo on THIS, or every deposit would look like a burn and be re-minted (over-issue).
+    pub fn cap_supply(&self) -> u128 {
+        self.native_supply.saturating_add(self.shielded.value_locked())
+    }
+
     /// Independent O(state) recomputation of total native supply, summed
     /// directly from the wallet map. The O(1) incremental [`Self::native_supply`]
     /// must ALWAYS equal this.

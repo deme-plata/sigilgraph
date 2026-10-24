@@ -2584,12 +2584,15 @@ fn run_start() -> Result<()> {
                     // committed supply (not this controller's local tally), so several block-makers don't over-issue.
                     let chainwide_emission = std::env::var("SIGIL_EMISSION_CHAINWIDE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
                     let reward_override: Option<u128> = emission.as_mut().map(|c| {
-                        let supply = mint_ref.state().native_supply(); // borrow — was a full state clone per tick
                         if chainwide_emission {
-                            let r = c.chainwide_reward(now_secs, supply, c.smoothed_rate());
+                            // servo on the CAP-GOVERNED total (public + shielded value_locked), so a deposit moving
+                            // value into the pool is not re-minted (sigil-field, 2026-10-24).
+                            let cap_supply = mint_ref.state().cap_supply();
+                            let r = c.chainwide_reward(now_secs, cap_supply, c.smoothed_rate());
                             c.record_emission(r); // keep the local tally tracking for the status line
                             r
                         } else {
+                            let supply = mint_ref.state().native_supply(); // borrow — was a full state clone per tick
                             c.calculate_block_reward(now_secs, supply)
                         }
                     });

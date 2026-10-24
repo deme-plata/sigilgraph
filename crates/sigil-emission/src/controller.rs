@@ -229,6 +229,8 @@ impl EmissionController {
     /// emission when genesis supply is 0, as on g3/r3). With several block-makers each feeding the SAME committed
     /// supply, total issuance tracks the time-target curve instead of multiplying by the number of makers. The
     /// producer uses this under SIGIL_EMISSION_CHAINWIDE=1; followers are unaffected (they apply the baked amount).
+    /// `total_supply` MUST be the CAP-GOVERNED total (public native + shielded value_locked), not public alone —
+    /// else a deposit (public->pool) looks like a burn and is re-minted (sigil-field, 2026-10-24).
     pub fn chainwide_reward(&self, now_ts: u64, total_supply: u128, rate: f64) -> u128 {
         if total_supply >= MAX_SUPPLY {
             return 0;
@@ -374,6 +376,26 @@ mod tests {
         let over = c.chainwide_reward(GEN + 100, elapsed_target * 2, rate);
         let under = c.chainwide_reward(GEN + 100, elapsed_target / 2, rate);
         assert!(over < under, "reward must shrink when committed supply is over the time-target ({over} !< {under})");
+    }
+
+    #[test]
+    fn a_deposit_public_to_pool_does_not_change_the_reward() {
+        // The caller must pass the CAP-GOVERNED total (native + value_locked). A deposit moves value between those
+        // two without changing their sum, so the reward a producer computes is identical before and after it.
+        let c = EmissionController::new(GEN);
+        let rate = 8.0;
+        let now = GEN + 10_000;
+        let native = 5_000_000u128 * 10u128.pow(10);
+        let locked = 400_000u128 * 10u128.pow(10);
+        let before = c.chainwide_reward(now, native + locked, rate);         // cap_supply
+        // a 100k-SIGIL deposit: native -= D, locked += D; the cap-governed sum is unchanged
+        let d = 100_000u128 * 10u128.pow(10);
+        let after = c.chainwide_reward(now, (native - d) + (locked + d), rate);
+        assert_eq!(before, after, "a deposit must not change the reward when servoing on native+locked");
+        // and the WRONG input (native alone, dropping by D) DOES raise the reward — the bug this guards against
+        let wrong_before = c.chainwide_reward(now, native, rate);
+        let wrong_after = c.chainwide_reward(now, native - d, rate);
+        assert!(wrong_after >= wrong_before, "servoing on native alone re-mints a deposit (the bug)");
     }
 
     #[test]

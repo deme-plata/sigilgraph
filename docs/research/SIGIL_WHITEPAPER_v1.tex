@@ -1,3 +1,36 @@
+% v1.5 (2026-08-27): prediction 2 RESTATED and regraded open -> derived+sim.
+% The row asserted a PID discriminant (Kp^2 >= 4 Kd Ki); the implemented
+% controller (sigil-emission/src/controller.rs) has NO integral and NO
+% derivative term, so Ki = Kd = 0 and that test reduces to 0.64 >= 0 -- it
+% passed vacuously and could never fail. Replaced with the characteristic
+% equation actually derived from the implemented law (proportional + quadratic
+% accel + EMA lag, over an integrating plant): lambda^2-(1+Kp-x)lambda+Kp=0.
+% det = Kp = 0.8 < 1 for every loop gain, so complex roots always lie inside
+% the unit circle -- oscillation, if reachable, is necessarily damped; and
+% steady-state x ~ 0.16/k leaves the complex window after ~14 blocks.
+% Empirically closed against the REAL controller, not a model of it:
+% +20%% over-mint shock -> +0.4163%% after 3,000 blocks, 0 sign changes,
+% correction_factor 0.9969. Tests: sigil-emission controller::
+% prediction_2_stability (5), suite 30/30. NOT promoted to measured: no live
+% chain under real block-rate variance yet. Two open items recorded in the
+% row's falsification column. No other claims changed.
+% v1.5 (2026-08-30): one new result and six plates. The gossip delivery law's
+%   fitted provisioning rule is replaced by a PROVED floor (Newton positivity for
+%   sampling without replacement over distinct peers), tight to 0.03-0.13 pp and
+%   lying above the fitted law; the same inequality is a validity gate, and it
+%   FIRES on the 2026-07-22 campaign, whose lab mesh drifted 16-22 pp within
+%   individual runs. No grade changes: the law stays measured, its extrapolation
+%   past r=3 is withdrawn pending an interleaved re-measurement. Companion:
+%   sigil-delivery-law-positivity-v0.pdf. Six commissioned plates added.
+% v1.4 (2026-08-23): two real changes, no promotions/regrades. (1) sigil-rpcd
+% references in the Architecture and Predictions sections were stale — that daemon
+% was stopped and disabled 2026-08-17; the money API is sigil-api, embedded in
+% sigil-node, reading/writing the real SigilState directly (no second ledger to
+% drift). (2) The "Light client first: sigil-top" section is no longer accurate as
+% light-client-only: sigil-top now links sigil-node's genesis/mint/DAG-ordering
+% logic directly and carries its own producer loop, proven correct in an
+% adversarial two-instance offline simulation (graded \stS, same category as the
+% braid's S1--S6 convergence gate) — explicitly NOT yet claimed live on sigil-g0.
 % SIGIL Whitepaper v1.2 — redesigned edition ("scientific instrument, not
 % crypto brochure"). Design review 2026-07-18 applied: epistemic-status pill
 % system, three technical figures (equation map / fold flow / evidence
@@ -106,11 +139,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.3}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.5}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.3)},
+  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.5)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, source d7906ff based on 16f05a8; benchmark record June--July 2026},
   pdfkeywords={SIGIL, BlockDAG, DagKnight, post-quantum, STARK, SQIsign, ML-KEM, fold, gossip delivery law}
@@ -140,7 +173,7 @@
 \end{tikzpicture}\\[10pt]
 {\Huge\bfseries\textcolor{ink}{SIGIL — The Variational Chain}}\\[8pt]
 {\Large An Experimental Provenance-Signed BlockDAG\\Organized by a Conjectural Effective Action}\\[10pt]
-{\normalsize Whitepaper v1.3 · 2026-07-22}\\[6pt]
+{\normalsize Whitepaper v1.5 · 2026-08-30}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[2pt]
 {\small source \texttt{d7906ff} · based on \texttt{16f05a8} · branch \texttt{feat/commons-tithe-routing-0.36.1}}\\[6pt]
@@ -235,6 +268,20 @@ record and raw data: \texttt{docs/research/delivery-law-live/MEASUREMENT.md}.
 \end{tcolorbox}
 
 \section{Introduction: why reinvent money, and why a chain needs an action}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.56\textwidth]{11-whole-story-dark.png}
+\caption{\small\textbf{The whole argument in one plate.} Top: the space of chains that
+\emph{could} be built --- most of them fading, unbuilt, unexamined. Middle: the successive
+constraints this paper imposes --- one action, measured laws, adversarial review ---
+each ring narrower than the last, the surviving thread brighter for having passed
+through. Bottom: what the thread lands on --- a braided ledger, from which verification
+leaves along redundant paths toward a single point of agreement. Everything in this
+document is one of those rings or one of those paths.}
+\label{fig:plate-whole}
+\end{figure}
+
 
 Money is the technology we are least allowed to get wrong and the one we most take on
 faith. Its supply is set by discretion, its settlement runs through intermediaries we are
@@ -492,6 +539,20 @@ correspondence is load-bearing, where it is suggestive, and where it is nothing 
 shared vocabulary. The programme's own discipline applies: each claim below is graded, and
 most of them are graded down.
 
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{06-constraint-collapse-dark.png}
+\caption{\small\textbf{What a constraint is worth.} A vast fog of candidate theories
+(left) passes through successive filters, each one a consistency requirement rather than
+a preference, until what survives is a single filament. This is the actual working
+method of modern high-energy physics --- and it is the only thing this chapter borrows
+from it. SIGIL's filters are not supersymmetry and unitarity; they are measurement,
+factorization across composed observables, and adversarial review. The \emph{shape} of
+the argument transfers; none of the physics does.}
+\label{fig:plate-collapse}
+\end{figure}
+
+
 \paragraph{First, a disclaimer that removes a common confusion.}
 SIGIL is post-quantum, and post-quantum cryptography is \emph{not} quantum physics. SQIsign,
 ML-KEM and the hash-based assumptions are ordinary classical mathematics chosen because no
@@ -616,6 +677,21 @@ The weakest are the gravitational and holographic readings, which are analogies 
 earned. And the one people expect to be here is absent: there is no quantum mechanics in
 SIGIL at all. Post-quantum cryptography means maths a quantum computer cannot break, not
 maths that uses one.}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{07-master-equation-object-dark.png}
+\caption{\small\textbf{One object, six fields.} The action of \S\ref{sec:action} is not
+six theories bolted together but one shape with six aspects: the violet fabric is the
+metric $g_{\mu\nu}$ (reputation as curvature), the gold river is the settlement current
+$J^\mu$, the breathing sphere is the emission scalar $\varphi$, the cyan filaments are
+the witness connection $A_\mu$, the braided cord is the topology $K$, and the three
+crystals are the disjoint hardness assumptions of $\Sigma$. The claim the paper is
+entitled to make is that every mechanism must belong to exactly one of them; the claim
+it is not yet entitled to make is that any mechanism has been \emph{derived} from the
+whole.}
+\label{fig:plate-object}
+\end{figure}
+
 
 \subsection{The fields}
 
@@ -873,6 +949,78 @@ discipline: model, simulation campaign, closed form, residual, provisioning rule
 regrade under review, and the promotion experiment the regrade demanded. (Standalone paper published at
 \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}.)
 
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{08-delivery-redundancy-dark.png}
+\caption{\small\textbf{Redundancy.} Three requests leave one node for three
+\emph{distinct} peers across a lossy medium. One is extinguished, one is scattered, one
+arrives --- and one arriving is all the law asks for. The whole of $D=1-p^{r}$ is the
+statement that the three fates are independent; everything interesting about the law is
+about when that stops being true.}
+\label{fig:plate-delivery}
+\end{figure}
+
+\paragraph{From a fitted law to a proved floor.}
+The rule above is an \emph{estimate}: a curve that fitted the measurements, then inverted
+past $r=3$ where nothing was measured. It can be replaced by a bound that is proved.
+Because SIGIL gossips to $r$ \textbf{distinct} peers --- sampling without replacement from
+a finite pool --- the failure statistic is not a moment $\mathbb{E}[p^{r}]$ but the
+normalised elementary symmetric mean $E_r = e_r(p_1,\dots,p_m)/\binom{m}{r}$, with
+$E_r = 1-D(r)$. Newton's inequalities, $E_r^{2}\ge E_{r-1}E_{r+1}$, then give a floor that
+holds for \emph{any} distribution of per-peer reliabilities:
+
+\begin{equation}
+\boxed{\;D(r) \;\ge\; 1 - E_3\!\left(\frac{E_3}{E_2}\right)^{r-3}\;}
+\qquad\text{provisioning}\qquad
+r^{*} = \min\{\,r : \text{floor}(r) \ge \mathrm{SLA}\,\}
+\end{equation}
+
+On the eight-peer set measured under burst loss the floor tracks the truth to within
+\measured{0.03--0.13 percentage points} and sits consistently \emph{above} the fitted law
+--- $0.88441$ against $0.88064$ at $r=4$ --- so the shipped $r=3$ default was already
+safe and the fitted rule was quietly giving away margin. At
+$\mathrm{SLA}=0.9999$ the proved rule asks for $r^{*}=17$ where the fitted rule demanded
+$18$: one fewer request per round, while promising more.
+
+\paragraph{The same inequality is an alarm --- and it fires.}
+Newton's inequality holds for any fixed peer set, so a violation is evidence, not noise.
+The cheap screen is the sign of $E_2-E_1^{2}$: negative means consistent finite-pool
+sampling and the floor is a guarantee; positive means the numbers cannot come from one
+fixed peer set --- either failures are correlated \emph{across} peers, or $p$ was not
+stationary while they were collected. Applied to the 2026-07-22 cells, the gate
+\textbf{fails}, and re-splitting each run at its own midpoint identifies the cause: the
+per-attempt failure rate rises by \measured{16--22 percentage points} between the first
+and second half of \emph{individual} runs, and the three $r$ values were measured as three
+consecutive blocks. The law itself is untouched --- it is confirmed, and conservative ---
+but the campaign as designed cannot support extrapolation past $r=3$, and the analyzer now
+suppresses the floor rather than publishing a guarantee it has not earned. The fix costs
+nothing and is shipped: \texttt{scripts/dp-sweep-interleaved.sh} runs the same total trials
+but interleaves $r$ in randomised rounds, so every $r$ samples the same drift ramp. Full
+treatment, with the data-integrity audit and the semi-synthetic tightness check:
+\url{https://quillon.xyz/downloads/sigil-delivery-law-positivity-v0.pdf}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.46\textwidth]{09-guaranteed-floor-dark.png}
+\hfill
+\raisebox{6pt}{\parbox[b]{0.50\textwidth}{\small\textbf{The floor.} The column is the
+delivery rate; the lower dashed line is the fitted law, the solid line above it the
+proved floor, and the hatched band between them is the margin the fitted rule gave away.
+Small in absolute terms --- and the difference between an estimate and a guarantee.}}
+\label{fig:plate-floor}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{10-network-drift-dark.png}
+\caption{\small\textbf{Why the alarm fired.} The same eight-peer lab mesh at the start of
+a measurement run (left) and at its end (right): identical topology, measurably frayed.
+A run-averaged failure rate over a ramp like this describes no moment of the experiment in
+particular --- which is exactly what a cross-$r$ consistency test detects, and why the
+measurement order now gets shuffled.}
+\label{fig:plate-drift}
+\end{figure}
+
 \layman{sigilcyan}{the delivery law}{If a letter gets lost one time in ten, send three
 copies — the chance all three vanish is one in a thousand. That's the entire law:
 $1-p^r$. We didn't guess it: 22 simulated storms matched it to half a percentage
@@ -883,6 +1031,19 @@ everywhere the network still functioned, and we learned two honest things the
 simulation couldn't teach: losses that matter are lost \emph{requests}, not lost
 packets, and when the network truly collapses, three copies stop saving you. The
 network \emph{calculates} how many copies to send — from measured numbers.}
+
+\layman{sigilamber}{the floor, and the alarm}{Two things got better here. First, ``send
+three copies'' stopped being a number we fitted to a graph and became a number we can
+prove: whatever the peers are like --- one dead, seven perfect, or anything between ---
+delivery cannot fall below a floor we can compute from what we already measured. The floor
+turned out to sit just above the old fitted curve, so the network was already safe and we
+were being slightly too pessimistic. Second, the same piece of maths doubles as an alarm
+bell for the one failure that redundancy cannot fix: peers failing \emph{together}. We
+rang it against our own data and it went off --- not because peers were failing together,
+but because the lab network was quietly getting worse while we measured it. The
+measurements are still good for what they measured. They are not good for guessing what
+happens at four copies, or five. So we shuffled the running order, which costs nothing,
+and now they will be.}
 
 \subsection{The fold: succinct whole-chain verification \hfill \stM}\label{sec:fold}
 
@@ -1210,6 +1371,19 @@ BLAKE3-pinned client key, and verifies the DNS tip anchor: an SQIsign-L5-signed
 \texttt{v=sigil1} TXT record at the apex, so a fresh node can authenticate the tip
 before speaking to any peer.
 
+\emph{No longer light-client-only, as of 2026-08-23} \hfill \stS. \texttt{sigil-top} now
+links \texttt{sigil-node}'s genesis, minting, and DAG-ordering logic directly as a shared
+library rather than duplicating it, and carries its own producer loop (seed
+$\to$ frontier $\to$ mint $\to$ settle) capable of running as a second, independent
+participant on \texttt{sigil-g0}. What is graded \stS here, precisely: an
+adversarial two-instance simulation — two producers racing each other and cross-feeding
+competing candidates in alternating arrival order — settles both instances to the
+identical chain (same height, same tip hash) every run, the same convergence property
+\S\ref{sec:consensus}'s S1--S6 gate checks for the braid generally. What is \emph{not}
+yet claimed: this loop has not been exercised against the live \texttt{sigil-g0} network.
+The gap between "proven correct offline" and "confirmed working live" is stated rather
+than elided, consistent with this paper's grading discipline throughout.
+
 \subsection{Dual-lane mining: $\Phi$ POWER $\times$ $\Omega$ TIME \hfill \stL}
 \label{sec:mining}
 
@@ -1317,7 +1491,7 @@ Solid is live; translucent is tested; wireframe is not yet earned.}
 
 \section{Predictions: the research scoreboard}\label{sec:predictions}
 
-The master equation earns its place only if it predicts. Status as of 2026-07-18:
+The master equation earns its place only if it predicts. Status as of 2026-08-27 (only row~2 has moved since 2026-07-18):
 
 \begin{center}
 \small
@@ -1329,9 +1503,14 @@ Prediction & Status & Evidence & Next falsification test \\
 \midrule
 1. Fork survival $\propto \exp(-\Delta R\,\tau_{\mathrm{block}})$ & \stO & none yet &
 fork-survival statistics vs.\ producer reputation \\
-2. PID non-oscillatory iff $K_p^2 \ge 4K_dK_i$ (corrected; char.\ eq.\
-$K_ds^2{+}K_ps{+}K_i{=}0$) & \stO & none yet & derive against the implemented
-controller, then tune to critical value on testnet \\
+2. Emission controller is non-oscillatory \emph{(restated v1.5 --- the
+implemented controller is not a PID)}. Real char.\ eq.\
+$\lambda^2-(1{+}K_p{-}x)\lambda+K_p=0$, loop gain $x\equiv\alpha K_pR^*/T$ &
+\stD & derived + driven against the REAL \texttt{EmissionController}: $+20\%$
+over-mint shock $\to$ $+0.42\%$ after 3{,}000 blocks, \textbf{0} error sign
+changes. \texttt{sigil-emission} 30/30 & measure on a live chain under real
+block-rate variance; decide whether $\lambda_1\!\to\!1$ (sub-exponential
+convergence) is acceptable, and split \texttt{CORRECTION\_SMOOTHING}'s two roles \\
 3. Topology commitment detects order-tampering forks & \stG & braid gates: 16/16
 orderings agree; tamper 5/5 rejected & land the header commitment; measure detection
 latency vs.\ state-root-only \\

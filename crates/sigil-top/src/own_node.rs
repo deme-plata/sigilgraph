@@ -41,6 +41,9 @@ use std::time::{Duration, Instant};
 pub const CHILD_ENV: &str = "SIGIL_TOP_NODE_CHILD";
 /// Where the node's local API answers (`http://127.0.0.1:<port>`), for the screen's own code.
 pub const API_ENV: &str = "SIGIL_TOP_NODE_API";
+/// The screen's process id, handed to its node child so the child can check "is the screen really gone?"
+/// before it stops (2026-10-24).
+const SCREEN_PID_ENV: &str = "SIGIL_TOP_SCREEN_PID";
 
 /// The node runs unless `SIGIL_TOP_NODE=0` — or, with no such setting, unless light mode was chosen with [F] (10.6.5).
 pub fn enabled() -> bool {
@@ -728,16 +731,36 @@ fn request_own_stop() {
 /// The node child of a screen: stop when the screen goes away (its end of our stdin closes — also when it
 /// crashes or is killed), then run the node.
 pub fn run_child() -> ExitCode {
-    let _ = std::thread::Builder::new().name("own-node-parent-watch".into()).spawn(|| {
+    let screen = std::env::var(SCREEN_PID_ENV).ok().and_then(|v| v.trim().parse::<u32>().ok());
+    let _ = std::thread::Builder::new().name("own-node-parent-watch".into()).spawn(move || {
         let mut buf = [0u8; 64];
         let mut stdin = std::io::stdin();
-        loop {
+        let mut errors = 0u32;
+        let mut why = loop {
             match stdin.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => continue,
+                Ok(0) => break "its end of our pipe closed".to_string(),
+                Ok(n) if buf[..n].windows(4).any(|w| w == b"stop") => break "the screen asked it to stop".to_string(),
+                Ok(_) => errors = 0,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    // 2026-10-24: a read ERROR is not proof the screen is gone. Ask the system instead.
+                    errors += 1;
+                    if errors == 1 { eprintln!("⚠ sigil-top node: reading the screen's pipe failed ({e})"); }
+                    if errors >= 5 || !screen.is_some_and(screen_alive) { break format!("reading its pipe failed ({e})"); }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        };
+        // Only an explicit `stop` ends the node while the screen still runs; a lost pipe means "watch the
+        // screen process instead".
+        if why != "the screen asked it to stop" {
+            if let Some(pid) = screen.filter(|p| screen_alive(*p)) {
+                eprintln!("⚠ sigil-top node: {why}, but the screen (pid {pid}) still runs — the node keeps running and watches the screen process instead");
+                while screen_alive(pid) { std::thread::sleep(Duration::from_secs(2)); }
+                why = "the screen process ended".to_string();
             }
         }
-        eprintln!("⏹ sigil-top node: the screen closed — stopping (state snapshot first)");
+        eprintln!("⏹ sigil-top node: the screen closed ({why}) — stopping (state snapshot first)");
         request_own_stop();
         // If the stop request was not delivered, do not linger after the screen is gone.
         std::thread::sleep(Duration::from_secs(40));
@@ -937,6 +960,7 @@ fn spawn_child(plan: &Plan) -> std::io::Result<Child> {
     let err = log.try_clone()?;
     let mut cmd = Command::new(exe());
     cmd.env(CHILD_ENV, "1")
+        .env(SCREEN_PID_ENV, std::process::id().to_string())
         .current_dir(&plan.data_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log))
@@ -955,6 +979,33 @@ fn spawn_child(plan: &Plan) -> std::io::Result<Child> {
 }
 
 /// Ask the node child to stop like systemd stops a node, wait for its snapshot, then make sure it is gone.
+/// Is the screen process `pid` still running? (Unix: it is still our parent. Windows: its process handle has not
+/// been signalled.) Used before a node child stops because its pipe to the screen went quiet or failed.
+#[cfg(unix)]
+fn screen_alive(pid: u32) -> bool {
+    extern "C" { fn kill(pid: i32, sig: i32) -> i32; fn getppid() -> i32; }
+    unsafe { getppid() == pid as i32 && kill(pid as i32, 0) == 0 }
+}
+#[cfg(windows)]
+fn screen_alive(pid: u32) -> bool {
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn WaitForSingleObject(h: *mut std::ffi::c_void, ms: u32) -> u32;
+        fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+    }
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    unsafe {
+        let h = OpenProcess(SYNCHRONIZE, 0, pid);
+        if h.is_null() { return false; }
+        let r = WaitForSingleObject(h, 0);
+        CloseHandle(h);
+        r == WAIT_TIMEOUT
+    }
+}
+#[cfg(not(any(unix, windows)))]
+fn screen_alive(_pid: u32) -> bool { false }
+
 fn stop_child(mut c: Child, wait: Duration) {
     #[cfg(unix)]
     unsafe {
@@ -966,7 +1017,9 @@ fn stop_child(mut c: Child, wait: Duration) {
         extern "system" { fn GenerateConsoleCtrlEvent(ev: u32, group: u32) -> i32; }
         GenerateConsoleCtrlEvent(1, c.id());
     }
-    drop(c.stdin.take()); // and the stdin watch, should the signal not arrive
+    // and the stdin watch, should the signal not arrive: an explicit `stop`, since a closed pipe alone no longer
+    // stops a node whose screen still runs (2026-10-24)
+    if let Some(mut s) = c.stdin.take() { let _ = s.write_all(b"stop\n"); let _ = s.flush(); }
     let t0 = Instant::now();
     while t0.elapsed() < wait {
         if let Ok(Some(_)) = c.try_wait() { return; }

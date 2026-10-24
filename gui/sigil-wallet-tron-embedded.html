@@ -7316,7 +7316,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 
   /* ── research library ── */
   var PAPERS=[
-    {t:'SIGIL Whitepaper v1.4',           s:10, c:'Protocol',   f:'SIGIL_WHITEPAPER_v1.pdf',           d:'The canonical paper: fold consensus, the braid, honest-money vows, two-axis evidence grading, delivery law, hardening backlog. Everything else is a companion to this.'},
+    {t:'SIGIL Whitepaper v1.6',           s:10, c:'Protocol',   f:'SIGIL_WHITEPAPER_v1.6.pdf',         d:'The canonical paper: one object, six fields — fold consensus, the braid, honest-money vows, two-axis evidence grading, delivery law. v1.6 (2026-10-24): honest status re-measured on the live g3 network. Everything else is a companion to this.'},
+    {t:'SIGIL — The State of the Art, Oct 2026', s:10, c:'Protocol', f:'sigil-state-of-the-art-whitepaper.pdf', d:'The plain-language overview: a private, post-quantum-minded proof-of-work braid you can run on your own computer — what runs, what is built and what is still a plan, explained for everyone. 12 pages, 2026-10-23.'},
     {t:'The Philosophy of SIGIL v0.3',    s:10, c:'Philosophy', f:'SIGIL_PHILOSOPHY_v0.pdf',           d:'Why the chain refuses to lie: honest money narrowed to what the graph can actually promise, the epistemology of measured vs simulated, fail-stop as an ethical stance.'},
     {t:'The Failure Atlas v0',            s:9,  c:'Failures',   f:'SIGIL_FAILURE_ATLAS_v0.pdf',        d:'How SIGIL breaks: 71 incidents in 10 classes — fork sagas, OOM kills, the memlimit mesh wedge, transport collapse. Failure modes as first-class published knowledge.'},
     {t:"The Builder's Chronicle v0",      s:9,  c:'Labor',      f:'SIGIL_BUILDERS_CHRONICLE_v0.pdf',   d:'Payroll on a public ledger: claim → ship → settle between an operator and its agents, with on-chain receipts as footnotes. Legibility, not scale, is the innovation.'},
@@ -7329,10 +7330,10 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     {t:'The Master Equation v0.2',        s:8,  c:'Protocol',   f:'SIGIL_MASTER_EQUATION_v0.2.pdf',    d:'One equation for the graph: the unified formal statement tying fold weight, braid ordering and settlement into a single object, with its terms defended.'},
     {t:'The Delivery Law',                s:8,  c:'Measurement',f:'sigil-top-delivery-law.pdf',        d:'The measured law of block delivery under loss — demoted from measured to simulated in its own review, then earned back with a real netem experiment (RMS 1.50pp).'},
     {t:'Verify-Once Horizontal Scaling',  s:7,  c:'Measurement',f:'review-verify-once-horizontal-scaling-on-sigil.pdf', d:'Technical review: verify a block once, serve it many times — what horizontal read-scaling on SIGIL buys and what it cannot.'},
-    {t:'SIGIL Whitepaper v0 (historical)',s:6,  c:'Protocol',   f:'SIGIL_WHITEPAPER_v0.pdf',           d:'The first whitepaper, kept for the record. Superseded by v1.4 — read it to see how much the chain had to unlearn.'}
+    {t:'SIGIL Whitepaper v0 (historical)',s:6,  c:'Protocol',   f:'SIGIL_WHITEPAPER_v0.pdf',           d:'The first whitepaper, kept for the record. Superseded by v1.6 — read it to see how much the chain had to unlearn.'}
   ];
   var CATS=['All','Protocol','Philosophy','Failures','Labor','Adversary','Physics','Measurement','Business','Impact'];
-  var DL='https://quillon.xyz/downloads/';
+  var DL='https://sigilgraph.org/downloads/'; // 2026-10-24: SIGIL papers live on the SIGIL home
   var cur='All';
   function scoreColor(s){ return s>=10?'var(--gold)':s>=9?'#21d4fd':s>=8?'#00e0c6':'#a78bfa'; }
   function chips(){

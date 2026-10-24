@@ -140,8 +140,9 @@ mod shield_ops {
     }
     #[cfg(not(test))]
     fn ctx_node() -> String {
-        // 2026-10-23: the money node, never the mining relay (see `top_core::money_node_url`).
-        crate::top_core::money_node_url()
+        // 2026-10-23: the money node, never the mining relay (see `top_core::money_node_url`). 2026-10-24: your own
+        // node once it is caught up — payments then travel over P2P (see `top_core::money_submit_url`).
+        crate::top_core::money_submit_url()
     }
 
     #[cfg(test)]
@@ -662,6 +663,7 @@ fn deposit_opening(account: &ShieldedAccount, index: u64, value: u64) -> Result<
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        crate::mine_local_api::spawn_network_safety_net(client.clone(), node.to_string(), txid.clone(), "/v1/shield", payload.clone());
                         landed.push(
                             serde_json::json!({"txid": txid, "value": value, "index": this_index, "generation": generation}),
                         );
@@ -1165,6 +1167,7 @@ fn deposit_opening(account: &ShieldedAccount, index: u64, value: u64) -> Result<
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        crate::mine_local_api::spawn_network_safety_net(client.clone(), node.to_string(), txid.clone(), "/v1/shielded_send", payload.clone());
 
         // CONFIRM ON SETTLE — and the settlement identity is the NULLIFIER, not the txid.
         //
@@ -1922,5 +1925,46 @@ mod reply_tests {
         assert_eq!(v["outcome_unknown"], true);
         assert_eq!(v["nullifier"], "ab12");
         assert!(v["error"].as_str().unwrap().contains("MAY have been submitted"));
+    }
+}
+
+/// 2026-10-24 (Viktor: payments "should definitely go over p2p"): the safety net for a deposit or payment sent through
+/// YOUR node ([`crate::top_core::money_submit_url`]). Your node checks it and relays it over P2P — measured on live g3,
+/// follower → block-maker in 0.7 s. If the network's server still answers `"unknown"` for `txid` after 10 s, the SAME
+/// request goes there too: the block-maker refuses a second copy (spent nullifier / replayed request number), so this
+/// can never pay twice, and a payment can never vanish inside one node (sigil-field's ask). It runs BESIDE the payment,
+/// so the normal path is exactly as fast as before. Nothing to do when `node` already is the network.
+pub(crate) fn spawn_network_safety_net(client: reqwest::blocking::Client, node: String, txid: String, path: &'static str, payload: serde_json::Value) {
+    #[cfg(test)]
+    {
+        let _ = (client, node, txid, path, payload);
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let network = crate::top_core::money_node_url();
+        if txid.is_empty() || node.trim_end_matches('/') == network.trim_end_matches('/') {
+            return;
+        }
+        let _ = std::thread::Builder::new().name("money-safety-net".into()).spawn(move || {
+            let short = txid.chars().take(12).collect::<String>();
+            let status_url = format!("{}/v1/transactions/{}", network.trim_end_matches('/'), txid);
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(10) {
+                let st = client.get(&status_url).timeout(std::time::Duration::from_secs(5)).send().ok()
+                    .and_then(|r| r.json::<serde_json::Value>().ok())
+                    .and_then(|v| v.pointer("/data/status").and_then(|s| s.as_str()).map(str::to_string));
+                if let Some(s) = st.filter(|s| s != "unknown") {
+                    crate::tlog!("[money] {path} {short}… reached the network over P2P in {:.1} s ({s})", t0.elapsed().as_secs_f64());
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            let url = format!("{}{}", network.trim_end_matches('/'), path);
+            match client.post(&url).json(&payload).timeout(std::time::Duration::from_secs(30)).send() {
+                Ok(r) => crate::tlog!("[money] {path} {short}… was still unknown to the network after 10 s — sent it there directly too (HTTP {})", r.status().as_u16()),
+                Err(e) => crate::tlog!("[money] {path} {short}… unknown to the network after 10 s, and the direct send failed too: {e}"),
+            }
+        });
     }
 }

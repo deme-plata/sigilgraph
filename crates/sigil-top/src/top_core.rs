@@ -647,6 +647,11 @@ pub(crate) fn leading_zero_bits(d: &[u8]) -> u32 {
 /// motif that glows HOT while [M]ining. Honest: SIGIL P0 is verify-once, so "network power"
 /// is the real block-production throughput + emission, not a fictional global hashrate;
 /// personal hashrate IS real local BLAKE work.
+/// The network's server for anything not answered by your own node: HTTPS through the sigilgraph.org gate (it
+/// routes /v1 and /api to the block-maker's API). Was plain `http://sigilgraph.quillon.xyz:18181` until 2026-10-24
+/// — a payment, a balance and a mining share all crossed the internet unencrypted.
+pub(crate) const NETWORK_NODE_URL: &str = "https://sigilgraph.org";
+
 /// v7.1.15: the engine's node base-URL — the braid (sigil-node), NOT the legacy
 /// sigil-rpcd chain. Same wire contract (`/api/v1/mining/{challenge,submit}`,
 /// `sigil-api::mining`'s wire-compatible aliases), so this is a URL-only change:
@@ -667,7 +672,7 @@ pub(crate) fn engine_node_url() -> String {
     if mining_relay::relay_is_up() {
         return mining_relay::url();
     }
-    "http://sigilgraph.quillon.xyz:18181".into()
+    NETWORK_NODE_URL.into()
 }
 
 /// 2026-10-23 (Viktor: "yes make the wallet use my own node"): where the wallet READS chain state from — balances,
@@ -691,7 +696,8 @@ pub(crate) fn wallet_read_url(fallback: &str) -> String {
 /// the mining node, and once this node has verified the chain it answers with the local mining relay, which serves
 /// only the miner protocol and refused every payment ("mining relay: only /api/v1/mining/…"). Same choice minus the
 /// relay: an explicit `SIGIL_MINE_NODE` (an operator choice — a rehearsal launch still points everything at one
-/// node), else `SIGIL_NODE_URL` (the node [W]'s page proxy reads), else the network's producer.
+/// node), else `SIGIL_NODE_URL` (the node [W]'s page proxy reads), else the network's producer. Used for READS a
+/// money call needs (recipient keys, balances, nullifier checks); SENDS use [`money_submit_url`].
 pub(crate) fn money_node_url() -> String {
     if let Ok(v) = std::env::var("SIGIL_MINE_NODE") {
         return v;
@@ -699,7 +705,23 @@ pub(crate) fn money_node_url() -> String {
     if let Ok(v) = std::env::var("SIGIL_NODE_URL") {
         return v;
     }
-    "http://sigilgraph.quillon.xyz:18181".into()
+    NETWORK_NODE_URL.into()
+}
+
+/// 2026-10-24 (Viktor: payments "should definitely go over p2p"): where a deposit or payment is SENT. Your own node
+/// once it runs and is caught up (the rule of [`wallet_read_url`]): it checks the payment and relays it over P2P;
+/// measured on live g3, follower → block-maker in 0.7 s with no HTTP between. Otherwise the network's server over
+/// HTTPS. An explicit `SIGIL_MINE_NODE` / `SIGIL_NODE_URL` always wins. The safety net for a payment that never
+/// leaves your node: [`crate::mine_local_api::spawn_network_safety_net`].
+pub(crate) fn money_submit_url() -> String {
+    if std::env::var("SIGIL_MINE_NODE").is_ok() || std::env::var("SIGIL_NODE_URL").is_ok() {
+        return money_node_url();
+    }
+    #[cfg(feature = "producer")]
+    if let Some(a) = crate::own_node::caught_up_api() {
+        return a;
+    }
+    money_node_url()
 }
 
 

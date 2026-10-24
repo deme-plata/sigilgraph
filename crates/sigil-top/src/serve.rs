@@ -410,7 +410,7 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
         let mut source = source;
         if source == "your-node" && (status.starts_with("502") || status.starts_with("504")) {
             // your node stopped between two looks — ask the network instead of showing an error
-            let net = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+            let net = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| crate::top_core::NETWORK_NODE_URL.into());
             (status, body, ct) = proxy_api_to(&net, &method, path, &req_body_bytes, &req_content_type);
             source = "network";
         }
@@ -1079,7 +1079,7 @@ fn own_node_may_answer(method: &str, path: &str) -> bool {
 
 /// Where the [W] page's request goes, and the label its answer carries (`X-Sigil-Node`).
 fn proxy_target(method: &str, path: &str) -> (String, &'static str) {
-    let network = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+    let network = std::env::var("SIGIL_NODE_URL").unwrap_or_else(|_| crate::top_core::NETWORK_NODE_URL.into());
     if std::env::var_os("SIGIL_NODE_URL").is_none() && own_node_may_answer(method, path) {
         #[cfg(feature = "producer")]
         if let Some(a) = crate::own_node::caught_up_api() {
@@ -1092,7 +1092,7 @@ fn proxy_target(method: &str, path: &str) -> (String, &'static str) {
 #[allow(dead_code)]
 fn proxy_api(method: &str, path_and_query: &str, req_body: &[u8], content_type: &str) -> (String, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
-        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+        .unwrap_or_else(|_| crate::top_core::NETWORK_NODE_URL.into());
     proxy_api_to(&node, method, path_and_query, req_body, content_type)
 }
 

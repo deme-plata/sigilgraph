@@ -103,7 +103,7 @@ pub(crate) fn dispatch(argv: &[String]) -> bool {
                     // targeted the braid API — a user reading the banner concluded their
                     // wallet was wired to a dead backend (2026-09-05).
                     let node = std::env::var("SIGIL_NODE_URL")
-                        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+                        .unwrap_or_else(|_| crate::top_core::NETWORK_NODE_URL.into());
                     println!("\n  sigil-top serve → http://localhost:{port}/  (wallet at /, /api + /v1 → {node})");
                     println!("  embedded out-of-the-box — no dist dir needed. Ctrl-C to stop.\n");
                     loop { std::thread::sleep(Duration::from_secs(3600)); }

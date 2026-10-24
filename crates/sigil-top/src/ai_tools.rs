@@ -152,7 +152,7 @@ pub(crate) fn start_balance_poller() {
     POLLER.call_once(|| {
         std::thread::spawn(|| loop {
             // 2026-10-23: your own node when it is caught up, the network otherwise.
-            let base = crate::top_core::wallet_read_url("http://sigilgraph.quillon.xyz:18181");
+            let base = crate::top_core::wallet_read_url(crate::top_core::NETWORK_NODE_URL);
             let wallet = crate::miner_wallet();
             if is_wallet(&wallet) {
                 if let Ok(j) = get(base.trim_end_matches('/'), &format!("/v1/balance?wallet={wallet}")) {
@@ -184,7 +184,7 @@ fn balance_stream() {
     };
     let mut pause = 2u64;
     loop {
-        let base = crate::top_core::wallet_read_url("http://sigilgraph.quillon.xyz:18181");
+        let base = crate::top_core::wallet_read_url(crate::top_core::NETWORK_NODE_URL);
         let wallet = crate::miner_wallet();
         if is_wallet(&wallet) {
             let url = format!("{}/v1/events?kinds=balance&wallet={wallet}", base.trim_end_matches('/'));
@@ -201,7 +201,7 @@ fn balance_stream() {
                         if checked.elapsed() >= std::time::Duration::from_secs(15) {
                             checked = std::time::Instant::now();
                             if crate::miner_wallet() != wallet
-                                || crate::top_core::wallet_read_url("http://sigilgraph.quillon.xyz:18181") != base
+                                || crate::top_core::wallet_read_url(crate::top_core::NETWORK_NODE_URL) != base
                             {
                                 break; // another wallet, or your node caught up / fell behind: reconnect there
                             }

@@ -219,6 +219,49 @@ pub fn save_state(snap: &StateSnapshot, dir: &Path) -> std::io::Result<u64> {
 /// Load + verify the state snapshot. `None` ⇒ missing, torn, checksum-corrupt,
 /// version-mismatched, or internally inconsistent — boot then falls back to
 /// the full-replay path (never trusts a bad snapshot).
+/// 2026-10-24: WHY `load_state` returned `None` — the first failing check, in the order `verify_snapshot_bytes` runs
+/// them. Boot prints it (Viktor's Windows node said only "missing or failed checksum/decode" at every start).
+pub fn diagnose_state(dir: &Path) -> String {
+    let path = state_snapshot_path(dir);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return "missing: no state-snapshot.bin".into(),
+        Err(e) => return format!("unreadable: {e}"),
+    };
+    if bytes.len() < 36 { return format!("too short: {} bytes", bytes.len()); }
+    let siglen = u16::from_be_bytes([bytes[32], bytes[33]]) as usize;
+    let pklen_at = 34 + siglen;
+    if bytes.len() < pklen_at + 2 { return format!("truncated inside the signature ({} bytes, signature {siglen})", bytes.len()); }
+    let pklen = u16::from_be_bytes([bytes[pklen_at], bytes[pklen_at + 1]]) as usize;
+    let pk_start = pklen_at + 2;
+    if bytes.len() < pk_start + pklen { return format!("truncated inside the signer key ({} bytes)", bytes.len()); }
+    let (sig, pk, payload) = (&bytes[34..pklen_at], &bytes[pk_start..pk_start + pklen], &bytes[pk_start + pklen..]);
+    if blake3::hash(payload).as_bytes() != &bytes[0..32] { return format!("checksum mismatch ({} payload bytes — torn or damaged)", payload.len()); }
+    match load_sq_pubkey(dir) {
+        Some(expected) if expected != pk => return "signer key mismatch: snapshot-sqisign.pk is not the key this snapshot was signed with".into(),
+        None => return "the signer key file snapshot-sqisign.pk is missing or empty".into(),
+        _ => {}
+    }
+    match flux_sqisign::verify(&bytes[0..32], sig, pk) {
+        Ok(true) => {}
+        Ok(false) => return "SQIsign signature does not verify".into(),
+        Err(e) => return format!("SQIsign verify error: {e}"),
+    }
+    let snap: StateSnapshot = match rmp_serde::from_slice(payload) {
+        Ok(s) => s,
+        Err(e) => return format!("decode error: {e}"),
+    };
+    if snap.version != STATE_SNAPSHOT_VERSION { return format!("version {} (this build reads {})", snap.version, STATE_SNAPSHOT_VERSION); }
+    if snap.blocks.is_empty()
+        || snap.blocks.last().map(|b| b.header.height) != Some(snap.snapshot_height)
+        || snap.blocks.first().map(|b| b.header.height) != Some(snap.base_height)
+        || snap.snapshot_height + 1 - snap.base_height != snap.blocks.len() as u64
+    {
+        return format!("window inconsistent (H={}, base {}, {} blocks)", snap.snapshot_height, snap.base_height, snap.blocks.len());
+    }
+    "no check fails (it loads)".into()
+}
+
 pub fn load_state(dir: &Path) -> Option<StateSnapshot> {
     let bytes = std::fs::read(state_snapshot_path(dir)).ok()?;
     verify_snapshot_bytes(&bytes, load_sq_pubkey(dir).as_deref())
@@ -296,6 +339,21 @@ pub fn verify_snapshot_bytes(bytes: &[u8], expected_pk: Option<&[u8]>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnose_names_the_failing_check() {
+        let d = std::env::temp_dir().join(format!("sigil-snapdiag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(diagnose_state(&d).starts_with("missing"), "{}", diagnose_state(&d));
+        std::fs::write(state_snapshot_path(&d), [0u8; 10]).unwrap();
+        assert!(diagnose_state(&d).starts_with("too short"), "{}", diagnose_state(&d));
+        let mut junk = vec![0u8; 200];
+        junk[32] = 0; junk[33] = 4; // siglen 4
+        std::fs::write(state_snapshot_path(&d), &junk).unwrap();
+        assert!(diagnose_state(&d).starts_with("checksum mismatch"), "{}", diagnose_state(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn save_load_roundtrip_losing_shards() {

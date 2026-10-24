@@ -1023,8 +1023,8 @@ fn run_start() -> Result<()> {
                         snap.snapshot_height, chain_log.height());
                 }
                 None => {
-                    eprintln!("ℹ no usable state snapshot at {} (missing or failed checksum/decode) — full replay",
-                        snapshot::state_snapshot_path(&snap_dir).display());
+                    eprintln!("ℹ no usable state snapshot at {} ({}) — full replay",
+                        snapshot::state_snapshot_path(&snap_dir).display(), snapshot::diagnose_state(&snap_dir));
                 }
             }
             // ── GENESIS GUARD L2: count APPLIED vs READ during replay. If the log has

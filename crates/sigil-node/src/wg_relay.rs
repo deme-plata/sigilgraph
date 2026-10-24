@@ -162,6 +162,14 @@ pub fn ensure_up(db_path: &Path, node_id: &str) -> Option<Arc<WgState>> {
         .unwrap_or(false);
 
     if !already_up {
+        // 2026-10-24: never overwrite ANOTHER node's interface config on this machine (see the module fix note).
+        let conf = std::path::Path::new("/etc/wireguard").join(format!("{IFACE}.conf"));
+        if let Ok(existing) = std::fs::read_to_string(&conf) {
+            if conf_private_key(&existing).as_deref() != Some(private_key.to_base64().as_str()) {
+                eprintln!("⚠ wg-relay: {} belongs to another node on this machine — leaving it alone; this node runs without the WG side-mesh", conf.display());
+                return None;
+            }
+        }
         let peers = load_peers_manifest_for(db_path, IFACE);
         let interface = WgInterface {
             name: IFACE.to_string(),
@@ -209,6 +217,23 @@ pub fn our_hello(state: &WgState) -> WgHelloMsg {
 /// Apply a peer's Hello: live `wg set` + persist to the manifest, using the
 /// IP we recorded for them at connect time. No-op (not an error) if we never
 /// saw a PeerConnected for them, or if they're already peered.
+/// `PrivateKey = …` of a wg-quick config, if present.
+fn conf_private_key(conf: &str) -> Option<String> {
+    conf.lines().find_map(|l| {
+        let l = l.trim();
+        let rest = l.strip_prefix("PrivateKey")?;
+        Some(rest.trim_start().strip_prefix('=')?.trim().to_string())
+    })
+}
+
+/// A side-mesh address a peer may claim: `SUBNET_PREFIX.1`–`.254`, and not ours.
+fn valid_mesh_ip(claimed: &str, ours: &str) -> bool {
+    let Ok(ip) = claimed.parse::<std::net::Ipv4Addr>() else { return false };
+    let o = ip.octets();
+    let prefix: Vec<u8> = SUBNET_PREFIX.split('.').filter_map(|x| x.parse().ok()).collect();
+    prefix.len() == 3 && o[..3] == prefix[..] && (1..=254).contains(&o[3]) && claimed != ours
+}
+
 pub fn handle_hello(state: &Arc<WgState>, peer: flux_p2p::PeerId, hello: &WgHelloMsg) {
     if state.pubkey_b64 == hello.pubkey_b64 {
         return; // a hello echoed back to ourselves — never peer with our own key
@@ -234,6 +259,12 @@ pub fn handle_hello(state: &Arc<WgState>, peer: flux_p2p::PeerId, hello: &WgHell
             return;
         }
     };
+    // 2026-10-24 (audit): the claimed address becomes AllowedIPs — and an OS route on the next wg-quick up.
+    if !valid_mesh_ip(&hello.wg_ip, &state.wg_ip) {
+        eprintln!("⚠ wg-relay: {peer} claimed wg_ip {:?} — outside {SUBNET_PREFIX}.1–254 or our own; not peering", hello.wg_ip);
+        state.already_peered.lock().unwrap().remove(&hello.pubkey_b64);
+        return;
+    }
     let allowed = format!("{}/32", hello.wg_ip);
 
     // Live apply — best-effort, matching run_wg_add_peer's own tolerance:
@@ -287,6 +318,24 @@ fn save_peers_manifest_for(db_path: &Path, iface: &str, peers: &[WgPeer]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_may_claim_only_a_side_mesh_address_not_ours() {
+        assert!(valid_mesh_ip("10.99.0.40", "10.99.0.112"));
+        assert!(!valid_mesh_ip("10.99.0.112", "10.99.0.112"), "our own address");
+        assert!(!valid_mesh_ip("8.8.8.8", "10.99.0.112"), "an outside address would become an OS route");
+        assert!(!valid_mesh_ip("10.99.1.5", "10.99.0.112"));
+        assert!(!valid_mesh_ip("10.99.0.0", "10.99.0.112"));
+        assert!(!valid_mesh_ip("10.99.0.255", "10.99.0.112"));
+        assert!(!valid_mesh_ip("0.0.0.0/0", "10.99.0.112"));
+        assert!(!valid_mesh_ip("not-an-ip", "10.99.0.112"));
+    }
+
+    #[test]
+    fn the_config_key_is_read_back() {
+        assert_eq!(conf_private_key("[Interface]\nPrivateKey = abc123=\nListenPort = 51822\n").as_deref(), Some("abc123="));
+        assert_eq!(conf_private_key("[Interface]\nListenPort = 1\n"), None);
+    }
 
     #[test]
     fn host_octet_is_deterministic_and_in_range() {

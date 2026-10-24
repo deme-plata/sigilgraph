@@ -1081,6 +1081,27 @@ fn run_start() -> Result<()> {
         let snapshot_every: u64 = std::env::var("SIGIL_SNAPSHOT_EVERY")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
         let snap_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 📸 2026-10-24: nodes that do not make blocks (user nodes, followers) save one along the way too —
+        // every `snapshot_every` blocks while catching up, every SIGIL_SNAPSHOT_EVERY_SECS (600) at the tip —
+        // so a crash, a closed window or a power cut costs minutes instead of a replay of the whole chain.
+        let follower_snap_secs: u64 = std::env::var("SIGIL_SNAPSHOT_EVERY_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        // …but never closer than SIGIL_SNAPSHOT_MIN_GAP_SECS (60): at 16k blk/s a pure block rule would save every
+        // ~6 s, and each save costs a SQIsign signature (1–4 s) plus ~20–30 MB of writing.
+        let follower_snap_min_gap = std::time::Duration::from_secs(std::env::var("SIGIL_SNAPSHOT_MIN_GAP_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(60));
+        let mut follower_snap_last_h: u64 = chain.height();
+        // "Long ago", so the first block after boot already saves one. checked_sub: on Windows an Instant counts
+        // from boot, and `now - 10 min` right after a PC starts would panic.
+        let mut follower_snap_last_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(follower_snap_secs))
+            .unwrap_or_else(std::time::Instant::now);
+        let mut state_snap_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        state_snap_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        if !produce && (snapshot_every > 0 || follower_snap_secs > 0) {
+            eprintln!("📸 state snapshot every {} blocks or {} s of progress → {}",
+                snapshot_every, follower_snap_secs, snapshot::state_snapshot_path(&snap_dir).display());
+        }
         if produce && snapshot_every > 0 {
             eprintln!("📸 state snapshot every {} blocks → {}",
                 snapshot_every, snapshot::state_snapshot_path(&snap_dir).display());
@@ -2232,7 +2253,7 @@ fn run_start() -> Result<()> {
                                 eprintln!("⏹ graceful shutdown: frontier fully settled at H={} ({:.1}s)",
                                     settled_tip, t0.elapsed().as_secs_f64());
                             }
-                            shutdown_snapshot(&chain, &snap_dir);
+                            shutdown_snapshot(&chain, &snap_dir, &snap_inflight);
                             let _ = mgr.stop().await;
                             return Ok::<(), anyhow::Error>(());
                         }
@@ -2915,6 +2936,34 @@ fn run_start() -> Result<()> {
                         dag_snapshot_bridge.update(br.recent_summary(200), br.ghostdag_k());
                     }
                 }
+                _ = state_snap_tick.tick() => {
+                    // 📸 2026-10-24: the periodic snapshot of a node that does not make blocks (see above).
+                    let h = chain.height();
+                    let due = !produce && h > follower_snap_last_h
+                        && follower_snap_last_at.elapsed() >= follower_snap_min_gap
+                        && ((snapshot_every > 0 && h >= follower_snap_last_h + snapshot_every)
+                            || (follower_snap_secs > 0 && follower_snap_last_at.elapsed() >= std::time::Duration::from_secs(follower_snap_secs)));
+                    if due && !snap_inflight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        match snapshot::StateSnapshot::capture(&chain) {
+                            Some(snap) => {
+                                follower_snap_last_h = h;
+                                follower_snap_last_at = std::time::Instant::now();
+                                let dir = snap_dir.clone();
+                                let flag = std::sync::Arc::clone(&snap_inflight);
+                                std::thread::spawn(move || {
+                                    let t0 = std::time::Instant::now();
+                                    match snapshot::save_state(&snap, &dir) {
+                                        Ok(bytes) => eprintln!("📸 state snapshot @ H={} ({} B, {:.2}s write, periodic)",
+                                            snap.snapshot_height, bytes, t0.elapsed().as_secs_f64()),
+                                        Err(e) => eprintln!("⚠ periodic state snapshot @ H={} failed: {}", snap.snapshot_height, e),
+                                    }
+                                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                });
+                            }
+                            None => snap_inflight.store(false, std::sync::atomic::Ordering::SeqCst),
+                        }
+                    }
+                }
                 _ = tokio::signal::ctrl_c() => {
                     if produce && shutting_down.is_none() {
                         eprintln!("⏹ sigil-node — SIGINT: minting stopped, settling the frontier before exit (≤{} ms)", shutdown_grace_ms);
@@ -2922,7 +2971,7 @@ fn run_start() -> Result<()> {
                         producing = false;
                     } else if !produce {
                         eprintln!("⏹ sigil-node — SIGINT received, writing a state snapshot and shutting down");
-                        shutdown_snapshot(&chain, &snap_dir);
+                        shutdown_snapshot(&chain, &snap_dir, &snap_inflight);
                         let _ = mgr.stop().await;
                         return Ok::<(), anyhow::Error>(());
                     } else {
@@ -2938,7 +2987,7 @@ fn run_start() -> Result<()> {
                         producing = false;
                     } else if !produce {
                         eprintln!("⏹ sigil-node — SIGTERM received, writing a state snapshot and shutting down");
-                        shutdown_snapshot(&chain, &snap_dir);
+                        shutdown_snapshot(&chain, &snap_dir, &snap_inflight);
                         let _ = mgr.stop().await;
                         return Ok::<(), anyhow::Error>(());
                     } else {
@@ -6526,7 +6575,13 @@ mod dag_wiring_tests {
 /// at the exact tip instead of replaying the log tail — and, for a follower whose periodic
 /// snapshot is millions of blocks stale (happysrv: 4,099,999 vs a 5.1M tip), instead of a
 /// multi-minute full replay. Failure is logged and non-fatal: boot falls back to the log.
-fn shutdown_snapshot(chain: &ChainTip, dir: &std::path::Path) {
+fn shutdown_snapshot(chain: &ChainTip, dir: &std::path::Path, inflight: &std::sync::atomic::AtomicBool) {
+    // A periodic write may still be running; both use state-snapshot.tmp. Let it finish (≤ 15 s) and keep the
+    // flag, so no new periodic write starts behind us (2026-10-24).
+    let w0 = std::time::Instant::now();
+    while inflight.swap(true, std::sync::atomic::Ordering::SeqCst) && w0.elapsed() < std::time::Duration::from_secs(15) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let t0 = std::time::Instant::now();
     match snapshot::StateSnapshot::capture(chain) {
         Some(snap) => match snapshot::save_state(&snap, dir) {

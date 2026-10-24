@@ -949,6 +949,7 @@ fn run_start() -> Result<()> {
             // incomplete tail) logs WHY and falls back to the full-replay path below,
             // which stays byte-for-byte unchanged.
             let t_boot = std::time::Instant::now();
+            early_stop::install(); // 2026-10-24: a stop during the rebuild saves a snapshot instead of losing the replay
             let mut booted_from_snapshot = false;
             match snapshot::load_state(&snap_dir) {
                 Some(snap) if snap.snapshot_height < chain_log.height() => {
@@ -971,8 +972,23 @@ fn run_start() -> Result<()> {
                         let snap_h = snap.snapshot_height;
                         let mut restored = snap.restore();
                         let mut tail_applied: u64 = 0;
+                        // 2026-10-24: tell the screen what is going on (its API view is silent until boot ends)
+                        let tail_top = chain_log.tip_real_height().unwrap_or(snap_h);
+                        let mut tail_seen: u64 = 0;
+                        let mut last_pw = boot_progress_long_ago();
+                        let tail_gap = std::time::Duration::from_secs(std::env::var("SIGIL_SNAPSHOT_MIN_GAP_SECS")
+                            .ok().and_then(|v| v.parse().ok()).unwrap_or(60));
+                        let mut tail_rs = std::time::Instant::now();
+                        let tail_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         match chain_log::ChainLog::replay_from(&snap_dir, snap_h + 1, |b| {
                             if restored.apply(b).is_ok() { tail_applied += 1; }
+                            tail_seen += 1;
+                            if early_stop::requested() { early_stop::save_and_exit(&restored, &snap_dir, "the tail replay"); }
+                            early_stop::maybe_rebuild_snapshot(&restored, &snap_dir, &mut tail_rs, tail_gap, &tail_inflight, "the tail replay");
+                            if last_pw.elapsed() >= std::time::Duration::from_secs(1) {
+                                write_boot_progress(&snap_dir, "tail", snap_h + tail_seen, tail_top);
+                                last_pw = std::time::Instant::now();
+                            }
                         }) {
                             Ok(tail_read) => {
                                 // 2026-08-20 (part 2 of the same bug): `chain_log.height()`
@@ -1016,8 +1032,24 @@ fn run_start() -> Result<()> {
             // genesis that appends to the existing log (the exact incident failure mode).
             if !booted_from_snapshot {
             let mut applied: u64 = 0;
+            // 2026-10-24: the full replay is the slow one — minutes on a PC — and the API is silent meanwhile
+            let replay_top = chain_log.tip_real_height().unwrap_or(0);
+            let mut seen: u64 = 0;
+            let mut last_pw = boot_progress_long_ago();
+            let rebuild_gap = std::time::Duration::from_secs(std::env::var("SIGIL_SNAPSHOT_MIN_GAP_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(60));
+            let mut last_rs = std::time::Instant::now();
+            let rs_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let n = chain_log::ChainLog::replay(&snap_dir, |b| {
                 if chain.apply(b).is_ok() { applied += 1; }
+                seen += 1;
+                if early_stop::requested() { early_stop::save_and_exit(&chain, &snap_dir, "the rebuild"); }
+                // 📸 2026-10-24: a long rebuild saves along the way too, so an interrupted one resumes instead of restarting
+                early_stop::maybe_rebuild_snapshot(&chain, &snap_dir, &mut last_rs, rebuild_gap, &rs_inflight, "the rebuild");
+                if last_pw.elapsed() >= std::time::Duration::from_secs(1) {
+                    write_boot_progress(&snap_dir, "replay", seen, replay_top);
+                    last_pw = std::time::Instant::now();
+                }
             }).map_err(|e| anyhow!("chain.log replay: {}", e))?;
             if n > 0 && (applied == 0 || chain.height() == 0) {
                 eprintln!("\n🛑 FATAL: replay read {} blocks but applied {} (chain at H={}).", n, applied, chain.height());
@@ -1081,6 +1113,8 @@ fn run_start() -> Result<()> {
         let snapshot_every: u64 = std::env::var("SIGIL_SNAPSHOT_EVERY")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
         let snap_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        clear_boot_progress(&snap_dir); // boot is over: the API answers from here on
+        early_stop::mark_booted(); // from here the tokio handlers decide; no raw "exit now" escape
         // 📸 2026-10-24: nodes that do not make blocks (user nodes, followers) save one along the way too —
         // every `snapshot_every` blocks while catching up, every SIGIL_SNAPSHOT_EVERY_SECS (600) at the tip —
         // so a crash, a closed window or a power cut costs minutes instead of a replay of the whole chain.
@@ -1096,6 +1130,8 @@ fn run_start() -> Result<()> {
         let mut follower_snap_last_at = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(follower_snap_secs))
             .unwrap_or_else(std::time::Instant::now);
+        let mut early_stop_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        early_stop_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut state_snap_tick = tokio::time::interval(std::time::Duration::from_secs(30));
         state_snap_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         if !produce && (snapshot_every > 0 || follower_snap_secs > 0) {
@@ -2934,6 +2970,17 @@ fn run_start() -> Result<()> {
                 _ = dag_snapshot_tick.tick() => {
                     if let Some(br) = braid.as_ref() {
                         dag_snapshot_bridge.update(br.recent_summary(200), br.ghostdag_k());
+                    }
+                }
+                _ = early_stop_tick.tick() => {
+                    // 2026-10-24: Windows' window-close (CTRL_CLOSE) has no tokio listener here; `early_stop` holds the
+                    // window open ≤ 4.5 s while this saves.
+                    if !produce && early_stop::requested() {
+                        eprintln!("⏹ sigil-node — the window is closing: writing a state snapshot and shutting down");
+                        shutdown_snapshot(&chain, &snap_dir, &snap_inflight);
+                        early_stop::mark_saved();
+                        let _ = mgr.stop().await;
+                        return Ok::<(), anyhow::Error>(());
                     }
                 }
                 _ = state_snap_tick.tick() => {
@@ -6575,6 +6622,24 @@ mod dag_wiring_tests {
 /// at the exact tip instead of replaying the log tail — and, for a follower whose periodic
 /// snapshot is millions of blocks stale (happysrv: 4,099,999 vs a 5.1M tip), instead of a
 /// multi-minute full replay. Failure is logged and non-fatal: boot falls back to the log.
+/// 2026-10-24: while a node rebuilds its state from blocks it already has (`chain.log` replay), its API is not up, and a
+/// screen showed "height 0 · peers 0 · stalled" for minutes. `<snapshot dir>/boot-progress.json` says what is happening:
+/// `{"phase":"replay"|"tail","done":N,"total":M,"ts":unix}`. Best effort — a failed write only costs the screen's text.
+fn write_boot_progress(dir: &std::path::Path, phase: &str, done: u64, total: u64) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let tmp = dir.join("boot-progress.json.tmp");
+    if std::fs::write(&tmp, format!("{{\"phase\":\"{phase}\",\"done\":{done},\"total\":{total},\"ts\":{now}}}")).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join("boot-progress.json"));
+    }
+}
+fn clear_boot_progress(dir: &std::path::Path) {
+    let _ = std::fs::remove_file(dir.join("boot-progress.json"));
+}
+/// "Long ago", so the first replayed block already writes the progress file (checked_sub: Windows Instants count from boot).
+fn boot_progress_long_ago() -> std::time::Instant {
+    std::time::Instant::now().checked_sub(std::time::Duration::from_secs(5)).unwrap_or_else(std::time::Instant::now)
+}
+
 fn shutdown_snapshot(chain: &ChainTip, dir: &std::path::Path, inflight: &std::sync::atomic::AtomicBool) {
     // A periodic write may still be running; both use state-snapshot.tmp. Let it finish (≤ 15 s) and keep the
     // flag, so no new periodic write starts behind us (2026-10-24).
@@ -6685,4 +6750,115 @@ fn load_sqisign_key() -> Option<(Vec<u8>, Vec<u8>)> {
     if sk.is_empty() || pk.is_empty() { return None; }
     eprintln!("🔏 tip-proof: SQIsign L5 producer key loaded from {path} (pk {}…)", hex::encode(&pk[..8]));
     Some((sk, pk))
+}
+
+/// 2026-10-24: a stop that arrives while the node is still BOOTING (rebuilding its state from `chain.log`, which takes
+/// minutes on a PC) used to kill it with no snapshot — the tokio handlers are only installed after boot — so the next
+/// start replayed from block 0 again. `install()` turns the first SIGTERM/SIGINT (Unix) or Ctrl-C/Ctrl-Break (Windows)
+/// into a flag the rebuild checks after every block; a SECOND signal exits at once, as before, so a stuck boot can still
+/// be killed. Windows' window-close (CTRL_CLOSE) also raises the flag and then holds the process ≤ 4.5 s (Windows allows
+/// ~5) until a snapshot is saved, before or after boot.
+mod early_stop {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static SAVED: AtomicBool = AtomicBool::new(false);
+    static BOOTED: AtomicBool = AtomicBool::new(false);
+    static FIRST_MS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn mark_booted() { BOOTED.store(true, Ordering::SeqCst); }
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    }
+    /// Record a stop request. `true` = this is a SECOND, separate request (≥ 3 s after the first) while still booting:
+    /// the caller should leave at once. The screen and the node's pipe watcher both signal on `q`, milliseconds apart,
+    /// and that pair must count as ONE request (measured 2026-10-24: it killed the node before its snapshot).
+    fn note_stop() -> bool {
+        let now = now_ms();
+        if !STOP.swap(true, Ordering::SeqCst) {
+            FIRST_MS.store(now, Ordering::SeqCst);
+            return false;
+        }
+        !BOOTED.load(Ordering::SeqCst) && now.saturating_sub(FIRST_MS.load(Ordering::SeqCst)) >= 3_000
+    }
+
+    pub fn requested() -> bool { STOP.load(Ordering::SeqCst) }
+    pub fn mark_saved() { SAVED.store(true, Ordering::SeqCst); }
+
+    /// During a boot replay: every `gap`, capture `chain` and save it on a detached thread (one writer at a time).
+    pub fn maybe_rebuild_snapshot(chain: &crate::chain::ChainTip, dir: &std::path::Path, last: &mut std::time::Instant,
+                                  gap: std::time::Duration, inflight: &std::sync::Arc<AtomicBool>, what: &'static str) {
+        if last.elapsed() < gap || inflight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        *last = std::time::Instant::now();
+        match crate::snapshot::StateSnapshot::capture(chain) {
+            Some(snap) => {
+                let (dir, flag) = (dir.to_path_buf(), std::sync::Arc::clone(inflight));
+                std::thread::spawn(move || {
+                    let t0 = std::time::Instant::now();
+                    match crate::snapshot::save_state(&snap, &dir) {
+                        Ok(bytes) => eprintln!("📸 state snapshot @ H={} ({} B, {:.2}s write, during {what})",
+                            snap.snapshot_height, bytes, t0.elapsed().as_secs_f64()),
+                        Err(e) => eprintln!("⚠ snapshot during {what} @ H={} failed: {}", snap.snapshot_height, e),
+                    }
+                    flag.store(false, Ordering::SeqCst);
+                });
+            }
+            None => inflight.store(false, Ordering::SeqCst),
+        }
+    }
+
+    /// Save a snapshot of `chain` as it stands and exit cleanly — the stop arrived during `what`.
+    pub fn save_and_exit(chain: &crate::chain::ChainTip, dir: &std::path::Path, what: &str) -> ! {
+        let t0 = std::time::Instant::now();
+        match crate::snapshot::StateSnapshot::capture(chain) {
+            Some(snap) => match crate::snapshot::save_state(&snap, dir) {
+                Ok(bytes) => eprintln!("⏹ sigil-node — stopped during {what}: snapshot @ H={} ({} B, {:.2}s) — the next start resumes there",
+                    snap.snapshot_height, bytes, t0.elapsed().as_secs_f64()),
+                Err(e) => eprintln!("⏹ sigil-node — stopped during {what}; snapshot failed: {e}"),
+            },
+            None => eprintln!("⏹ sigil-node — stopped during {what} (nothing to capture yet)"),
+        }
+        mark_saved();
+        std::process::exit(0)
+    }
+
+    #[cfg(unix)]
+    extern "C" fn on_signal(_sig: i32) {
+        extern "C" { fn _exit(code: i32) -> !; }
+        if note_stop() {
+            unsafe { _exit(130) } // a second, separate signal while booting: out now (async-signal-safe)
+        }
+    }
+    #[cfg(windows)]
+    unsafe extern "system" fn on_console(ev: u32) -> i32 {
+        match ev {
+            // Ctrl-C / Ctrl-Break: the first one is ours, a second one goes to the default handler (exit)
+            0 | 1 => if note_stop() { 0 } else { 1 },
+            // window closed / log off / shut down: Windows ends the process when this returns (or after ~5 s)
+            2 | 5 | 6 => {
+                STOP.store(true, Ordering::SeqCst);
+                let t0 = std::time::Instant::now();
+                while !SAVED.load(Ordering::SeqCst) && t0.elapsed() < std::time::Duration::from_millis(4500) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                1
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn install() {
+        #[cfg(unix)]
+        unsafe {
+            extern "C" { fn signal(sig: i32, handler: usize) -> usize; }
+            signal(15, on_signal as usize); // SIGTERM
+            signal(2, on_signal as usize); // SIGINT
+        }
+        #[cfg(windows)]
+        unsafe {
+            extern "system" { fn SetConsoleCtrlHandler(h: Option<unsafe extern "system" fn(u32) -> i32>, add: i32) -> i32; }
+            SetConsoleCtrlHandler(Some(on_console), 1);
+        }
+    }
 }

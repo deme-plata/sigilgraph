@@ -847,6 +847,12 @@ pub mod status {
     pub fn lag() -> u64 { net_tip().saturating_sub(height()) }
     pub fn set_peers(n: u64) { PEERS.store(n, Ordering::Relaxed); }
     pub fn peers() -> u64 { PEERS.load(Ordering::Relaxed) }
+    static BOOT_DONE: AtomicU64 = AtomicU64::new(0);
+    static BOOT_TOTAL: AtomicU64 = AtomicU64::new(0);
+    /// 2026-10-24: the node is rebuilding its state from blocks it already has (its API is silent meanwhile):
+    /// `(done, total)` from its `aether/boot-progress.json`; `(0, 0)` = not rebuilding.
+    pub fn set_boot(done: u64, total: u64) { BOOT_DONE.store(done, Ordering::Relaxed); BOOT_TOTAL.store(total, Ordering::Relaxed); }
+    pub fn boot() -> (u64, u64) { (BOOT_DONE.load(Ordering::Relaxed), BOOT_TOTAL.load(Ordering::Relaxed)) }
     pub fn note_restart() { RESTARTS.fetch_add(1, Ordering::Relaxed); }
     pub fn restarts() -> u64 { RESTARTS.load(Ordering::Relaxed) }
     pub fn set_retry_at(unix: u64) { RETRY_AT.store(unix, Ordering::Relaxed); }
@@ -889,6 +895,18 @@ fn get_json(url: &str) -> Option<serde_json::Value> {
 }
 
 /// One look at the node's local API → [`status`].
+/// The node's `aether/boot-progress.json` while it rebuilds from blocks on disk (2026-10-24). Fresh (≤ 15 s old) or ignored.
+fn read_boot_progress(data_dir: &Path) {
+    let p = data_dir.join("aether").join("boot-progress.json");
+    let fresh = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok()).is_some_and(|age| age <= Duration::from_secs(15));
+    let v = fresh.then(|| std::fs::read_to_string(&p).ok()).flatten().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    match v.as_ref().map(|v| (v.get("done").and_then(|x| x.as_u64()), v.get("total").and_then(|x| x.as_u64()))) {
+        Some((Some(d), Some(t))) if t > 0 => status::set_boot(d.min(t), t),
+        _ => status::set_boot(0, 0),
+    }
+}
+
 fn poll(api: &str, with_hashes: bool) -> bool {
     let Some(v) = get_json(&format!("{api}/v1/integrity")) else { return false };
     status::set_polled_api(api);
@@ -1155,6 +1173,10 @@ pub fn start_for_screen() -> Option<NodeHost> {
                 if started.elapsed() > Duration::from_secs(600) { failures = 0; }
                 failures += 1;
                 status::note_restart();
+                // the card must not keep showing the dead run's height/peers (Viktor's PC 10-24: "height #3,279,935" after a restart)
+                status::set_height(0);
+                status::set_peers(0);
+                status::set_boot(0, 0);
                 let why = last_log_line(&plan2.log);
                 status::set_phase(status::STOPPED);
                 status::set_message(format!("exited ({st}){}", if why.is_empty() { String::new() } else { format!(": {why}") }));
@@ -1173,6 +1195,7 @@ pub fn start_for_screen() -> Option<NodeHost> {
                 let with_hashes = last_hashes.elapsed() >= Duration::from_secs(5);
                 if with_hashes { last_hashes = Instant::now(); }
                 let ok = poll(&api, with_hashes);
+                if ok { status::set_boot(0, 0); } else if attached.is_none() { read_boot_progress(&plan2.data_dir); }
                 if !ok && attached.is_some() {
                     // The other window's node went away: start ours now.
                     attached = None;

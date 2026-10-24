@@ -112,15 +112,20 @@ pub(crate) fn draw_node_sync_card(f: &mut Frame, app: &App, area: ratatui::layou
     let fin = ps::settled();
     let lag = ps::lag();
     let peers = ps::peers();
-    let beat = observe(height);
     let stopped = phase == ps::STOPPED;
-    let synced = phase == ps::LIVE && lag <= AT_TIP;
-    let connecting = !stopped && height == 0;
+    // 2026-10-24: rebuilding the state from blocks already on disk — the API is silent, the node is busy, not stuck
+    let (bdone, btotal) = ps::boot();
+    let rebuilding = !stopped && btotal > 0;
+    let beat = observe(if rebuilding { bdone } else { height });
+    let synced = !rebuilding && phase == ps::LIVE && lag <= AT_TIP;
+    let connecting = !stopped && !rebuilding && height == 0;
     // the first samples after a start are hand-over bursts, not a speed (10.6.0's node card: 30 s of measuring)
     let measuring = beat.t < 30.0 || beat.rate < 1.0;
-    let frac = if net > 0 { (height as f64 / net as f64).clamp(0.0, 1.0) } else { 0.0 };
+    let frac = if rebuilding { (bdone as f64 / btotal as f64).clamp(0.0, 1.0) }
+        else if net > 0 { (height as f64 / net as f64).clamp(0.0, 1.0) } else { 0.0 };
 
     let (vtext, vcol) = if stopped { ("✕ NODE STOPPED", C_NEON_PINK) }
+        else if rebuilding { ("⟳ REBUILDING", C_NEON_GOLD) }
         else if synced { ("◆ SYNCED", C_NEON_GREEN) }
         else if connecting { ("… CONNECTING", C_DIM) }
         else if phase == ps::LIVE { ("≈ CATCHING UP", C_NEON_GOLD) }
@@ -151,6 +156,14 @@ pub(crate) fn draw_node_sync_card(f: &mut Frame, app: &App, area: ratatui::layou
             0 => "it starts again with sigil-top".to_string(),
             t => format!("restarting automatically in {}s", t.saturating_sub(now)),
         }, bold(C_GOLD)), sp(format!("   · restarts so far {}", ps::restarts()), st(C_DIM))]
+    } else if rebuilding && measuring {
+        vec![sp("rebuilding — measuring speed…", bold(C_NEON_GOLD))]
+    } else if rebuilding {
+        vec![
+            sp(format!("rebuilding {rate} blk/s"), bold(C_NEON_GOLD)),
+            sp("   eta ", st(C_DIM)), sp(fmt_eta(btotal.saturating_sub(bdone) as f64 / beat.rate), bold(C_NEON_CYAN)),
+            sp(format!("   {} to go", group(btotal.saturating_sub(bdone))), st(C_DIM)),
+        ]
     } else if synced {
         vec![sp(format!("rate {rate} blk/s"), bold(C_NEON_GOLD)), sp(" — the chain's own pace   eta —", st(C_DIM))]
     } else if measuring {
@@ -170,6 +183,8 @@ pub(crate) fn draw_node_sync_card(f: &mut Frame, app: &App, area: ratatui::layou
     let (itxt, icol) = if stopped {
         let m = ps::message();
         (format!("⛓ node stopped — {}", if m.is_empty() { "the node is not running".to_string() } else { m }), C_NEON_PINK)
+    } else if rebuilding {
+        (format!("⛓ rebuilding your balances from the chain on disk — block {} of {}", group(bdone), group(btotal)), C_GOLD)
     } else if synced {
         (format!("⛓ INTEGRITY VERIFIED — genesis→{} re-executed here, every state root matched", group(height)), C_NEON_GREEN)
     } else {
@@ -183,7 +198,7 @@ pub(crate) fn draw_node_sync_card(f: &mut Frame, app: &App, area: ratatui::layou
         Line::from(vec![
             sp("⛓ FULL NODE ", bold(C_NEON_GOLD)),
             sp("tip ", st(C_DIM)), sp(group(net), bold(C_VBRIGHT)),
-            sp("   height ", st(C_DIM)), sp(format!("⛓{}", group(height)), bold(C_NEON_CYAN)),
+            sp("   height ", st(C_DIM)), sp(format!("⛓{}", group(if rebuilding { bdone } else { height })), bold(C_NEON_CYAN)),
             // a catching-up node reports no finalized height yet (0) — a dash, not a zero that reads as broken
             sp("   final ", st(C_DIM)), sp(if fin > 0 { group(fin) } else { "—".to_string() }, bold(if synced { C_NEON_GREEN } else { C_GOLD })),
         ]),
@@ -198,11 +213,18 @@ pub(crate) fn draw_node_sync_card(f: &mut Frame, app: &App, area: ratatui::layou
             sp("every block re-executed here; its state roots compared with the header", st(C_NEON_GREEN)),
         ]),
         Line::from(vec![sp(itxt, bold(icol))]),
-        Line::from(vec![
-            sp("◈ NETWORK HEALTH ", bold(C_NEON_CYAN)), sp(mesh, bold(mcol)),
-            sp("   peers ", st(C_DIM)), sp(group(peers), st(if peers >= 1 { C_NEON_GREEN } else { C_RED })),
-            sp("   ", st(C_DIM)), sp(if live { "● live" } else { "○ stalled" }, bold(if live { C_NEON_GREEN } else { C_RED })),
-        ]),
+        if rebuilding {
+            Line::from(vec![
+                sp("◈ NETWORK ", bold(C_NEON_CYAN)),
+                sp("joins after the rebuild — your node first replays the blocks it already has", st(C_DIM)),
+            ])
+        } else {
+            Line::from(vec![
+                sp("◈ NETWORK HEALTH ", bold(C_NEON_CYAN)), sp(mesh, bold(mcol)),
+                sp("   peers ", st(C_DIM)), sp(group(peers), st(if peers >= 1 { C_NEON_GREEN } else { C_RED })),
+                sp("   ", st(C_DIM)), sp(if live { "● live" } else { "○ stalled" }, bold(if live { C_NEON_GREEN } else { C_RED })),
+            ])
+        },
         Line::from(if synced {
             vec![sp("your rig [M] mines through the network's producer; rewards land in your wallet", st(C_DIM))]
         } else {

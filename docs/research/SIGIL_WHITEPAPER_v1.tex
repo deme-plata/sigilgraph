@@ -1,3 +1,7 @@
+% v1.6 (2026-10-24): honest status and the field table re-measured on the live g3 test network
+%   (g3 replaced g2 on 2026-10-19). No grade changes. The largest gap is named first: one block-maker
+%   and one finality key. Source moved onto the main line sigil-g3-unified (v1.5 existed only as
+%   uncommitted edits). Open hardening items stay summarised; details in the private backlog.
 % v1.5 (2026-08-27): prediction 2 RESTATED and regraded open -> derived+sim.
 % The row asserted a PID discriminant (Kp^2 >= 4 Kd Ki); the implemented
 % controller (sigil-emission/src/controller.rs) has NO integral and NO
@@ -139,13 +143,13 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.5}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.6}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.5)},
+  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.6)},
   pdfauthor={bitknight.dipper688@passmail.net},
-  pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, source d7906ff based on 16f05a8; benchmark record June--July 2026},
+  pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, main line sigil-g3-unified, 2026-10-24; benchmark record June--July 2026},
   pdfkeywords={SIGIL, BlockDAG, DagKnight, post-quantum, STARK, SQIsign, ML-KEM, fold, gossip delivery law}
 }
 
@@ -173,10 +177,10 @@
 \end{tikzpicture}\\[10pt]
 {\Huge\bfseries\textcolor{ink}{SIGIL — The Variational Chain}}\\[8pt]
 {\Large An Experimental Provenance-Signed BlockDAG\\Organized by a Conjectural Effective Action}\\[10pt]
-{\normalsize Whitepaper v1.5 · 2026-08-30}\\[6pt]
+{\normalsize Whitepaper v1.6 · 2026-10-24}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
-{\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[2pt]
-{\small source \texttt{d7906ff} · based on \texttt{16f05a8} · branch \texttt{feat/commons-tithe-routing-0.36.1}}\\[6pt]
+{\small SIGIL / Flux Foundation · \texttt{sigilgraph.org}}\\[2pt]
+{\small main line \texttt{sigil-g3-unified} · network \texttt{sigil-g3} (test network, reset 2026-10-19)}\\[6pt]
 {\small\textcolor{sigilamber}{\textbf{Live experimental network — not production ready.}}}
 \end{center}
 
@@ -245,6 +249,10 @@ Equations are set in black; color is reserved for results and status.}
 \vspace{4pt}
 \begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.6pt,arc=2pt,
                   left=8pt,right=8pt,top=6pt,bottom=6pt]
+\small\textbf{Revision note, v1.5 $\to$ v1.6} (2026-10-24). No grade changes. The honest status
+(\S\ref{sec:honesty}) and the field table were re-measured on the live g3 test network, which replaced the g2
+network on 2026-10-19; the largest gap is now named first --- one block-maker and one finality key.
+\par\medskip
 \small\textbf{Revision note, v1.1 $\to$ v1.2} (2026-07-22). One regrade, logged
 rather than silently absorbed: v1.1 graded the gossip delivery law
 \textsc{measured}. That blurred two axes — the law is \emph{derived} under an
@@ -704,32 +712,33 @@ whole.}
 Field & Protocol correspondence & Status \\
 \midrule
 $\mathcal{G}$ & The discrete BlockDAG braid, conjecturally modeled as a Lorentzian
-4-manifold; the fabric of the chain. & \stC \\
+4-manifold; the fabric of the chain. On g3 a single block-maker makes every block, so the braid has zero
+width (0 merged side blocks in the last 200, measured 2026-10-24). & \stC \\
 $g_{\mu\nu}$ & Conjectured (heuristic) to be induced by agent-reputation density:
 high-reputation producers bend the metric, consensus flows toward them — reputation as
 curvature. & \stC \\
 $R$ & Consensus tension; forks raise it, convergent histories minimize it. & \stC \\
 $\Lambda_{\mathrm{emission}}(\varphi)$ & The emission ``cosmological constant,''
 PID-controlled toward target supply. The adaptive emission controller runs in
-production (\texttt{SIGIL\_EMISSION\_ADAPTIVE=1}); reading it as a $\Lambda$ term is
-the conjectural part. & \stL/\stC \\
+production (measured on g3, 2026-10-24: 5{,}949 SIGIL/day, 0.16\,\% of the 21\,M cap issued); reading it as
+a $\Lambda$ term is the conjectural part. & \stL/\stC \\
 $A_\mu$ & Witness attestations; the curvature 2-form $F = dA + A\wedge A$ is the
-witness-disagreement field. Partially landed: of the four state roots only
-\texttt{wallet\_state\_root} is populated on mainnet --- \texttt{dex}, \texttt{event\_log}
-and \texttt{contract} roots are all-zero --- and the cross-node divergence detector is
-opt-in (\texttt{SIGIL\_DAG\_ORDER\_LOG}) and not enabled in production. & \stG \\
+witness-disagreement field. Partially landed: every header commits five state roots; on g3 the
+\texttt{wallet} and \texttt{shielded\_pool} roots are live, the \texttt{dex}, \texttt{event\_log} and
+\texttt{contract} roots are zero; a divergence monitor (\texttt{sigil-integrity}) compares six nodes block by block
+in production. & \stG \\
 $J^\mu$ & Settlement flow; conservation enforced at the state chokepoint. The
 strongest correspondence in this table: \texttt{sigil-state} checks every leg with
 \texttt{checked\_add}/\texttt{checked\_sub} and re-derives the $k$-invariant
 independently at the chokepoint, rejecting non-conserving deltas. & \stL \\
 $K$ & The link obtained by closing the bounded-window braid; consensus-equivalent
-histories share its invariants. Designed only: there is no $K$ field in the block header
-and no link-invariant implementation in the tree. & \stC \\
+histories share its invariants. Partly built: the header carries a topology commitment and a
+bounded-window checker runs beside block import; with one block-maker the braid has a single strand and its link is
+trivially the unknot, so the field has nothing to measure yet. & \stC \\
 $\Sigma$ & Three disjoint post-quantum hardness assumptions, one per layer guarded
-(\S\ref{sec:crypto}). Two of three legs are live --- SQIsign-L5 (carried in the header as
-\texttt{nonce\_sqisign}) and the BLAKE3/BLAKE4 hash assumption. The Dilithium5 producer
-leg is implemented but dormant: \texttt{SIGIL\_PRODUCER\_SIGNING\_SEED\_HEX} is unset in
-production, so blocks ship unsigned by that leg. & \stG \\
+(\S\ref{sec:crypto}). Live: SQIsign-L5 on periodic hybrid checkpoints, the BLAKE3/BLAKE4 hash assumption,
+and hash-based STARK proofs (Rescue-Prime, 256-bit v7 notes) carried by every private payment. The Dilithium5
+producer leg is still dormant. & \stG \\
 $\kappa$ & The gravitational constant of the agent economy; empirical. & \stC \\
 \bottomrule
 \end{tabularx}
@@ -1541,13 +1550,24 @@ the law breaks (transport collapse) — which is the argument for the discipline
 
 \subsection{What's real (with evidence)}
 
-Live braid ordering on the experimental network's producer; four state roots computed
-and committed (wallet root live and non-trivial; DEX/event/contract roots currently
-zero pending those subsystems' activation); fold tip verification at 3\,$\mu$s on the
-real chain; dual-lane mining credited live; delivery-law-provisioned gossip; zstd wire
-compression live at 70.7\,B/header; skeleton store and snapshot-pull code landed and
-harness-proven; ML-KEM-1024 browser transport proven; SQIsign-signed releases and DNS
-tip anchor operational; 21M supply minted with conservation enforced at the chokepoint.
+\noindent\emph{Re-measured for v1.6 on 2026-10-24 on the live g3 test network (reset 2026-10-19; its balances are test
+balances).}
+\begin{itemize}
+\item \textbf{The chain runs.} 8.00 blocks/s (measured over 35\,s); height 3.46\,M; 33{,}644 SIGIL issued, 0.16\,\%
+of the 21\,M cap, at 5{,}949 SIGIL/day by the adaptive emission controller.
+\item \textbf{Every node checks every block.} A full node re-executes the chain from genesis and compares five
+committed state roots per header (wallet and shielded-pool roots live). A divergence monitor compares six nodes on two
+machines block by block in production.
+\item \textbf{Private payments are verified, not trusted.} Notes are 256-bit (v7); every spend carries a STARK proof
+that every node checks. A payment posted only to a follower reached the block-maker over the peer-to-peer relay
+(Dandelion++) and was spent 0.7\,s later.
+\item \textbf{Sync and recovery.} A fresh node syncs the whole chain from peers at up to $\sim$15{,}000 blocks/s; a
+second server (Stockholm) synced the chain with the first machine blocked and rejoined after a partition within 7\,s.
+\item \textbf{Releases.} Signed manifests; the release key and the Android signing certificate were rotated on
+2026-10-23 after a compromise of the release server, through a bridge release that moved existing installs to the new key.
+\item \textbf{Measured laws (unchanged since v1.5).} The gossip delivery law with its proved floor; fold tip
+verification at 3\,$\mu$s.
+\end{itemize}
 
 \subsection{What's still pretend (physics)}
 
@@ -1558,8 +1578,8 @@ BlockDAG into a lattice field theory has been constructed, and consequently none
 metric $g_{\mu\nu}$ is a heuristic — the functional form awaits fitting to measured
 consensus drift. Jones-polynomial machinery is \#P-hard; only the bounded-window
 linking-number/Alexander programme is claimed tractable, cheap invariants are one-way
-tripwires (they fingerprint, not classify), and the header topology commitment is
-staged, not shipped. AdS/CFT on a discrete graph is an analogy pending rigorous
+tripwires (they fingerprint, not classify), and the header topology commitment, now
+shipped, reads the unknot while one block-maker makes every block. AdS/CFT on a discrete graph is an analogy pending rigorous
 discretization. The PID/Klein–Gordon mapping is schematic (controller states are not
 local in $\varphi$) and exact only for quadratic potentials. The delivery law — the
 programme's best result — is now measured on a real lossy network (v1.3; netem
@@ -1572,26 +1592,19 @@ composition bound is open, as is the fold's concrete soundness reduction.
 
 \subsection{What's still pretend (engineering)}
 
-The RPC edge is authenticated (per-request wallet signature + nonce; the audit's theft
-findings are fixed and enforcing), so the residual money risk is deeper. The
-highest-severity open item is \textbf{H1}: block-apply does not yet enforce the producer
-signature — a height-gated verifier is implemented and unit-tested on a branch but dormant,
-not deployed. Two more sit at the consensus-crypto layer with their fix half-built: the VDF
-still runs over a forgeable fixed modulus though a trustless replacement exists unwired
-(\textbf{C10}), and the state-layer replay-nonce primitive is committed + signed but not yet
-called on the live apply path (\textbf{H5}). Peer-sync ingress is under-authenticated: a
-length-only handshake stub (\textbf{H2}), a follower that trusts peer-declared difficulty
-(\textbf{H3}), and keyless wire tip-proofs (\textbf{H4}). Each carries a verdict
-(fixed / partial / open) with file:line in the hardening backlog
-(\texttt{docs/SIGIL\_HARDENING\_BACKLOG.md}) — that document, ground-truthed against the
-code rather than the stale audit, is what the ``open'' rung of Figure~\ref{fig:ladder}
-points at. (The audit's C9 bridge-mint and H6 event-root findings were re-verified as
-already fixed.) Snapshot-pull live activation awaits a
-pinned signed anchor on the fleet default plus its M2 crypto (SQIsign + fold in the
-trailer); until then nodes fall through to the compatible crawl path. The serve-throttle
-and serial-fetch caps of \S\ref{sec:sync} were fixed (throttle removed, request-ahead
-window live); the remaining \texttt{sigil-top} adaptive multi-substream scheduler is coded
-but dark.
+\textbf{Decentralization is the largest gap.} The g3 test network has one block-maker and a finality committee of one
+key --- a solo certificate gate, explicitly not Byzantine-fault-tolerant. About 90\,\% of the measured hash power comes
+from the operator's own rig; both servers are run by one operator; new nodes find the network through two bootstrap
+addresses. Proof-of-work pays miners today; making accumulated work the rule that orders blocks, with several
+block-makers that each re-derive every block, is the next consensus step --- staged on a throwaway two-server chain
+before g3. Until then the braid has zero width and the $\mathcal{G}$, $K$ and $g_{\mu\nu}$ fields have nothing to describe.
+
+The v1.5 open items --- \textbf{H1} through \textbf{H5} and \textbf{C10} --- were re-checked on 2026-10-24 and remain
+open on g3; their file:line detail stays in the private hardening backlog until each is fixed on the live chain. Also
+open: hardening of the peer-to-peer layer (relay validation, connection limits, peer discovery beyond the bootstrap
+list) and of the release supply chain (a second signer, reproducible builds). Fixed since v1.5: the serve throttle and
+serial fetch (sync is $\sim$20$\times$ faster), and state snapshots on user nodes, so a crash or a closed window costs
+seconds instead of a replay of the whole chain (in the next \texttt{sigil-top} release).
 
 \section{What would convince a skeptic}
 

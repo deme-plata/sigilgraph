@@ -33,7 +33,7 @@ fn run_update(args: &[String]) {
     match flux_miner::updater::check(&url, current) {
         Some(info) => {
             println!("  ⬆ v{} available — downloading…", info.version);
-            match flux_miner::updater::stage(&info.url) {
+            match flux_miner::updater::stage(&info) {
                 Ok(p) => println!("  ✓ staged → {p} · restart to apply"),
                 Err(e) => println!("  ✗ stage failed: {e}"),
             }

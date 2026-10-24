@@ -143,7 +143,7 @@ fn update_loop(
         first = false;
         stats.lock().unwrap().update_msg = Some(format!("checking for update (v{VERSION})…"));
         match flux_miner::updater::check(&manifest_url(), VERSION) {
-            Some(info) => match flux_miner::updater::stage(&info.url) {
+            Some(info) => match flux_miner::updater::stage(&info) {
                 Ok(_) => {
                     stats.lock().unwrap().update_msg = Some(format!("⬆ v{} — restarting…", info.version));
                     restart.store(true, Ordering::Relaxed); // main applies + re-execs
@@ -154,7 +154,7 @@ fn update_loop(
                 }
             },
             None => {
-                stats.lock().unwrap().update_msg = Some(format!("✓ up to date (v{VERSION})"));
+                stats.lock().unwrap().update_msg = Some(format!("✓ up to date (v{VERSION}) — only signed updates install"));
             }
         }
     }

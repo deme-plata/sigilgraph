@@ -76,6 +76,46 @@ pub(crate) struct IntegrityState {
     /// Epsilon's measured block rate (blocks per second), smoothed; 0 = unknown.
     pub bps: f64,
     bps_prev: Option<(Instant, u64)>,
+    /// What the network says about itself (the monitor's lists), shown while ours cannot be compared.
+    pub network: Option<NetworkView>,
+}
+
+/// 10.7.3 (Viktor 10-26: "its says 0/0 nodes agree in data integrity?" while his node re-synced): the card
+/// counts nodes compared against OUR blocks, and the network publishes only its newest 512 per node — so a
+/// node that is still syncing has nothing to compare and the card read "0/0 nodes agree", which looks like
+/// failure. While that is so, show what the network says about ITSELF, computed here from the monitor's
+/// per-node block hashes (never from its prose verdict, which counts only nodes at one exact height): the
+/// highest height EVERY listed node has published, and how many hold the producer's hash there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NetworkView {
+    pub height: u64,
+    pub agree: usize,
+    pub of: usize,
+}
+
+pub(crate) fn network_view(m: &BTreeMap<String, BTreeMap<u64, String>>) -> Option<NetworkView> {
+    let mut lists = m.values();
+    let first = lists.next()?;
+    let height = first.keys().rev().copied().find(|h| m.values().all(|l| l.contains_key(h)))?;
+    let reference = match m.get("epsilon").and_then(|l| l.get(&height)) {
+        Some(x) => x.clone(),
+        None => {
+            let mut count: BTreeMap<&String, usize> = BTreeMap::new();
+            for l in m.values() { *count.entry(&l[&height]).or_default() += 1; }
+            count.into_iter().max_by_key(|(_, n)| *n)?.0.clone()
+        }
+    };
+    let agree = m.values().filter(|l| l[&height].eq_ignore_ascii_case(&reference)).count();
+    Some(NetworkView { height, agree, of: m.len() })
+}
+
+/// The WAITING line: where our node is, and why nothing is compared yet.
+pub(crate) fn waiting_reason(local_top: u64, net: Option<&NetworkView>) -> String {
+    match (local_top, net) {
+        (0, _) => "  your node holds no recent blocks yet — compared once it reaches the newest 512".into(),
+        (h, Some(n)) if h + 512 < n.height => format!("  your node is syncing: {} of {} — compared once it reaches the newest 512", group(h), group(n.height)),
+        _ => "  your node is near the tip — first comparison on the next pass".into(),
+    }
 }
 
 // ── THE FIFTH ROOT (2026-09-25) ────────────────────────────────────────────────
@@ -202,6 +242,7 @@ pub(crate) fn snapshot() -> IntegrityState {
         pool_compared_height: g.pool_compared_height,
         bps: g.bps,
         bps_prev: None,
+        network: g.network.clone(),
     }
 }
 
@@ -355,6 +396,7 @@ pub(crate) fn spawn(api_base: String, reader: Arc<OnceLock<sigil_block_store::Bl
                 g.local_top = top;
                 if top > 0 { g.local_source = src; }
                 if let Some(c) = certified { g.certified = c; }
+                if let Some(m) = monitor.as_ref() { g.network = network_view(m); }
                 let ceiling = if g.certified > 0 { g.certified } else { u64::MAX };
                 let mut any = false;
                 // Epsilon: the monitor's 512-height list (reaches back to where a depth-rule
@@ -440,10 +482,20 @@ pub(crate) fn render_card(_app: &crate::App) -> Paragraph<'static> {
         badge("TRUE", C_GREEN)
     };
     let age = s.last_run.map(|t| format!("{}s ago", t.elapsed().as_secs())).unwrap_or_else(|| "—".into());
-    let mut l1 = vec![
-        verdict,
-        dim(format!("  {agreeing}/{total} nodes agree · checked {} · mismatch {} · {age}", group(s.checked), group(s.mismatches))),
-    ];
+    let mut l1 = if total == 0 {
+        // Nothing of ours to compare yet: say why, and what the network says about itself.
+        let mut v = vec![verdict, dim(waiting_reason(s.local_top, s.network.as_ref()))];
+        if let Some(n) = s.network.as_ref() {
+            let col = if n.agree == n.of { C_GREEN } else { C_RED };
+            v.push(Span::styled(format!("  · network: {} of {} agree at {}", n.agree, n.of, group(n.height)), Style::default().fg(col)));
+        }
+        v
+    } else {
+        vec![
+            verdict,
+            dim(format!("  {agreeing}/{total} nodes agree · checked {} · mismatch {} · {age}", group(s.checked), group(s.mismatches))),
+        ]
+    };
     if let Some(e) = s.last_err.as_ref() { l1.push(Span::styled(format!("  {e}"), Style::default().fg(C_RED))); }
 
     let mut l2v = vec![
@@ -635,5 +687,49 @@ mod tests {
         assert_eq!(st.mismatches, 1);
         assert!(!st.nodes["happysrv"].agree);
         assert_eq!(st.last_mismatch.as_ref().map(|m| m.1), Some(1_000_002));
+    }
+}
+
+/// 10.7.3: the network's view of itself, as the WAITING card shows it.
+#[cfg(test)]
+mod network_view_tests {
+    use super::*;
+
+    /// Six nodes whose newest published heights differ by a block or two (the shape of the
+    /// 2026-10-26 07:17 feed, where the monitor's prose said "4 voices agree").
+    fn feed(tops: &[(&str, u64)], lo: u64) -> BTreeMap<String, BTreeMap<u64, String>> {
+        tops.iter().map(|(n, top)| (n.to_string(), (lo..=*top).map(|h| (h, format!("{h:064x}"))).collect())).collect()
+    }
+
+    #[test]
+    fn the_network_view_is_taken_at_the_highest_height_every_node_published() {
+        let six = [("epsilon", 848), ("node4", 846), ("node5", 847), ("node6", 848), ("node7", 848), ("node8", 848)];
+        let m = feed(&six, 337);
+        assert_eq!(network_view(&m), Some(NetworkView { height: 846, agree: 6, of: 6 }),
+            "all six at 846 — not 4 of the nodes that happened to reach 848");
+    }
+
+    #[test]
+    fn a_disagreeing_node_is_counted_against_the_producer() {
+        let mut m = feed(&[("epsilon", 900), ("node4", 900), ("node5", 900)], 800);
+        m.get_mut("node5").unwrap().insert(900, "ff".repeat(32));
+        assert_eq!(network_view(&m), Some(NetworkView { height: 900, agree: 2, of: 3 }));
+        // Without the producer's list, the majority is the reference.
+        m.remove("epsilon");
+        m.insert("node6".into(), m["node4"].clone());
+        assert_eq!(network_view(&m), Some(NetworkView { height: 900, agree: 2, of: 3 }));
+        // An empty list → no common height → no view (the card says WAITING without a network line).
+        m.insert("node9".into(), BTreeMap::new());
+        assert_eq!(network_view(&m), None);
+        assert_eq!(network_view(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn the_waiting_line_says_where_our_node_is() {
+        let n = NetworkView { height: 4_607_846, agree: 6, of: 6 };
+        assert!(waiting_reason(0, Some(&n)).contains("no recent blocks yet"));
+        let s = waiting_reason(1_292_801, Some(&n));
+        assert!(s.contains("syncing: 1,292,801 of 4,607,846"), "{s}");
+        assert!(waiting_reason(4_607_600, Some(&n)).contains("near the tip"));
     }
 }

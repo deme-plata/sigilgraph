@@ -24,6 +24,9 @@ set -euo pipefail
 
 VER="${1:?usage: release-sigil-top.sh <version> [note]}"
 NOTE="${2:-sigil-top v${VER}}"
+# The network is chosen at BUILD time and an unset SIGIL_NETWORK compiles g2 (10.7.4, 2026-10-26).
+# Refuse before bumping or building anything; the network guard after the build checks the result.
+[ -n "${SIGIL_EXPECT_NETWORK:-${SIGIL_NETWORK:-}}" ] || { echo "✗ SIGIL_NETWORK is not set — name the network this release is for (e.g. SIGIL_NETWORK=sigil-g3)"; exit 1; }
 # Release keys (2026-10-23 rotation): scripts/sign-manifest.sh signs .sig2 with key 2 and, during the
 # bridge, .sig with key 1; scripts/verify-live-manifest.py checks both over the network.
 # SIGIL_RELEASE_REPO (2026-09-25): a DETACHED worktree pinned at the tested commit, so a release
@@ -177,7 +180,10 @@ LBIN="target/release/sigil-top"; WBIN="$WIN_TARGET_DIR/x86_64-pc-windows-gnu/rel
 "$LBIN" version 2>/dev/null | grep -q "v$VER" || { echo "✗ built binary is not v$VER"; exit 1; }
 # ── network guard (2026-10-19, g3 reset): the chain is fixed at BUILD time by SIGIL_NETWORK, and its
 # default is g2 — so without this a "g3 release" could silently ship g2 programs to every install.
-EXPECT_NET="${SIGIL_EXPECT_NETWORK:-${SIGIL_NETWORK:-sigil-g2}}"
+# 2026-10-26: NO default here. 10.7.4 was built with SIGIL_NETWORK unset: it compiled g2 and this line then
+# EXPECTED g2, so the guard agreed with the mistake. A release must name its network or it does not run.
+EXPECT_NET="${SIGIL_EXPECT_NETWORK:-${SIGIL_NETWORK:-}}"
+[ -n "$EXPECT_NET" ] || { echo "✗ neither SIGIL_NETWORK nor SIGIL_EXPECT_NETWORK is set — name the network this release is for (e.g. sigil-g3)"; exit 1; }
 NID=$("$LBIN" network-id 2>/dev/null || true)
 case "$NID" in "header=$EXPECT_NET net=$EXPECT_NET "*) echo "  ✓ linux binary is $EXPECT_NET ($NID)";;
   *) echo "✗ linux binary reports '$NID', expected $EXPECT_NET — NOT signing or publishing"; exit 1;; esac

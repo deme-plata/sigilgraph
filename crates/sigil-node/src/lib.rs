@@ -2220,10 +2220,10 @@ fn run_start() -> Result<()> {
                             let mut rounds: u32 = 0;
                             loop {
                                 req.from = cur_from;
-                                let mut reply_len: usize = 0;
+                                let mut reply_cut = false;
                                 let blocks = match serde_json::to_vec(&req) {
                                     Ok(payload) => { let mut busy_tries: u32 = 0; loop { break match mgr2.send_request(peer, payload.clone()).await {
-                                        Ok(bytes) => { reply_len = bytes.len(); match crate::serve_read::decode_backfill_resp(&bytes) {
+                                        Ok(bytes) => { reply_cut = crate::serve_read::reply_cut_by_budget(&bytes); match crate::serve_read::decode_backfill_resp(&bytes) {
                                             Ok(r) => {
                                                 if r.blocks.is_empty() {
                                                     eprintln!("⚠ rr-backfill(windowed): peer {peer} returned an EMPTY response for [{from}..={to}) — request-ahead slot stuck");
@@ -2287,7 +2287,7 @@ fn run_start() -> Result<()> {
                                 };
                                 let last = blocks.iter().map(|b| b.header.height).max();
                                 let more = match (req.max_bytes, last) {
-                                    (Some(mb), Some(l)) => l >= cur_from && crate::serve_read::reply_cut_by_budget(reply_len, mb, l, to),
+                                    (Some(_), Some(l)) => l >= cur_from && l < to && reply_cut,
                                     _ => false,
                                 };
                                 total += blocks.len() as u64;
@@ -3627,7 +3627,7 @@ fn run_start() -> Result<()> {
                                                 }
                                             }
                                         }
-                                        (recs.len(), std::sync::Arc::new(crate::serve_read::encode_raw_records_resp(&recs)), cut)
+                                        (recs.len(), std::sync::Arc::new(crate::serve_read::encode_raw_records_resp_cut(&recs, cut)), cut)
                                     } else {
                                         let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
                                         blocks.extend(window_blocks);
@@ -3921,7 +3921,7 @@ fn run_start() -> Result<()> {
                                     out
                                 }
                             } else if let Some((recs, cut)) = inline_recs {
-                                let out = crate::serve_read::encode_raw_records_resp(&recs);
+                                let out = crate::serve_read::encode_raw_records_resp_cut(&recs, cut);
                                 eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {} ({} B, stored records{})",
                                     recs.len(), lo, hi, peer, out.len(), if cut { ", byte budget reached" } else { "" });
                                 out

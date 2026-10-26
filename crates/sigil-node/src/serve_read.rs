@@ -137,11 +137,12 @@ fn seek_start(dir: &Path, from_height: u64) -> u64 {
 ///
 /// So a client may name `max_bytes`: the server stops adding records once the next one would
 /// pass it (always at least one), and the client asks again from the next height. Old
-/// clients never send it and get exactly the old answer. The client recognises a trimmed
-/// reply WITHOUT any new wire field: a reply that stops short of the range AND is at least
-/// half the budget can only have been cut by the budget (no single record is near half of
-/// any budget a client sends; one that stopped at the server's tip is small). Both halves
-/// of that rule live here so they cannot drift apart.
+/// clients never send it and get exactly the old answer. A reply the budget cut SAYS SO: it
+/// starts `SIGILR2` instead of `SIGILR1` (same framing), and the client continues exactly when
+/// it sees that. Only a client that sent `max_bytes` can receive it; an old server never sends
+/// it. (The first cut inferred "cut" from the reply's size; the Epsilon → Stockholm test showed
+/// a small block followed by a ~100 KB private-payment block makes a cut reply look like the
+/// server's tip — 49 of 1,441 at a 16 KiB budget — so the server now states it.)
 pub const BACKFILL_BUDGET_MIN: u64 = 16 << 10;
 pub const BACKFILL_BUDGET_MAX: u64 = 48 << 20;
 
@@ -164,10 +165,9 @@ pub fn push_within_budget(out: &mut Vec<Vec<u8>>, used: &mut u64, budget: Option
     true
 }
 
-/// Client side: was a reply that ended at `last_height` (< the range end `to`) cut by the
-/// budget the client asked for? See the section note above.
-pub fn reply_cut_by_budget(reply_len: usize, max_bytes: u64, last_height: u64, to: u64) -> bool {
-    last_height < to && reply_len as u64 >= clamp_budget(max_bytes) / 2
+/// Client side: did the server cut this reply at our byte budget (it starts `SIGILR2`)?
+pub fn reply_cut_by_budget(reply: &[u8]) -> bool {
+    reply.starts_with(BACKFILL_RAW_CUT_MAGIC)
 }
 
 /// Pull `header.height` out of a record's leading bytes without a full parse.
@@ -409,11 +409,18 @@ pub fn read_records_range_budget(dir: &Path, from: u64, to: u64, budget: Option<
 
 /// Option 1 wire: `SIGILR1\0` then `[u32 LE len][stored chain.log record]` per block, in height order.
 const BACKFILL_RAW_MAGIC: &[u8; 8] = b"SIGILR1\0";
+/// 10.7.3: the same framing, cut at the client's byte budget — ask again from the next height.
+const BACKFILL_RAW_CUT_MAGIC: &[u8; 8] = b"SIGILR2\0";
 
 /// Frame stored records as an option-1 answer.
 pub fn encode_raw_records_resp(records: &[Vec<u8>]) -> Vec<u8> {
+    encode_raw_records_resp_cut(records, false)
+}
+
+/// [`encode_raw_records_resp`], marked `SIGILR2` when the byte budget ended it (10.7.3).
+pub fn encode_raw_records_resp_cut(records: &[Vec<u8>], cut: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + records.iter().map(|r| r.len() + 4).sum::<usize>());
-    out.extend_from_slice(BACKFILL_RAW_MAGIC);
+    out.extend_from_slice(if cut { BACKFILL_RAW_CUT_MAGIC } else { BACKFILL_RAW_MAGIC });
     for r in records {
         out.extend_from_slice(&(r.len() as u32).to_le_bytes());
         out.extend_from_slice(r);
@@ -1001,7 +1008,7 @@ pub fn decode_backfill_resp(bytes: &[u8]) -> Result<crate::BackfillResp, String>
     if bytes == BACKFILL_BUSY_MAGIC {
         return Err(BUSY_ERR.to_string());
     }
-    if bytes.len() >= BACKFILL_RAW_MAGIC.len() && &bytes[..BACKFILL_RAW_MAGIC.len()] == BACKFILL_RAW_MAGIC {
+    if bytes.starts_with(BACKFILL_RAW_MAGIC) || bytes.starts_with(BACKFILL_RAW_CUT_MAGIC) {
         return Ok(crate::BackfillResp { blocks: decode_raw_records(&bytes[BACKFILL_RAW_MAGIC.len()..]) });
     }
     if bytes.len() >= BACKFILL_ZSTD_MAGIC.len() && &bytes[..BACKFILL_ZSTD_MAGIC.len()] == BACKFILL_ZSTD_MAGIC {
@@ -1124,7 +1131,8 @@ mod byte_budget_contract {
     /// One server answer: `new_server` honours `max_bytes`, an old server ignores it.
     fn serve(dir: &Path, from: u64, to: u64, max_bytes: Option<u64>, new_server: bool) -> Vec<u8> {
         let budget = max_bytes.filter(|_| new_server).map(clamp_budget);
-        encode_raw_records_resp(&read_records_range_budget(dir, from, to, budget).0)
+        let (recs, cut) = read_records_range_budget(dir, from, to, budget);
+        encode_raw_records_resp_cut(&recs, cut)
     }
 
     /// A client syncing `[from..=to]`: `new_client` sends `max_bytes` and continues a reply cut by
@@ -1139,7 +1147,7 @@ mod byte_budget_contract {
             let last = blocks.iter().map(|b| b.header.height).max();
             got.extend(blocks.iter().map(|b| b.header.height));
             match (max_bytes, last) {
-                (Some(mb), Some(l)) if l >= cur && reply_cut_by_budget(bytes.len(), mb, l, to) => cur = l + 1,
+                (Some(_), Some(l)) if l >= cur && l < to && reply_cut_by_budget(&bytes) => cur = l + 1,
                 _ => break,
             }
             assert!(rounds < 10_000, "no progress");
@@ -1172,13 +1180,50 @@ mod byte_budget_contract {
     }
 
     #[test]
-    fn a_short_reply_counts_as_cut_only_when_it_is_at_least_half_the_budget() {
-        let b = 1 << 20;
-        assert!(reply_cut_by_budget((b / 2) as usize, b, 99, 100), "short and big: cut by the budget");
-        assert!(!reply_cut_by_budget((b / 2 - 1) as usize, b, 99, 100), "short and small: the server's tip");
-        assert!(!reply_cut_by_budget(b as usize, b, 100, 100), "complete: nothing to continue");
-        // Both sides clamp alike: a request below the floor is read as the floor.
-        assert!(reply_cut_by_budget((BACKFILL_BUDGET_MIN / 2) as usize, 1, 5, 9));
+    fn a_cut_reply_is_marked_and_decodes_like_any_other() {
+        let (dir, _) = log_with("mark", 40);
+        let (recs, cut) = read_records_range_budget(&dir, 1, 40, Some(1));
+        assert!(cut);
+        let marked = encode_raw_records_resp_cut(&recs, cut);
+        assert!(reply_cut_by_budget(&marked), "a cut reply says so");
+        assert!(!reply_cut_by_budget(&encode_raw_records_resp(&recs)), "an uncut one does not");
+        assert_eq!(decode_backfill_resp(&marked).unwrap().blocks.len(), recs.len(), "same framing, same blocks");
+        assert!(!reply_cut_by_budget(BACKFILL_BUSY_MAGIC), "BUSY is not a cut");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live failure (Epsilon -> Stockholm, 07:33-07:36): a small block, then a big one. The
+    /// reply cut before the big block is tiny — the size rule read it as the server's tip and
+    /// stopped; the mark keeps the client going, and every height still arrives exactly once.
+    #[test]
+    fn a_big_block_after_small_ones_still_continues() {
+        let dir = std::env::temp_dir().join(format!("sigil-budget-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut blocks = crate::block::__test_chain(200);
+        // Random hex, so compression cannot shrink it below the budget (~32 KB stored).
+        let filler: String = (0..1_000u32).map(|i| blake3::hash(&i.to_le_bytes()).to_hex().to_string()).collect();
+        for b in blocks.iter_mut().filter(|b| b.header.height % 37 == 0) {
+            b.events.push(sigil_events::SigilEvent::HonorConferred {
+                order: sigil_events::SigilOrder::Ridderkorset, rank: "Ridder".into(), recipient: [7; 32],
+                citation: filler.clone(), conferred_by: [9; 32],
+            });
+        }
+        let mut log = ChainLog::open(&dir).unwrap();
+        for b in &blocks {
+            log.append(b).unwrap();
+        }
+        drop(log);
+        let budget = BACKFILL_BUDGET_MIN;
+        let big = read_records_range(&dir, 37, 37)[0].len() as u64;
+        assert!(big > budget / 2, "the fixture really has a block over half the budget ({big} B)");
+        // The reply that ends right before the big block is small, and still marked.
+        let (recs, cut) = read_records_range_budget(&dir, 36, 200, Some(budget));
+        assert_eq!((recs.len(), cut), (1, true), "block 36 alone: 37 would pass the budget");
+        assert!(4 + recs[0].len() as u64 + 8 < budget / 2, "small enough to fool the size rule");
+        let (got, rounds) = sync(&dir, 1, 200, budget, true, true);
+        assert_eq!(got, (1..=200).collect::<Vec<_>>(), "zero skipped, zero repeated");
+        assert!(rounds > 5);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The four pairs, each graded by EVERY height exactly once.

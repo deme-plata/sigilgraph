@@ -956,6 +956,12 @@ fn exe() -> PathBuf {
 
 /// The last non-empty line of the node's log (why it stopped, usually).
 fn last_log_line(log: &Path) -> String {
+    last_log_line_full(log).chars().take(160).collect()
+}
+
+/// The node log's last line, whole (up to 2,000 characters) — what the recovery below reads; the
+/// screen shows the first 160.
+fn last_log_line_full(log: &Path) -> String {
     let Ok(f) = std::fs::File::open(log) else { return String::new() };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let mut r = std::io::BufReader::new(f);
@@ -963,9 +969,67 @@ fn last_log_line(log: &Path) -> String {
     let mut last = String::new();
     for line in r.lines().map_while(Result::ok) {
         let t = line.trim();
-        if !t.is_empty() { last = t.chars().take(160).collect(); }
+        if !t.is_empty() { last = t.chars().take(2_000).collect(); }
     }
     last
+}
+
+/// 10.7.3: did the node stop because `open` REFUSED its block file — damage at a named offset
+/// (`sigil_node::chain_log::OPEN_REFUSED_CORRUPT`)? Only that. A torn tail is cut by `open` itself
+/// and never says it; a slow open, a timeout or any other exit never matches. User nodes only: a
+/// server or the block-maker is configured by its operator, who decides.
+fn damaged_block_file(last_line: &str, user_mode: bool) -> bool {
+    user_mode && last_line.contains(sigil_node::chain_log::OPEN_REFUSED_CORRUPT)
+}
+
+/// 10.7.3 (Viktor's PC 10-26: four restarts on "… do not form a record", the screen saying
+/// "peers 0 · stalled"): restarting never heals a refused block file, and on a user node the
+/// blocks are all on the network. The chain data moves to `aether.damaged-<unix time>` BESIDE the
+/// store with the reason written into it — never deleted, and deliberately not an `aether.old-`
+/// name, so a later [Y] cannot remove it; identity, the user store and mining history stay.
+/// Refused, nothing moved, when the disk could not hold a second copy of the chain (the re-sync
+/// rebuilds it beside the kept one) — on 10-16 a fallback that ignored the disk filled it to 0 B.
+fn set_damaged_chain_aside(dir: &Path, reason: &str) -> Result<PathBuf, String> {
+    let live = dir.join("aether");
+    if !live.is_dir() {
+        return Err("there is no chain data folder to set aside".into());
+    }
+    let need = dir_size(&live) + (1 << 30);
+    if let Some(free) = crate::ai_setup::free_disk_bytes(&live) {
+        if free < need {
+            return Err(format!("{:.1} GB free, and syncing again needs about {:.1} GB beside the kept copy",
+                free as f64 / 1e9, need as f64 / 1e9));
+        }
+    }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let aside = dir.join(format!("aether.damaged-{secs}"));
+    // On Windows a scanner can hold the folder a moment after the node exits: a few tries.
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(&live, &aside) {
+            Ok(()) => break,
+            Err(e) if tries >= 10 => return Err(format!("could not rename {}: {e}", live.display())),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    let _ = std::fs::write(aside.join("WHY.txt"), format!("set aside by sigil-top {} — the node refused this block file:\n{reason}\n", env!("CARGO_PKG_VERSION")));
+    std::fs::create_dir_all(&live).map_err(|e| format!("could not make a fresh {}: {e}", live.display()))?;
+    let mh = aside.join("mining-history");
+    if mh.is_dir() {
+        let _ = std::fs::rename(&mh, live.join("mining-history"));
+    }
+    Ok(aside)
+}
+
+/// Bytes under `p`, best-effort (unreadable entries count as 0).
+fn dir_size(p: &Path) -> u64 {
+    std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| match e.file_type() {
+        Ok(t) if t.is_dir() => dir_size(&e.path()),
+        _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+    }).sum()).unwrap_or(0)
 }
 
 fn spawn_child(plan: &Plan) -> std::io::Result<Child> {
@@ -1103,6 +1167,7 @@ pub fn start_for_screen() -> Option<NodeHost> {
     let (child2, quit2, plan2) = (child.clone(), quit.clone(), plan.clone());
     let watcher = std::thread::Builder::new().name("own-node".into()).spawn(move || {
         let mut failures: u32 = 0;
+        let mut damaged_aside_tried = false;
         let mut started = Instant::now();
         let mut last_hashes = Instant::now() - Duration::from_secs(60);
         // Another sigil-top window's node holds the folder: show that node (its API), try our own again later.
@@ -1178,8 +1243,29 @@ pub fn start_for_screen() -> Option<NodeHost> {
                 status::set_peers(0);
                 status::set_boot(0, 0);
                 let why = last_log_line(&plan2.log);
+                let mut message = format!("exited ({st}){}", if why.is_empty() { String::new() } else { format!(": {why}") });
+                // 10.7.3: a block file the node REFUSED (damage at a named offset) — set it aside and sync
+                // again from the network, once per run (see `set_damaged_chain_aside`).
+                let full = last_log_line_full(&plan2.log);
+                if !damaged_aside_tried && damaged_block_file(&full, plan2.user_mode) {
+                    damaged_aside_tried = true;
+                    match set_damaged_chain_aside(&plan2.data_dir, &full) {
+                        Ok(aside) => {
+                            crate::tlog!("[own-node] block file damaged — set aside as {} (kept); syncing again from the network. The node said: {full}", aside.display());
+                            status::set_message(format!("your block file was damaged — kept as {} · downloading the chain again", aside.display()));
+                            status::set_phase(status::SYNCING);
+                            failures = 0;
+                            spawn_after = Instant::now();
+                            continue;
+                        }
+                        Err(e) => {
+                            crate::tlog!("[own-node] block file damaged but NOT set aside: {e}. The node said: {full}");
+                            message = format!("your block file is damaged and was not set aside: {e} — free some disk space, then press [Y] twice");
+                        }
+                    }
+                }
                 status::set_phase(status::STOPPED);
-                status::set_message(format!("exited ({st}){}", if why.is_empty() { String::new() } else { format!(": {why}") }));
+                status::set_message(message);
                 let pause = match failures { 1 => 5, 2 => 15, 3 => 60, _ => 300 };
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 status::set_retry_at(now + pause);
@@ -1310,6 +1396,63 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("aether.old-")).collect();
         assert_eq!(olds.len(), 1, "only the newest old copy is kept");
         assert_eq!(std::fs::read(old2.join("chain.log")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 10.7.3 (a): the recovery fires on the REFUSAL only — the exact line Viktor's PC printed under
+    /// 10.7.2, and 10.7.3's wording — never on the torn tail `open` cuts itself, a slow open, or a
+    /// server node.
+    #[test]
+    fn only_a_refused_block_file_on_a_user_node_triggers_the_set_aside() {
+        let viktor_1072 = "Error: open chain.log: chain.log: 190729391 bytes after the last complete record at offset \
+            1872345600 do not form a record — a corrupt length prefix, not a torn append; not cutting (repair_chain_log)";
+        let now_1073 = format!("Error: open chain.log: chain.log: 70000000 bytes after the last complete record at offset 9 {} — a \
+            corrupt length prefix, not a torn append; not cutting. The blocks are on the network: set the data folder aside and \
+            re-sync (sigil-top does this itself on a user node)", sigil_node::chain_log::OPEN_REFUSED_CORRUPT);
+        assert!(damaged_block_file(viktor_1072, true));
+        assert!(damaged_block_file(&now_1073, true));
+        let torn_cut = "⚠ chain.log ended in a torn record: 4096 bytes after the last complete one (offset 77) cut off, kept as chain.log.torn-77";
+        let slow = "chain.log: 3597865 records — 0 from chain.off, 3597865 scanned (812.4 s)";
+        for line in [torn_cut, slow, "", "Error: open chain.log: Access is denied. (os error 5)"] {
+            assert!(!damaged_block_file(line, true), "must not fire on: {line}");
+        }
+        assert!(!damaged_block_file(viktor_1072, false), "a server / block-maker is its operator's call");
+    }
+
+    /// 10.7.3 (a): the damaged data moves BESIDE the store with its reason, nothing is deleted (an
+    /// earlier [Y] copy and an earlier damaged copy both survive), mining history and identity stay.
+    #[test]
+    fn a_damaged_block_file_is_kept_beside_the_store_and_nothing_is_deleted() {
+        let d = std::env::temp_dir().join(format!("own-node-damaged-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("aether/mining-history")).unwrap();
+        std::fs::create_dir_all(d.join("aether.old-1")).unwrap();
+        std::fs::create_dir_all(d.join("aether.damaged-1")).unwrap();
+        std::fs::create_dir_all(d.join("aether-user")).unwrap();
+        std::fs::write(d.join("aether/chain.log"), b"damaged blocks").unwrap();
+        std::fs::write(d.join("aether/mining-history/won"), b"7").unwrap();
+        std::fs::write(d.join("node-id"), b"sigil-top-x").unwrap();
+        let aside = set_damaged_chain_aside(&d, "the reason line").unwrap();
+        assert_eq!(aside.parent(), Some(d.as_path()), "beside the store, never a temp dir");
+        assert!(aside.file_name().unwrap().to_string_lossy().starts_with("aether.damaged-"));
+        assert_eq!(std::fs::read(aside.join("chain.log")).unwrap(), b"damaged blocks", "kept whole");
+        assert!(std::fs::read_to_string(aside.join("WHY.txt")).unwrap().contains("the reason line"));
+        assert!(d.join("aether").is_dir() && !d.join("aether/chain.log").exists(), "a fresh store syncs from block 0");
+        assert_eq!(std::fs::read(d.join("aether/mining-history/won")).unwrap(), b"7", "mining history stays");
+        assert!(d.join("aether.old-1").is_dir() && d.join("aether.damaged-1").is_dir(), "nothing earlier is deleted");
+        assert!(d.join("node-id").exists() && d.join("aether-user").is_dir(), "identity and user store untouched");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The screen keeps its 160 characters; the recovery reads the whole line.
+    #[test]
+    fn the_recovery_reads_the_whole_last_line() {
+        let d = std::env::temp_dir().join(format!("own-node-lastline-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let line = format!("{} {}", "x".repeat(300), sigil_node::chain_log::OPEN_REFUSED_CORRUPT);
+        std::fs::write(d.join("node.log"), format!("earlier\n{line}\n\n")).unwrap();
+        assert_eq!(last_log_line_full(&d.join("node.log")), line);
+        assert_eq!(last_log_line(&d.join("node.log")).chars().count(), 160);
         let _ = std::fs::remove_dir_all(&d);
     }
 

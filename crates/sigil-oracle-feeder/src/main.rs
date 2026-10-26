@@ -91,7 +91,7 @@ impl Config {
         let env_u = |k: &str, d: u128| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         Ok(Self {
             sigil_api_url: std::env::var("SIGIL_API_URL").unwrap_or_else(|_| "http://127.0.0.1:18181".into()),
-            polygon_rpc_url: std::env::var("POLYGON_RPC_URL").unwrap_or_else(|_| "https://polygon-bor-rpc.publicnode.com".into()),
+            polygon_rpc_url: std::env::var("POLYGON_RPC_URL").unwrap_or_else(|_| "https://polygon.drpc.org".into()),
             pair: std::env::var("SIGIL_ORACLE_PAIR").unwrap_or_else(|_| DEFAULT_PAIR.into()).parse().context("SIGIL_ORACLE_PAIR is not an address")?,
             keyfile: std::env::var("SIGIL_ORACLE_FEEDER_KEYFILE").unwrap_or_else(|_| "/root/.config/sigil/oracle-feeder.seed".into()).into(),
             interval: Duration::from_secs(env_u("SIGIL_ORACLE_INTERVAL_SECS", 600) as u64),

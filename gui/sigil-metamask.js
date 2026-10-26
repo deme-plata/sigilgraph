@@ -8,7 +8,7 @@
 
    Wrapped-SIGIL ERC-20, Polygon mainnet (chain 137):
      0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7
-   Verified live 2026-08-26 by eth_call against polygon-bor-rpc.publicnode.com:
+   Verified live 2026-08-26 by eth_call against a public Polygon RPC:
      symbol()   -> "SIGIL"
      decimals() -> 18        (0x12)
 
@@ -47,7 +47,7 @@
     chainId: '0x89',                       // 137
     chainName: 'Polygon Mainnet',
     nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
-    rpcUrls: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    rpcUrls: ['https://polygon.drpc.org', 'https://1rpc.io/matic'],
     blockExplorerUrls: ['https://polygonscan.com']
   };
 
@@ -60,7 +60,7 @@
   // Read-only fallbacks, same order/endpoints as sigil-api's Chain::Polygon
   // public_fallbacks() — used when no injected wallet is present so the
   // balance card still works for a logged-out visitor.
-  var PUBLIC_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
+  var PUBLIC_RPCS = ['https://polygon.drpc.org', 'https://1rpc.io/matic'];  // 2026-10-26: was publicnode (Avast flags it URL:Phishing); the old polygon-rpc host is dead (401)
 
   var SEL_BURN      = '0xbcf64e05'; // burn(uint256,bytes32)
   // Set to true ONLY when sigil-bridge-relayer is live and watching BurnedTo events.

@@ -32,7 +32,7 @@
   var USDC   = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
   var ROUTER = '0xedf6066a2b290c185783862c7f4776a2c8077ad1';   // canonical Uniswap V2 on Polygon
   var CHAIN  = '0x89';
-  var RPCS   = ['https://polygon-bor-rpc.publicnode.com', 'https://polygon-rpc.com', 'https://1rpc.io/matic'];
+  var RPCS   = ['https://polygon.drpc.org', 'https://1rpc.io/matic', 'https://polygon.gateway.tenderly.co'];  // 2026-10-26: was publicnode (Avast flags it URL:Phishing); the old polygon-rpc host is dead (401)
 
   var D_WSIG = 18, D_USDC = 6;
   var SEL_SUPPLY   = '0x18160ddd';

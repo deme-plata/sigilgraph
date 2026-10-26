@@ -4097,7 +4097,7 @@ window.sigilPostProof = sigilPostProof;
   var WSIGIL_CONTRACT = '0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7'; // Polygon mainnet, chain 137
   var WSIGIL_DECIMALS = 18;
   // Same order/endpoints as sigil-api's Chain::Polygon public_fallbacks().
-  var POLY_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
+  var POLY_RPCS = ['https://polygon.drpc.org', 'https://1rpc.io/matic'];  // 2026-10-26: was publicnode (Avast flags it URL:Phishing); the old polygon-rpc host is dead (401)
   var SELECTOR_BALANCE_OF = '0x70a08231';
 
   function padAddr(addr){ return addr.toLowerCase().replace(/^0x/, '').padStart(64, '0'); }
@@ -8563,7 +8563,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     }
     return 0;
   }
-  var POLY_RPCS = ['https://polygon-bor-rpc.publicnode.com','https://polygon-rpc.com'];
+  var POLY_RPCS = ['https://polygon.drpc.org','https://1rpc.io/matic'];  // 2026-10-26: was publicnode (Avast flags it URL:Phishing); the old polygon-rpc host is dead (401)
   async function pullPolygon(){
     var MM = window.SigilMM;
     if(!MM || !MM.rawCall) return;                       // helper not loaded

@@ -63,7 +63,14 @@ impl Chain {
     fn public_fallbacks(self) -> &'static [&'static str] {
         match self {
             Chain::Ethereum => &["https://ethereum-rpc.publicnode.com", "https://1rpc.io/eth"],
-            Chain::Polygon => &["https://polygon-bor-rpc.publicnode.com", "https://1rpc.io/matic"],
+            // Not polygon-bor-rpc.publicnode.com: Avast Web Shield flags it as URL:Phishing, and
+            // sigil-top embeds this crate, so every Windows user running Avast got phishing alerts.
+            // Not polygon-rpc.com either: it answers 401 "tenant disabled" (checked 2026-10-26).
+            Chain::Polygon => &[
+                "https://polygon.drpc.org",
+                "https://1rpc.io/matic",
+                "https://polygon.gateway.tenderly.co",
+            ],
         }
     }
 
@@ -93,7 +100,7 @@ impl Chain {
 ///   1. The chain's override env var, if set (Ethereum only — see `Chain::override_env`).
 ///   2. Alchemy, if a key is on disk — authenticated, far more reliable than
 ///      the free tier below; this is the normal path once a key exists.
-///   3. Two free, keyless public endpoints — the fallback of last resort,
+///   3. Free, keyless public endpoints — the fallback of last resort,
 ///      kept so this never goes fully dark if Alchemy has an outage or the
 ///      key is ever rotated out without a replacement.
 fn rpc_endpoints(chain: Chain) -> Vec<String> {
@@ -238,5 +245,18 @@ mod tests {
         assert_eq!(format_usdc(0), "0.000000");
         assert_eq!(format_usdc(1), "0.000001");
         assert_eq!(format_usdc(1_000_000), "1.000000");
+    }
+
+    #[test]
+    fn polygon_fallbacks_avoid_flagged_and_dead_hosts() {
+        // sigil-top ships this list to users' machines: publicnode trips Avast's
+        // URL:Phishing block, polygon-rpc.com answers 401 "tenant disabled".
+        let fallbacks = Chain::Polygon.public_fallbacks();
+        assert!(!fallbacks.is_empty());
+        for url in fallbacks {
+            assert!(url.starts_with("https://"), "{url}");
+            assert!(!url.contains("publicnode"), "{url}");
+            assert!(!url.contains("polygon-rpc.com"), "{url}");
+        }
     }
 }

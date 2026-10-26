@@ -36,6 +36,9 @@ pub(crate) fn dispatch(argv: &[String]) -> bool {
         // 10.4.22: `sigil-top wallet [show | phrase | import | new [--replace]]` — one wallet everywhere.
         #[cfg(feature = "shield-register")]
         Some("wallet") => { crate::wallet_phrase::run_cli(&argv[1..]); return true; }
+        // 2026-10-26: `sigil-top kgauge [URL]` — one K_fix + witness reading with every input, read
+        // from the node's /v1 routes. No node, no screen: safe beside a running sigil-top.
+        Some("kgauge") => { crate::kgauge_ui::run_cli(&argv[1..]); return true; }
         // Windows launch-at-login control: `sigil-top autostart on|off|status`. The TUI also
         // exposes this via the tray's "Start at login" checkbox.
         Some("autostart") => {

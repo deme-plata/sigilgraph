@@ -84,6 +84,10 @@ CHAIN — download and verify
   hash-at <H> [<H> …]               print the block hash the LOCAL store holds at each height, so two
                                     nodes can be compared at equal height. Exit 1 if a height is not
                                     held. Use on a store no other sigil-top has open. [--json]
+  kgauge [URL]                      one Kristensen K-gauge reading: K_fix, its four disagreement
+                                    channels and the witness W (could a disagreement be seen?),
+                                    every input shown. Reads the node's /v1 routes (default: the
+                                    --api origin), starts no node.
 
     Verifying is the point: `verified` in the dashboard is the height THIS process has
     checked itself. `tip` is only what the network claims. A gap means catching up, not
@@ -197,7 +201,7 @@ mod tests {
     fn help_covers_the_surface_a_reader_cannot_guess() {
         let out = render("0.0.0-test");
         for needle in [
-            "full-sync", "verify-chain", "mine-rig", "serve", "update", "autostart",
+            "full-sync", "verify-chain", "mine-rig", "serve", "update", "autostart", "kgauge",
             "SIGIL_MINE_SEED", "SIGIL_MINE_WALLET", "FLUX_STATIC_DIR", "SIGIL_HEADLESS",
             "EXIT CODES", "9800", "--interval", "--lite",
         ] {

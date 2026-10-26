@@ -94,6 +94,11 @@ const OFF_SAMPLES: usize = 64;
 /// refuses to cut it: far above any real record, so anything larger is not a crash mid-append
 /// but a corrupt length prefix inside the log — cutting there would silently drop real blocks.
 const MAX_TORN_TAIL: u64 = 64 << 20;
+/// The words `open` uses when it REFUSES a log (more than [`MAX_TORN_TAIL`] dangling at a named
+/// offset). sigil-top recognises a damaged block file by exactly this (10.7.3) — one string,
+/// shared, so the refusal and the recovery cannot drift apart. A torn tail at or under the
+/// limit is cut by `open` itself and never produces it.
+pub const OPEN_REFUSED_CORRUPT: &str = "do not form a record";
 
 /// Minimal deserialization target to pull `header.height` out of a block's
 /// serde_json bytes without decoding the whole block (used on the append path
@@ -167,6 +172,80 @@ fn warn_if_newer_format(payload: &[u8]) {
 /// record format and there must be one reader of it.
 pub(crate) fn probe_height(payload: &[u8]) -> Option<u64> {
     sigil_record::probe_height(payload)
+}
+
+/// How far below the wanted height a seek hint may land: the readers walk forward from it, as
+/// they did from a sparse `chain.idx` entry (at most [`IDX_EVERY`] below), so allow the same.
+const SEEK_HINT_REACH: u64 = 4 * IDX_EVERY;
+
+/// The height of the record that starts at `off`, from its leading bytes only.
+fn height_at(log: &mut File, off: u64, log_len: u64) -> Option<u64> {
+    if off.checked_add(4)? > log_len {
+        return None;
+    }
+    log.seek(SeekFrom::Start(off)).ok()?;
+    let mut lb = [0u8; 4];
+    log.read_exact(&mut lb).ok()?;
+    let len = u32::from_le_bytes(lb) as u64;
+    if len == 0 || off + 4 + len > log_len {
+        return None;
+    }
+    let mut head = vec![0u8; (len as usize).min(PROBE_WINDOW)];
+    log.read_exact(&mut head).ok()?;
+    probe_height(&head)
+}
+
+/// 2026-10-26 (10.7.3): where to start reading for `height`, from the DENSE record offsets
+/// (`chain.off`, or `ChainLog::offsets` in RAM) instead of the sparse `chain.idx` + a forward
+/// walk that decoded every record it passed. MEASURED on a 1 TB log of 0.92 MB blocks:
+/// `get_by_height` p50 6.9 s / max 12.8 s, while a read at a known offset took 57 ms.
+///
+/// Entry `i` is the i-th RECORD, which is height `i` only for a log that starts at genesis; a
+/// node that began from a snapshot starts at some height `base`, so `height - base` is tried
+/// first. Every hint is checked by probing the height at that offset: the result is either a
+/// record AT `height`, or one at most [`SEEK_HINT_REACH`] below it (callers walk forward).
+/// `None` → no usable hint; callers fall back to `chain.idx`. A stale or misaligned table
+/// (rewound logs, the g2 +1077 anomaly) costs time, never correctness.
+fn seek_hint(log: &mut File, log_len: u64, entries: u64, mut entry: impl FnMut(u64) -> Option<u64>, height: u64) -> Option<u64> {
+    if entries == 0 {
+        return None;
+    }
+    let base = height_at(log, entry(0)?, log_len)?;
+    let mut tried = None;
+    for i in [height.checked_sub(base), Some(height)].into_iter().flatten() {
+        if i >= entries || tried == Some(i) {
+            continue;
+        }
+        tried = Some(i);
+        let Some(off) = entry(i) else { continue };
+        match height_at(log, off, log_len) {
+            Some(h) if h == height || (h < height && height - h <= SEEK_HINT_REACH) => return Some(off),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// [`seek_hint`] from the `chain.off` file beside a `chain.log` — for the read-only serve path,
+/// which holds no `ChainLog` (see `serve_read`). Two small reads of `chain.off`, two record
+/// probes; the file being appended concurrently is fine (a missing or partial entry → `None`).
+pub(crate) fn off_seek(dir: &Path, height: u64) -> Option<u64> {
+    let mut off = File::open(dir.join("chain.off")).ok()?;
+    let mut hdr = [0u8; OFF_HEADER_LEN];
+    off.read_exact(&mut hdr).ok()?;
+    if hdr[..7] != OFF_MAGIC || hdr[7] != OFF_VERSION {
+        return None;
+    }
+    let entries = off.metadata().ok()?.len().saturating_sub(OFF_HEADER_LEN as u64) / 8;
+    let mut log = File::open(dir.join("chain.log")).ok()?;
+    let log_len = log.metadata().ok()?.len();
+    let entry = |i: u64| -> Option<u64> {
+        let mut b = [0u8; 8];
+        off.seek(SeekFrom::Start(OFF_HEADER_LEN as u64 + 8 * i)).ok()?;
+        off.read_exact(&mut b).ok()?;
+        Some(u64::from_le_bytes(b))
+    };
+    seek_hint(&mut log, log_len, entries, entry, height)
 }
 
 pub struct ChainLog {
@@ -281,8 +360,9 @@ impl ChainLog {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "chain.log: {dangling} bytes after the last complete record at offset {end} do not form a \
-                     record — a corrupt length prefix, not a torn append; not cutting (repair_chain_log)"
+                    "chain.log: {dangling} bytes after the last complete record at offset {end} {OPEN_REFUSED_CORRUPT} — a \
+                     corrupt length prefix, not a torn append; not cutting. The blocks are on the network: set the data \
+                     folder aside and re-sync (sigil-top does this itself on a user node)"
                 ),
             ));
         }
@@ -561,8 +641,7 @@ impl ChainLog {
     /// today's only caller is the one-time boot-time snapshot check.
     pub fn get_by_height(&self, height: u64) -> Option<Block> {
         const MAX_SCAN: u64 = IDX_EVERY * 4; // generous vs. the 512-block index stride
-        let dir = self.path.parent()?;
-        let start = Self::idx_seek_offset(dir, height, &self.path).unwrap_or(0);
+        let start = self.seek_start(height);
         let mut r = BufReader::new(File::open(&self.path).ok()?);
         r.seek(SeekFrom::Start(start)).ok()?;
         for _ in 0..MAX_SCAN {
@@ -574,6 +653,13 @@ impl ChainLog {
             let mut buf = vec![0u8; n];
             if r.read_exact(&mut buf).is_err() {
                 return None; // torn tail record
+            }
+            // 10.7.3: pass records below the target by their framed height — decoding each one
+            // was most of the 6.9 s a lookup took on a 1 TB log.
+            match probe_height(&buf) {
+                Some(h) if h < height => continue,
+                Some(h) if h > height => return None,
+                _ => {}
             }
             let block: Block = match decode_record(&buf).ok_or(()) {
                 Ok(b) => b,
@@ -610,8 +696,7 @@ impl ChainLog {
     /// phase is bounded by the same `IDX_EVERY` stride `get_by_height` scans.
     pub fn get_range_by_height(&self, from: u64, to: u64) -> Vec<Block> {
         let mut out = Vec::new();
-        let Some(dir) = self.path.parent() else { return out };
-        let start = Self::idx_seek_offset(dir, from, &self.path).unwrap_or(0);
+        let start = self.seek_start(from);
         let Ok(f) = File::open(&self.path) else { return out };
         let mut r = BufReader::new(f);
         if r.seek(SeekFrom::Start(start)).is_err() { return out; }
@@ -621,6 +706,11 @@ impl ChainLog {
             let n = u32::from_le_bytes(lb) as usize;
             let mut buf = vec![0u8; n];
             if r.read_exact(&mut buf).is_err() { break; } // torn tail record
+            match probe_height(&buf) {
+                Some(h) if h < from => continue, // 10.7.3: skip by framed height, no decode
+                Some(h) if h > to => break,
+                _ => {}
+            }
             let block: Block = match decode_record(&buf).ok_or(()) {
                 Ok(b) => b,
                 Err(_) => continue, // shouldn't happen; keep scanning rather than abort
@@ -630,6 +720,18 @@ impl ChainLog {
             out.push(block);
         }
         out
+    }
+
+    /// Where the height-verified readers start: the dense in-RAM `offsets`, checked by
+    /// [`seek_hint`]; else the sparse `chain.idx` as before; else the start of the log.
+    fn seek_start(&self, height: u64) -> u64 {
+        let offs = &self.offsets;
+        let hint = File::open(&self.path).ok().and_then(|mut f| {
+            let len = f.metadata().ok()?.len();
+            seek_hint(&mut f, len, offs.len() as u64, |i| offs.get(i as usize).copied(), height)
+        });
+        hint.or_else(|| self.path.parent().and_then(|dir| Self::idx_seek_offset(dir, height, &self.path)))
+            .unwrap_or(0)
     }
 
     /// Read a contiguous height range `[from..=to]` from disk with ONE file open +
@@ -1234,6 +1336,100 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + 300, "nothing cut");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 10.7.3 (b): the dense table finds the record in one checked seek — for a log that does not
+    /// start at genesis (`__test_chain` is heights 1..=n, so entry i holds height i + 1), and a
+    /// table that LIES (shifted above the wanted height) is refused and the old path answers.
+    #[test]
+    fn seek_hint_finds_the_record_and_never_trusts_a_lying_table() {
+        let dir = fresh_dir("seekhint");
+        let blocks = crate::block::__test_chain(600);
+        write_log(&dir, &blocks);
+        let offs = offsets_by_full_scan(&dir);
+        for h in [1u64, 2, 300, 511, 512, 513, 600] {
+            assert_eq!(off_seek(&dir, h), Some(offs[(h - 1) as usize]), "chain.off seek lands on height {h}");
+        }
+        assert_eq!(off_seek(&dir, 601), None, "past the end: no hint");
+        let log = ChainLog::open(&dir).unwrap();
+        for h in [1u64, 299, 600] {
+            assert_eq!(log.get_by_height(h).unwrap().header.height, h);
+        }
+        assert_eq!(log.get_range_by_height(510, 515).iter().map(|b| b.header.height).collect::<Vec<_>>(), (510..=515).collect::<Vec<_>>());
+        drop(log);
+
+        // A table shifted 3 records AHEAD: every hint lands above the wanted height → refused.
+        let write_off = |entries: &[u64]| {
+            let mut raw = Vec::from(OFF_MAGIC);
+            raw.push(OFF_VERSION);
+            for o in entries {
+                raw.extend(o.to_le_bytes());
+            }
+            std::fs::write(dir.join("chain.off"), raw).unwrap();
+        };
+        let ahead: Vec<u64> = (0..offs.len()).map(|i| offs[(i + 3).min(offs.len() - 1)]).collect();
+        write_off(&ahead);
+        assert_eq!(off_seek(&dir, 300), Some(offs[299]),
+            "a UNIFORM shift moves the base probe too, so the base correction lands on the true record");
+        // A table that really lies: entry 0 honest, every other entry at the LAST record (height
+        // 600) — each hint lands above the wanted height and is refused.
+        let lying: Vec<u64> = (0..offs.len()).map(|i| if i == 0 { offs[0] } else { offs[offs.len() - 1] }).collect();
+        write_off(&lying);
+        assert_eq!(off_seek(&dir, 300), None, "a hint above the wanted height is never used");
+        assert_eq!(read_blocks_via_log(&dir, 300), Some(300), "and the reader still answers, through chain.idx");
+        // A table shifted 10 records BEHIND: lands below, within reach → used, and the walk forward finds it.
+        let behind: Vec<u64> = (0..offs.len()).map(|i| offs[i.saturating_sub(10)]).collect();
+        write_off(&behind);
+        let hint = off_seek(&dir, 300).expect("a hint below, within reach, is used");
+        assert!(hint < offs[299], "it lands below the record and the reader walks forward");
+        for got in [read_blocks_via_log(&dir, 300), read_blocks_via_log(&dir, 1)] {
+            assert!(got.is_some(), "the readers still answer through any table");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Open a log WITHOUT letting `open` rewrite chain.off, and read one height through it.
+    fn read_blocks_via_log(dir: &Path, h: u64) -> Option<u64> {
+        crate::serve_read::read_records_range(dir, h, h)
+            .first()
+            .and_then(|r| decode_record(r))
+            .map(|b| b.header.height)
+            .filter(|got| *got == h)
+    }
+
+    /// 10.7.3 (a), both sides of the 64 MiB line THROUGH `open` (sparse files, no 64 MiB written
+    /// on the refuse side): at the limit the torn tail is cut and the log opens; one byte over,
+    /// `open` refuses with [`OPEN_REFUSED_CORRUPT`] naming the offset — the only words sigil-top
+    /// acts on, so the two paths can never both fire.
+    #[test]
+    fn open_cuts_at_the_64_mib_line_and_refuses_one_byte_over() {
+        for (over, tag) in [(false, "at-limit"), (true, "over-limit")] {
+            let dir = fresh_dir(tag);
+            write_log(&dir, &crate::block::__test_chain(20));
+            let path = dir.join("chain.log");
+            let whole = std::fs::metadata(&path).unwrap().len();
+            // A length prefix claiming more than the file holds, then the dangling region (zeros).
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&u32::MAX.to_le_bytes()).unwrap();
+            drop(f);
+            let dangling = MAX_TORN_TAIL + over as u64;
+            OpenOptions::new().write(true).open(&path).unwrap().set_len(whole + dangling).unwrap();
+            match ChainLog::open(&dir) {
+                Ok(log) if !over => {
+                    assert_eq!(log.height(), 20, "at the limit: cut, every whole record kept");
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+                    assert!(dir.join(format!("chain.log.torn-{whole}")).exists(), "the cut bytes are kept beside the log");
+                }
+                Err(e) if over => {
+                    let msg = e.to_string();
+                    assert!(msg.contains(OPEN_REFUSED_CORRUPT), "refusal names itself: {msg}");
+                    assert!(msg.contains(&format!("at offset {whole}")), "and the offset: {msg}");
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole + dangling, "nothing cut");
+                }
+                other => panic!("{tag}: unexpected {:?}", other.map(|l| l.height())),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

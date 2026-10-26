@@ -120,6 +120,56 @@ fn idx_seek_offset(dir: &Path, from_height: u64) -> Option<u64> {
     Some(best.map(|(_, off)| off).unwrap_or(0))
 }
 
+/// Where a range read starts: `chain.off` first (one checked seek, see
+/// `chain_log::off_seek`), else the sparse index, else the start of the log (10.7.3).
+fn seek_start(dir: &Path, from_height: u64) -> u64 {
+    crate::chain_log::off_seek(dir, from_height)
+        .or_else(|| idx_seek_offset(dir, from_height))
+        .unwrap_or(0)
+}
+
+/// ── BYTE BUDGET FOR FULL-BLOCK REPLIES (10.7.3) ─────────────────────────────────────
+///
+/// A full-block reply used to be sized only in BLOCKS (the client asks ≤ 1,024, never fewer
+/// than 256), which silently assumes a block size. MEASURED 2026-10-26 on a 1 TB chronos log
+/// of 0.92 MB private-payment blocks: 256 blocks = 236 MB, 3.7× flux-p2p's 64 MiB message
+/// cap, and 7.6–11.7 s to read + carry Epsilon → Stockholm against the 8 s request timeout.
+///
+/// So a client may name `max_bytes`: the server stops adding records once the next one would
+/// pass it (always at least one), and the client asks again from the next height. Old
+/// clients never send it and get exactly the old answer. The client recognises a trimmed
+/// reply WITHOUT any new wire field: a reply that stops short of the range AND is at least
+/// half the budget can only have been cut by the budget (no single record is near half of
+/// any budget a client sends; one that stopped at the server's tip is small). Both halves
+/// of that rule live here so they cannot drift apart.
+pub const BACKFILL_BUDGET_MIN: u64 = 16 << 10;
+pub const BACKFILL_BUDGET_MAX: u64 = 48 << 20;
+
+/// The budget both sides use for a requested `max_bytes`.
+pub fn clamp_budget(max_bytes: u64) -> u64 {
+    max_bytes.clamp(BACKFILL_BUDGET_MIN, BACKFILL_BUDGET_MAX)
+}
+
+/// Add one stored record under the budget. Returns false (record NOT added) when it would
+/// pass the budget and at least one record is already in — the reply is then complete.
+pub fn push_within_budget(out: &mut Vec<Vec<u8>>, used: &mut u64, budget: Option<u64>, rec: Vec<u8>) -> bool {
+    let cost = 4 + rec.len() as u64;
+    if let Some(b) = budget {
+        if !out.is_empty() && *used + cost > b {
+            return false;
+        }
+    }
+    *used += cost;
+    out.push(rec);
+    true
+}
+
+/// Client side: was a reply that ended at `last_height` (< the range end `to`) cut by the
+/// budget the client asked for? See the section note above.
+pub fn reply_cut_by_budget(reply_len: usize, max_bytes: u64, last_height: u64, to: u64) -> bool {
+    last_height < to && reply_len as u64 >= clamp_budget(max_bytes) / 2
+}
+
 /// Pull `header.height` out of a record's leading bytes without a full parse.
 ///
 /// 2026-08-27: this had its own implementation that searched the record bytes for the
@@ -154,7 +204,7 @@ pub fn read_headers_range(dir: &Path, from: u64, to: u64) -> Vec<SigilBlockHeade
     if to < from {
         return out;
     }
-    let start = idx_seek_offset(dir, from).unwrap_or(0);
+    let start = seek_start(dir, from);
     let Ok(f) = File::open(log_path(dir)) else {
         return out;
     };
@@ -230,7 +280,7 @@ pub fn read_blocks_range(dir: &Path, from: u64, to: u64) -> Vec<crate::block::Bl
     if to < from {
         return out;
     }
-    let start = idx_seek_offset(dir, from).unwrap_or(0);
+    let start = seek_start(dir, from);
     let Ok(f) = File::open(log_path(dir)) else {
         return out;
     };
@@ -286,18 +336,27 @@ pub fn read_blocks_range(dir: &Path, from: u64, to: u64) -> Vec<crate::block::Bl
 /// never decoded — the server only reads and copies. A record whose height cannot be probed (legacy JSON) is decoded
 /// once for its height; torn tails and unreadable records end or skip exactly as in `read_blocks_range`.
 pub fn read_records_range(dir: &Path, from: u64, to: u64) -> Vec<Vec<u8>> {
+    read_records_range_budget(dir, from, to, None).0
+}
+
+/// [`read_records_range`] under a byte budget (10.7.3, see [`clamp_budget`]): stops before the
+/// record that would pass `budget` — always returning at least one — WITHOUT reading it.
+/// Returns the records and whether the budget, not `to` or the end of the log, ended them.
+pub fn read_records_range_budget(dir: &Path, from: u64, to: u64, budget: Option<u64>) -> (Vec<Vec<u8>>, bool) {
     let mut out = Vec::new();
+    let mut used = 0u64;
     if to < from {
-        return out;
+        return (out, false);
     }
-    let start = idx_seek_offset(dir, from).unwrap_or(0);
+    let start = seek_start(dir, from);
     let Ok(f) = File::open(log_path(dir)) else {
-        return out;
+        return (out, false);
     };
     let mut r = BufReader::new(f);
     if r.seek(SeekFrom::Start(start)).is_err() {
-        return out;
+        return (out, false);
     }
+    let over = |out: &Vec<Vec<u8>>, used: u64, n: usize| budget.is_some_and(|b| !out.is_empty() && used + 4 + n as u64 > b);
     loop {
         let mut lb = [0u8; 4];
         if r.read_exact(&mut lb).is_err() {
@@ -320,6 +379,9 @@ pub fn read_records_range(dir: &Path, from: u64, to: u64) -> Vec<Vec<u8>> {
             if h > to {
                 break;
             }
+            if over(&out, used, n) {
+                return (out, true);
+            }
         }
         if n > take {
             let mut rest = vec![0u8; n - take];
@@ -335,10 +397,14 @@ pub fn read_records_range(dir: &Path, from: u64, to: u64) -> Vec<Vec<u8>> {
                 Some(_) => {}
                 None => continue,
             }
+            if over(&out, used, n) {
+                return (out, true);
+            }
         }
+        used += 4 + n as u64;
         out.push(buf);
     }
-    out
+    (out, false)
 }
 
 /// Option 1 wire: `SIGILR1\0` then `[u32 LE len][stored chain.log record]` per block, in height order.
@@ -1031,5 +1097,130 @@ mod backfill_body_wire {
         let legacy = bincode::serialize(&resp).expect("legacy encode");
         let back = decode_backfill_resp(&legacy).expect("legacy peers must still be readable");
         assert_eq!(back.blocks.len(), 0);
+    }
+}
+
+/// 10.7.3 (c): the byte budget and the client's continuation, as one contract. The client loop
+/// below is the windowed fetcher's decision rule (`lib.rs`, `reply_cut_by_budget` after every
+/// reply) driven against the REAL reader, wire encoder and decoder. Graded the way a sync must
+/// be graded (Quillon's chunk-shaped holes): every height of the range exactly once — never by
+/// "the last height arrived".
+#[cfg(test)]
+mod byte_budget_contract {
+    use super::*;
+    use crate::chain_log::ChainLog;
+
+    fn log_with(tag: &str, n: u64) -> (PathBuf, Vec<crate::block::Block>) {
+        let dir = std::env::temp_dir().join(format!("sigil-budget-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blocks = crate::block::__test_chain(n); // heights 1..=n
+        let mut log = ChainLog::open(&dir).unwrap();
+        for b in &blocks {
+            log.append(b).unwrap();
+        }
+        (dir, blocks)
+    }
+
+    /// One server answer: `new_server` honours `max_bytes`, an old server ignores it.
+    fn serve(dir: &Path, from: u64, to: u64, max_bytes: Option<u64>, new_server: bool) -> Vec<u8> {
+        let budget = max_bytes.filter(|_| new_server).map(clamp_budget);
+        encode_raw_records_resp(&read_records_range_budget(dir, from, to, budget).0)
+    }
+
+    /// A client syncing `[from..=to]`: `new_client` sends `max_bytes` and continues a reply cut by
+    /// the budget; an old client takes one answer. Returns (heights received, replies used).
+    fn sync(dir: &Path, from: u64, to: u64, budget: u64, new_client: bool, new_server: bool) -> (Vec<u64>, u32) {
+        let max_bytes = new_client.then_some(budget);
+        let (mut got, mut cur, mut rounds) = (Vec::new(), from, 0u32);
+        loop {
+            let bytes = serve(dir, cur, to, max_bytes, new_server);
+            rounds += 1;
+            let blocks = decode_backfill_resp(&bytes).expect("decodes").blocks;
+            let last = blocks.iter().map(|b| b.header.height).max();
+            got.extend(blocks.iter().map(|b| b.header.height));
+            match (max_bytes, last) {
+                (Some(mb), Some(l)) if l >= cur && reply_cut_by_budget(bytes.len(), mb, l, to) => cur = l + 1,
+                _ => break,
+            }
+            assert!(rounds < 10_000, "no progress");
+        }
+        (got, rounds)
+    }
+
+    #[test]
+    fn the_budget_stops_before_the_record_that_would_pass_it_and_always_sends_one() {
+        let (dir, _) = log_with("rule", 300);
+        let all = read_records_range(&dir, 10, 299);
+        assert_eq!(all.len(), 290);
+        let cost = |rs: &[Vec<u8>]| rs.iter().map(|r| 4 + r.len() as u64).sum::<u64>();
+        // A budget that fits exactly seven records → exactly seven, and "cut".
+        let b7 = cost(&all[..7]);
+        let (r, cut) = read_records_range_budget(&dir, 10, 299, Some(b7));
+        assert_eq!((r.len(), cut), (7, true));
+        assert_eq!(r, all[..7].to_vec(), "the same bytes, contiguous from `from`");
+        // One byte less → six.
+        assert_eq!(read_records_range_budget(&dir, 10, 299, Some(b7 - 1)).0.len(), 6);
+        // Smaller than one record → still one: a reply is never empty for a range the node holds.
+        let (r, cut) = read_records_range_budget(&dir, 10, 299, Some(1));
+        assert_eq!((r.len(), cut), (1, true));
+        // The range ends inside the budget → the whole range, NOT cut.
+        let (r, cut) = read_records_range_budget(&dir, 10, 16, Some(b7 * 4));
+        assert_eq!((r.len(), cut), (7, false));
+        // No budget → exactly the old reader.
+        assert_eq!(read_records_range_budget(&dir, 10, 299, None), (all, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_short_reply_counts_as_cut_only_when_it_is_at_least_half_the_budget() {
+        let b = 1 << 20;
+        assert!(reply_cut_by_budget((b / 2) as usize, b, 99, 100), "short and big: cut by the budget");
+        assert!(!reply_cut_by_budget((b / 2 - 1) as usize, b, 99, 100), "short and small: the server's tip");
+        assert!(!reply_cut_by_budget(b as usize, b, 100, 100), "complete: nothing to continue");
+        // Both sides clamp alike: a request below the floor is read as the floor.
+        assert!(reply_cut_by_budget((BACKFILL_BUDGET_MIN / 2) as usize, 1, 5, 9));
+    }
+
+    /// The four pairs, each graded by EVERY height exactly once.
+    #[test]
+    fn all_four_client_server_pairs_deliver_every_height_exactly_once() {
+        let (dir, _) = log_with("pairs", 2_000);
+        let (from, to) = (37u64, 1_999u64);
+        let want: Vec<u64> = (from..=to).collect();
+        let budget = BACKFILL_BUDGET_MIN; // ~16 KiB: forces many cut replies on this fixture
+        for (new_client, new_server) in [(true, true), (false, true), (true, false), (false, false)] {
+            let (got, rounds) = sync(&dir, from, to, budget, new_client, new_server);
+            assert_eq!(got, want, "client new={new_client} server new={new_server}: zero skipped, zero repeated");
+            if new_client && new_server {
+                assert!(rounds > 3, "the budget really cut ({rounds} replies)");
+            } else {
+                assert_eq!(rounds, 1, "without both sides new, one full answer as before");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A restart in the middle of a capped sync: the client starts again from whatever it holds
+    /// (a fresh request from its next height), and the union is still every height once.
+    #[test]
+    fn a_restart_mid_capped_sync_resumes_without_a_hole() {
+        let (dir, _) = log_with("restart", 1_200);
+        let (from, to) = (1u64, 1_200u64);
+        let budget = BACKFILL_BUDGET_MIN;
+        // First run: stop after three replies (the "restart").
+        let (mut held, mut cur) = (Vec::new(), from);
+        for _ in 0..3 {
+            let bytes = serve(&dir, cur, to, Some(budget), true);
+            let blocks = decode_backfill_resp(&bytes).unwrap().blocks;
+            let l = blocks.iter().map(|b| b.header.height).max().unwrap();
+            held.extend(blocks.iter().map(|b| b.header.height));
+            cur = l + 1;
+        }
+        assert!(cur < to, "the restart lands mid-range");
+        // After the restart the node asks from its next height.
+        let (rest, _) = sync(&dir, cur, to, budget, true, true);
+        held.extend(rest);
+        assert_eq!(held, (from..=to).collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

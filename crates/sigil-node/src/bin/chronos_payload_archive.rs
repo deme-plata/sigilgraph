@@ -444,6 +444,29 @@ fn mode_probe(t: &Template, dir: &Path) {
     out.insert("range64_by_height_ms_p50".into(), pct(&mut lat.clone(), 0.5).into());
     out.insert("range64_by_height_ms_max".into(), pct(&mut lat, 1.0).into());
     out.insert("range64_aligned_ms_p50".into(), pct(&mut lat_aligned, 0.5).into());
+    // 10.7.3 (c): what a SERVER does per full-block request — the budgeted stored-record read
+    // (16 MiB, the client's default) for a 1,024-block ask from an arbitrary depth. Must stop at the
+    // budget, start exactly at `from`, and hold the generator's blocks.
+    let budget = sigil_node::serve_read_probe::clamp_budget(16 << 20);
+    let mut lat = Vec::new();
+    let mut per_reply = Vec::new();
+    for i in 0..6u64 {
+        let from = pick(4000 + i).min(n.saturating_sub(1025));
+        let tg = Instant::now();
+        let (recs, cut) = sigil_node::serve_read_probe::read_records_range_budget(dir, from, from + 1023, Some(budget));
+        lat.push(tg.elapsed().as_secs_f64() * 1e3);
+        per_reply.push(recs.len() as f64);
+        let bytes: u64 = recs.iter().map(|r| 4 + r.len() as u64).sum();
+        let wrong = recs.iter().enumerate().step_by(3)
+            .any(|(k, r)| chain_log::decode_record(r).as_ref() != Some(&gen_block(t, &s, from + k as u64)));
+        if !cut || recs.is_empty() || bytes > budget || wrong {
+            bad += 1;
+            eprintln!("MISMATCH serve budget read({from}..+1023): {} records, {bytes} B, cut {cut}", recs.len());
+        }
+    }
+    out.insert("serve16mib_ms_p50".into(), pct(&mut lat.clone(), 0.5).into());
+    out.insert("serve16mib_ms_max".into(), pct(&mut lat, 1.0).into());
+    out.insert("serve16mib_blocks_per_reply".into(), pct(&mut per_reply, 0.5).into());
     let from = pick(3000).min(n.saturating_sub(1025));
     let tg = Instant::now();
     let got = log.get_range(from, from + 1023);

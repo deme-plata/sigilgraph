@@ -85,6 +85,11 @@ mod wg_relay; // zero-config WireGuard side-mesh — see its module docs
 mod sync_auth;
 mod search_index;
 mod serve_read; // header-only reads for the backfill SERVE path — see its module doc
+/// The serve path's budgeted record read, for the chronos archive probe (10.7.3) — nothing else.
+#[doc(hidden)]
+pub mod serve_read_probe {
+    pub use crate::serve_read::{clamp_budget, read_records_range_budget};
+}
 mod tip_proof_signer; // 2026-09-12: SQIsign tip-proof signing OFF the produce loop — see its module doc (the 0.33 blk/s wall)
 mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
 mod peer_pick; // 2026-09-11: ask only peers whose advertised height covers the range — see its module doc
@@ -159,12 +164,31 @@ struct BackfillReq {
     /// that ignores it answers in the old format, which the client still decodes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     raw: bool,
+    /// 2026-10-26 (10.7.3): byte budget for a full-block (`raw`) reply — the server stops before
+    /// the record that would pass it and the client asks again from the next height (see
+    /// `serve_read::clamp_budget`). Omitted when `None`, so an old server sees identical JSON and
+    /// answers as before; an old client never sends it and gets the old answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_bytes: Option<u64>,
 }
 
 /// Ask for stored records on full-block range requests (option 1). `SIGIL_BACKFILL_RAW=0` turns it off (A/B tests).
 fn want_raw() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SIGIL_BACKFILL_RAW").map(|v| v.trim() != "0").unwrap_or(true))
+}
+
+/// The byte budget a full-block range request carries (10.7.3): 16 MiB — four in flight on one
+/// connection stay ~64 MB, about 2 s on the measured Epsilon → Stockholm link (23–38 MB/s).
+/// Only with `raw` (the reply the budget is measured in). `SIGIL_BACKFILL_MAX_BYTES` overrides,
+/// clamped like the server clamps it; `0` sends no budget (the pre-10.7.3 request).
+fn want_max_bytes() -> Option<u64> {
+    static B: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let b = *B.get_or_init(|| {
+        let b = std::env::var("SIGIL_BACKFILL_MAX_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(16 << 20);
+        (b > 0).then(|| crate::serve_read::clamp_budget(b))
+    });
+    b.filter(|_| want_raw())
 }
 
 #[cfg(test)]
@@ -181,7 +205,7 @@ mod by_hash_wire_tests {
 
     #[test]
     fn a_range_request_serializes_exactly_as_before() {
-        let r = BackfillReq { from: 5, to: 9, headers_only: false, codec: 0, handshake: None, zstd: true, by_hash: None, raw: false };
+        let r = BackfillReq { from: 5, to: 9, headers_only: false, codec: 0, handshake: None, zstd: true, by_hash: None, raw: false, max_bytes: None };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("by_hash"), "None must be omitted so old servers see identical JSON: {s}");
     }
@@ -193,6 +217,7 @@ mod by_hash_wire_tests {
             from: 1, to: 0, headers_only: false, codec: 0, handshake: None, zstd: true,
             by_hash: Some(hashes.iter().map(crate::parent_fetch::to_hex).collect()),
             raw: false,
+            max_bytes: None,
         };
         let back: BackfillReq = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
         assert!(back.from > back.to, "an old server must see an empty range");
@@ -347,6 +372,7 @@ fn spawn_parent_fetch(
         zstd: true,
         by_hash: Some(hashes.iter().map(crate::parent_fetch::to_hex).collect()),
         raw: false, // answered from the in-RAM DAG body store, not chain.log
+        max_bytes: None,
     };
     let mgr2 = std::sync::Arc::clone(mgr);
     let tx2 = tx.clone();
@@ -1970,6 +1996,9 @@ fn run_start() -> Result<()> {
         // only made the adaptive sizing oscillate. 1,024 zstd'd is ~0.7 MB: sub-second.
         const FETCH_CHUNK: u64 = 1024;
         const FETCH_CHUNK_MIN: u64 = 256;
+        // 10.7.3: most budget-cut replies one range may take before the rest goes back to the window
+        // (1,024 heavy 0.92 MB blocks at the 16 MiB default ≈ 60; a tiny test budget needs more).
+        const CONTINUE_MAX_ROUNDS: u32 = 512;
         let fetch_chunk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
             std::env::var("SIGIL_FETCH_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(FETCH_CHUNK).clamp(FETCH_CHUNK_MIN, FETCH_CHUNK),
         ));
@@ -2123,7 +2152,7 @@ fn run_start() -> Result<()> {
                     if let Some(peer) = chosen {
                         // 2026-10-23: noted for sigil-top's Queues tab (`/v1/sync/queue`); bookkeeping only.
                         sigil_api::sync_queue::started(from, to, &peer.to_string(), chunk);
-                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw() };
+                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw(), max_bytes: want_max_bytes() };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
                         let chunk_ad = std::sync::Arc::clone(&fetch_chunk);
@@ -2140,14 +2169,14 @@ fn run_start() -> Result<()> {
                             // request size and mark this range for a redo. Halving is what makes
                             // the node converge on a size that fits, instead of retrying a size
                             // that has already been proven not to.
-                            let fail = |why: &str| {
+                            let fail = |why: &str, at: u64| {
                                 let cur = chunk_ad.load(AOrd::Relaxed);
                                 let next = (cur / 2).max(FETCH_CHUNK_MIN);
                                 if next != cur {
                                     chunk_ad.store(next, AOrd::Relaxed);
-                                    eprintln!("⇩ rr-backfill: {why} for [{from}..={to}) — fetch chunk {cur} → {next}");
+                                    eprintln!("⇩ rr-backfill: {why} for [{at}..={to}) — fetch chunk {cur} → {next}");
                                 }
-                                redo_ad.fetch_min(from, AOrd::Relaxed);
+                                redo_ad.fetch_min(at, AOrd::Relaxed);
                                 // Count this range's consecutive failures so the next attempt at it
                                 // waits longer. Without this the rewind below re-issues instantly.
                                 {
@@ -2180,72 +2209,102 @@ fn run_start() -> Result<()> {
                             // work yet" — this is exactly what made a real, reproducible
                             // permanent sync stall look silent for hours. Log every branch
                             // that isn't a clean non-empty success.
-                            let blocks = match serde_json::to_vec(&req) {
-                                Ok(payload) => { let mut busy_tries: u32 = 0; loop { break match mgr2.send_request(peer, payload.clone()).await {
-                                    Ok(bytes) => match crate::serve_read::decode_backfill_resp(&bytes) {
-                                        Ok(r) => {
-                                            if r.blocks.is_empty() {
-                                                eprintln!("⚠ rr-backfill(windowed): peer {peer} returned an EMPTY response for [{from}..={to}) — request-ahead slot stuck");
-                                                fail("empty response");
-                                            } else {
-                                                // Success: creep the chunk back up so a transient
-                                                // stall does not pin the node at the floor forever.
-                                                // Growth is slower than the halving on failure,
-                                                // which is what keeps it stable rather than
-                                                // oscillating between two bad sizes.
-                                                let cur = chunk_ad.load(AOrd::Relaxed);
-                                                let next = (cur + cur / 4).min(FETCH_CHUNK);
-                                                if next != cur { chunk_ad.store(next, AOrd::Relaxed); }
-                                                win();
+                            // 10.7.3: ONE range may take several replies. A reply the server cut at our byte
+                            // budget (`max_bytes`, see serve_read::clamp_budget) is followed at once by a request
+                            // for the rest, from the next height, until the range's last height arrives. The range
+                            // stays in flight meanwhile, so neither the window nor the gap path asks for it twice,
+                            // and a short reply is never taken for the whole range (Quillon's chunk-shaped holes).
+                            let mut req = req;
+                            let mut cur_from = from;
+                            let mut total: u64 = 0;
+                            let mut rounds: u32 = 0;
+                            loop {
+                                req.from = cur_from;
+                                let mut reply_len: usize = 0;
+                                let blocks = match serde_json::to_vec(&req) {
+                                    Ok(payload) => { let mut busy_tries: u32 = 0; loop { break match mgr2.send_request(peer, payload.clone()).await {
+                                        Ok(bytes) => { reply_len = bytes.len(); match crate::serve_read::decode_backfill_resp(&bytes) {
+                                            Ok(r) => {
+                                                if r.blocks.is_empty() {
+                                                    eprintln!("⚠ rr-backfill(windowed): peer {peer} returned an EMPTY response for [{from}..={to}) — request-ahead slot stuck");
+                                                    fail("empty response", cur_from);
+                                                } else {
+                                                    // Success: creep the chunk back up so a transient
+                                                    // stall does not pin the node at the floor forever.
+                                                    // Growth is slower than the halving on failure,
+                                                    // which is what keeps it stable rather than
+                                                    // oscillating between two bad sizes.
+                                                    let cur = chunk_ad.load(AOrd::Relaxed);
+                                                    let next = (cur + cur / 4).min(FETCH_CHUNK);
+                                                    if next != cur { chunk_ad.store(next, AOrd::Relaxed); }
+                                                    win();
+                                                }
+                                                r.blocks
                                             }
-                                            r.blocks
-                                        }
-                                        Err(e) if e == crate::serve_read::BUSY_ERR => {
-                                            // "not now" — same size, no penalty. 2026-10-23: and ask AGAIN, from here.
-                                            // Returning empty left a HOLE: the window was already past this range and
-                                            // nothing marked it for a redo, so the chain waited at this height for the
-                                            // peer-heights gap path (~1 s per hole). Measured on fresh syncs: 88 / 149 /
-                                            // 202 / 224 holes ↔ 79 / 136 / 203 / 193 s. The range stays in flight while we
-                                            // wait, so neither the window nor the gap path asks for it twice.
-                                            busy_tries += 1;
-                                            sigil_api::sync_queue::busy(from, to);
-                                            if busy_tries <= 20 {
-                                                tokio::time::sleep(std::time::Duration::from_millis((25u64 << busy_tries.min(4)).min(400))).await;
-                                                continue;
+                                            Err(e) if e == crate::serve_read::BUSY_ERR => {
+                                                // "not now" — same size, no penalty. 2026-10-23: and ask AGAIN, from here.
+                                                // Returning empty left a HOLE: the window was already past this range and
+                                                // nothing marked it for a redo, so the chain waited at this height for the
+                                                // peer-heights gap path (~1 s per hole). Measured on fresh syncs: 88 / 149 /
+                                                // 202 / 224 holes ↔ 79 / 136 / 203 / 193 s. The range stays in flight while we
+                                                // wait, so neither the window nor the gap path asks for it twice.
+                                                busy_tries += 1;
+                                                sigil_api::sync_queue::busy(from, to);
+                                                if busy_tries <= 20 {
+                                                    tokio::time::sleep(std::time::Duration::from_millis((25u64 << busy_tries.min(4)).min(400))).await;
+                                                    continue;
+                                                }
+                                                eprintln!("⚠ rr-backfill(windowed): {peer} still busy after {} asks for [{from}..={to})", busy_tries);
+                                                fail("still busy", cur_from);
+                                                Vec::new()
                                             }
-                                            eprintln!("⚠ rr-backfill(windowed): {peer} still busy after {} asks for [{from}..={to})", busy_tries);
-                                            fail("still busy");
-                                            Vec::new()
-                                        }
+                                            Err(e) => {
+                                                // SAY WHAT ARRIVED. "decode failed" alone cannot tell
+                                                // an empty response from a truncated one from a
+                                                // well-formed message in the wrong format, and those
+                                                // three have completely different causes. Epsilon logs
+                                                // this exact range as 257 blocks / 375,216 B, so the
+                                                // byte count here is the one number that settles it.
+                                                let head: String = bytes.iter().take(8)
+                                                    .map(|b| format!("{b:02x}")).collect();
+                                                eprintln!("⚠ rr-backfill(windowed): decode failed for [{from}..={to}) from {peer}: {e} · received {} B, first bytes {}",
+                                                    bytes.len(), if head.is_empty() { "(none)".into() } else { head });
+                                                fail("decode failed", cur_from);
+                                                Vec::new()
+                                            }
+                                        } },
                                         Err(e) => {
-                                            // SAY WHAT ARRIVED. "decode failed" alone cannot tell
-                                            // an empty response from a truncated one from a
-                                            // well-formed message in the wrong format, and those
-                                            // three have completely different causes. Epsilon logs
-                                            // this exact range as 257 blocks / 375,216 B, so the
-                                            // byte count here is the one number that settles it.
-                                            let head: String = bytes.iter().take(8)
-                                                .map(|b| format!("{b:02x}")).collect();
-                                            eprintln!("⚠ rr-backfill(windowed): decode failed for [{from}..={to}) from {peer}: {e} · received {} B, first bytes {}",
-                                                bytes.len(), if head.is_empty() { "(none)".into() } else { head });
-                                            fail("decode failed");
+                                            eprintln!("⚠ rr-backfill(windowed): send_request failed for [{from}..={to}) to {peer}: {e}");
+                                            fail("send failed", cur_from);
                                             Vec::new()
                                         }
-                                    },
+                                    }; } }
                                     Err(e) => {
-                                        eprintln!("⚠ rr-backfill(windowed): send_request failed for [{from}..={to}) to {peer}: {e}");
-                                        fail("send failed");
+                                        eprintln!("⚠ rr-backfill(windowed): request serialize failed: {e}");
+                                        fail("serialize failed", cur_from);
                                         Vec::new()
                                     }
-                                }; } }
-                                Err(e) => {
-                                    eprintln!("⚠ rr-backfill(windowed): request serialize failed: {e}");
-                                    fail("serialize failed");
-                                    Vec::new()
+                                };
+                                let last = blocks.iter().map(|b| b.header.height).max();
+                                let more = match (req.max_bytes, last) {
+                                    (Some(mb), Some(l)) => l >= cur_from && crate::serve_read::reply_cut_by_budget(reply_len, mb, l, to),
+                                    _ => false,
+                                };
+                                total += blocks.len() as u64;
+                                let _ = bf_tx2.send(checked_blocks(blocks)).await;
+                                if !more {
+                                    break;
                                 }
-                            };
-                            sigil_api::sync_queue::finished(from, to, blocks.len() as u64);
-                            let _ = bf_tx2.send(checked_blocks(blocks)).await;
+                                let next = last.map_or(cur_from, |l| l + 1);
+                                rounds += 1;
+                                if rounds >= CONTINUE_MAX_ROUNDS {
+                                    eprintln!("⚠ rr-backfill(windowed): [{from}..={to}] from {peer} still short after {rounds} budget-cut replies — the rest, from {next}, goes back to the window");
+                                    redo_ad.fetch_min(next, AOrd::Relaxed);
+                                    break;
+                                }
+                                cur_from = next;
+                            }
+                            sigil_api::sync_queue::finished(from, to, total);
                             inflight_ad.fetch_sub(1, AOrd::Relaxed);
                             // Release the range so it can be retried (after its backoff) or
                             // advanced past. Held for the life of the request, never longer.
@@ -3552,24 +3611,34 @@ fn run_start() -> Result<()> {
                                 let peer2 = peer;
                                 let want_zstd = req.zstd;
                                 let want_raw_records = req.raw;
+                                // 10.7.3: the client's byte budget (raw replies only; see serve_read::clamp_budget).
+                                let budget = req.max_bytes.filter(|_| req.raw).map(crate::serve_read::clamp_budget);
                                 tokio::task::spawn_blocking(move || {
                                     // 2026-10-23 (option 1): stored records, copied — no decode, no re-encode — when
                                     // the client asked for them; the in-RAM window tail is encoded as chain.log would.
-                                    let (n, blob) = if want_raw_records {
-                                        let mut recs = crate::serve_read::read_records_range(&dir, lo, disk_hi);
-                                        recs.extend(window_blocks.iter().filter_map(|b| crate::chain_log::encode_record(b).ok()));
-                                        (recs.len(), std::sync::Arc::new(crate::serve_read::encode_raw_records_resp(&recs)))
+                                    let (n, blob, cut) = if want_raw_records {
+                                        let (mut recs, mut cut) = crate::serve_read::read_records_range_budget(&dir, lo, disk_hi, budget);
+                                        if !cut {
+                                            let mut used: u64 = recs.iter().map(|r| 4 + r.len() as u64).sum();
+                                            for rec in window_blocks.iter().filter_map(|b| crate::chain_log::encode_record(b).ok()) {
+                                                if !crate::serve_read::push_within_budget(&mut recs, &mut used, budget, rec) {
+                                                    cut = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        (recs.len(), std::sync::Arc::new(crate::serve_read::encode_raw_records_resp(&recs)), cut)
                                     } else {
                                         let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
                                         blocks.extend(window_blocks);
                                         let n = blocks.len();
                                         let resp = BackfillResp { blocks };
-                                        (n, std::sync::Arc::new(crate::serve_read::encode_backfill_resp_opts(&resp, want_zstd)))
+                                        (n, std::sync::Arc::new(crate::serve_read::encode_backfill_resp_opts(&resp, want_zstd)), false)
                                     };
                                     // Respond FIRST — the peer must not wait on our caching.
                                     mgr2.respond(request_id, blob.as_ref().clone());
-                                    eprintln!("↩ rr-backfill(off-thread): served {} BLOCKS [{}..={}] to {} ({} B)",
-                                        n, lo, hi, peer2, blob.len());
+                                    eprintln!("↩ rr-backfill(off-thread): served {} BLOCKS [{}..={}] to {} ({} B{})",
+                                        n, lo, hi, peer2, blob.len(), if cut { ", byte budget reached" } else { "" });
                                     let _ = done.try_send((ckey, immutable, hot_eligible, blob));
                                     inflight.fetch_sub(1, Ordering::Relaxed);
                                     // Release the peer's slot. Removing the entry at zero keeps the
@@ -3715,7 +3784,31 @@ fn run_start() -> Result<()> {
                             // peer with 0 headers for a range the node had on disk).
                             let mut blocks: Vec<crate::block::Block> = Vec::new();
                             let mut headers: Vec<sigil_header::SigilBlockHeaderV0> = Vec::new();
-                            if req.headers_only {
+                            // 10.7.3: a full-block request with a byte budget is answered as stored records,
+                            // encoded straight from the RAM window and stopped at the budget — never a clone of
+                            // every requested block first (1,024 heavy blocks ≈ 943 MB, on the produce loop).
+                            let inline_budget = if req.headers_only { None } else {
+                                req.max_bytes.filter(|_| req.raw).map(crate::serve_read::clamp_budget)
+                            };
+                            let mut inline_recs: Option<(Vec<Vec<u8>>, bool)> = None;
+                            if let Some(budget) = inline_budget {
+                                let (mut recs, mut cut) = if lo < wbase {
+                                    crate::serve_read::read_records_range_budget(&snap_dir, lo, hi.min(wbase.saturating_sub(1)), Some(budget))
+                                } else {
+                                    (Vec::new(), false)
+                                };
+                                let mut used: u64 = recs.iter().map(|r| 4 + r.len() as u64).sum();
+                                if !cut {
+                                    for h in lo.max(wbase)..=hi {
+                                        let Some(rec) = chain.get(h).and_then(|b| crate::chain_log::encode_record(b).ok()) else { continue };
+                                        if !crate::serve_read::push_within_budget(&mut recs, &mut used, Some(budget), rec) {
+                                            cut = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                inline_recs = Some((recs, cut));
+                            } else if req.headers_only {
                                 if lo < wbase {
                                     let disk_hi = hi.min(wbase.saturating_sub(1));
                                     headers.extend(crate::serve_read::read_headers_range(&snap_dir, lo, disk_hi));
@@ -3827,6 +3920,11 @@ fn run_start() -> Result<()> {
                                         if out.first() == Some(&b'Z') { "zstd" } else { "raw" });
                                     out
                                 }
+                            } else if let Some((recs, cut)) = inline_recs {
+                                let out = crate::serve_read::encode_raw_records_resp(&recs);
+                                eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {} ({} B, stored records{})",
+                                    recs.len(), lo, hi, peer, out.len(), if cut { ", byte budget reached" } else { "" });
+                                out
                             } else {
                                 let resp = BackfillResp {
                                     blocks,
@@ -4139,6 +4237,7 @@ fn run_start() -> Result<()> {
                                                         zstd: true,
                                                         by_hash: None,
                                                         raw: want_raw(),
+                                                        max_bytes: want_max_bytes(),
                                                     };
                                                     // 2026-08-19 (deep-catchup freeze investigation): this used to fire
                                                     // unconditionally every time the 15ms request-throttle allowed a
@@ -4284,7 +4383,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw() };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true, by_hash: None, raw: want_raw(), max_bytes: want_max_bytes() };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -4522,6 +4621,7 @@ fn run_start() -> Result<()> {
                                             zstd: true,
                                             by_hash: None,
                                             raw: want_raw(),
+                                            max_bytes: want_max_bytes(),
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);

@@ -1,0 +1,54 @@
+[
+ {
+  "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "password": "",
+  "seed64": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+  "secret": "5ac81b8cfc7e1637cad8f72cbbabff15366a2a5229c67000f0547c2cb6f2c81f",
+  "address": "3ac2ff16813fcde6656a0b24cf23caaf20b62a5a90df850b0654091f415f3771"
+ },
+ {
+  "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "password": "TREZOR",
+  "seed64": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+  "secret": "648c705643388a42677d672d2be927b3c4eb7350d50515339467aa7b436ba548",
+  "address": "3d9d79a8ee13cd0cb20fffe05cceda28485a9dfa8db2fab36963db40b0d568ca"
+ },
+ {
+  "words": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+  "password": "Rødgrød med fløde — æøå ÆØÅ",
+  "seed64": "6e4d0654e26474b9c44d9241f24f1bece96c54a1e41b27a8b66897e174418efca10a3e2a901802b639e52c43f43f17ccbddf441792e15bc882a5d92a0e5c9a1b",
+  "secret": "be1c3ca1266c3558c77c6e47beebec5198aa7342cbf75693c05a31f742aafc61",
+  "address": "1d08b318243c3d23ea2c0e09a03043a3639e6104217129d0f153af4dc8e276c3"
+ },
+ {
+  "words": "legal winner thank year wave sausage worth useful legal winner thank yellow",
+  "password": "Rødgrød med fløde — æøå ÆØÅ",
+  "note": "decomposed å — must equal the line above (NFKD)",
+  "seed64": "6e4d0654e26474b9c44d9241f24f1bece96c54a1e41b27a8b66897e174418efca10a3e2a901802b639e52c43f43f17ccbddf441792e15bc882a5d92a0e5c9a1b",
+  "secret": "be1c3ca1266c3558c77c6e47beebec5198aa7342cbf75693c05a31f742aafc61",
+  "address": "1d08b318243c3d23ea2c0e09a03043a3639e6104217129d0f153af4dc8e276c3"
+ },
+ {
+  "words": "  ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABANDON   ABOUT ",
+  "password": "",
+  "note": "case + spacing — must equal case 1",
+  "seed64": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+  "secret": "5ac81b8cfc7e1637cad8f72cbbabff15366a2a5229c67000f0547c2cb6f2c81f",
+  "address": "3ac2ff16813fcde6656a0b24cf23caaf20b62a5a90df850b0654091f415f3771"
+ },
+ {
+  "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+  "password": "",
+  "seed64": "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840",
+  "secret": "5d7f0c17436bff39df71c411ff1eb8239534476397722205e4b965783b81c88d",
+  "address": "1f844caec4fc71d56b39bccc9c8fe5c285ce3da4471acc85a09544b60fce925f"
+ },
+ {
+  "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "password": " TREZOR",
+  "note": "a leading space IS part of the password (BIP39 never trims it)",
+  "seed64": "5f26a42fd42c536ad4165cac541a3120a11dbf413aa0bd18f9ae118b715ddf29ccce92fa1a4b1d252c4ecee85d87e87af57ed0c688f03e1f2e967ef464c92a1c",
+  "secret": "577e8ed47ed1fb7218cdc733294d7e6362dd3826db4e9a4a55176e6f0277b3e3",
+  "address": "cbd43a8772417a94867d230628849a5c88cc09b001204bc58f7ae2e110b04492"
+ }
+]

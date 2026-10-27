@@ -1296,6 +1296,14 @@ window.lucide={createIcons:render};render();})();</script>
   window.__argon2id = argon2id;
   if (window.__argon2Resolve) window.__argon2Resolve(argon2id);
 </script>
+<script type="module">
+  // 2026-10-27: wallet v3 (BIP39 words + optional password, Argon2id 64 MiB) and a faster v2 — the SAME
+  // Rust code sigil-top and the phone run (crates/sigil-wallet-phrase, wasm). A separate module on
+  // purpose: if this file ever fails to load, the signer above keeps working on the JS Argon2id.
+  import('./sigil-wallet-phrase.mjs?v=1')
+    .then(function (P) { return P.ready.then(function (ok) { if (ok) window.__sigilPhrase = P; }); })
+    .catch(function (e) { console.warn('[wallet-phrase] not loaded — v2 stays on the JS engine, v3 unavailable', e); });
+</script>
 <script>
   try {
     const { ed, sha3_256, sha512 } = window.__noble;
@@ -1331,12 +1339,18 @@ window.lucide={createIcons:render};render();})();</script>
         // Synchronous on purpose: there are ~10 call sites in this file alone,
         // all sync, and turning money-signing async to save a preload would be a
         // far riskier change than loading 13 KB up front.
-        if (!window.__argon2id) {
-          const e = new Error('Secure (12-word) derivation is still loading — try again in a moment.');
-          e.code = 'ARGON2_LOADING';   // NOT a wrong phrase — callers must wait, never forget
-          throw e;
+        const W = window.__sigilPhrase;
+        if (W && W.loaded()) {
+          // 2026-10-27: the same Argon2id compiled to wasm — byte-identical output, ~18× faster.
+          priv = W.deriveV2(phrase);
+        } else {
+          if (!window.__argon2id) {
+            const e = new Error('Secure (12-word) derivation is still loading — try again in a moment.');
+            e.code = 'ARGON2_LOADING';   // NOT a wrong phrase — callers must wait, never forget
+            throw e;
+          }
+          priv = window.__argon2id(bytes, V2_SALT, V2_PARAMS);
         }
-        priv = window.__argon2id(bytes, V2_SALT, V2_PARAMS);
       } else {
         priv = sha3_256(bytes);
       }
@@ -1360,6 +1374,22 @@ window.lucide={createIcons:render};render();})();</script>
         for (let i = 0; i < 32; i++) raw[i] = parseInt(hexSeed.substr(i * 2, 2), 16);
         const seedKp = { priv: raw, address: hex(ed.getPublicKey(raw)) };
         if (!expectedAddr || seedKp.address === expectedAddr) return seedKp;
+      }
+      // 2026-10-27: 12 BIP39 words without a password are a v3 wallet — or, for ~3 % of older phrases, a
+      // v2 one. Knowing the expected address settles it: v2 first (unchanged behaviour), then v3.
+      const W = window.__sigilPhrase;
+      if (expectedAddr && W && W.loaded()) {
+        let v2kp = null;
+        try { v2kp = window.sigilDeriveFrom(s); } catch (e) { /* e.g. still loading: fall through */ }
+        if (v2kp && v2kp.address === expectedAddr) return v2kp;
+        try {
+          for (const c of W.candidates(s, '')) {
+            if (c.scheme !== 'v3') continue;
+            const a = hex(ed.getPublicKey(c.secret));
+            if (a === expectedAddr) return { priv: c.secret, address: a, scheme: 'v3' };
+          }
+        } catch (e) { /* not BIP39 words */ }
+        if (v2kp) return v2kp;
       }
       return window.sigilDeriveFrom(s);
     };
@@ -1897,7 +1927,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // the mismatch branch cleared only `window.__sigilMnemonic`, so the very next attempt
   // reloaded the same bad seed from localStorage and failed identically, every time.
   function sigilForgetSecret(){
-    try{ localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); }catch(e){}
+    try{ localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); localStorage.removeItem('sigil-wallet-scheme'); }catch(e){}
     try{ sessionStorage.removeItem('sigil-adopted'); }catch(e){}
   }
   window.sigilForgetSecret=sigilForgetSecret;
@@ -6871,7 +6901,7 @@ function copyReceive(){ var a=window.__rcvCode||_activeAddr(); if(a&&navigator.c
 function openMine(){ var a=_activeAddr(); if(!a)return; document.getElementById('mineCmd').textContent='sigil-top mine-rig '+a; document.getElementById('mine-modal').style.display='flex'; }
 function copyMineCmd(){ var t=document.getElementById('mineCmd').textContent; if(t&&navigator.clipboard){ navigator.clipboard.writeText(t); var b=document.getElementById('mineCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
 function openSettings(){ var el=document.getElementById('setAddr'); var a=_activeAddr(); if(el)el.textContent=a?(a.slice(0,10)+'…'+a.slice(-8)):''; document.getElementById('settings-modal').style.display='flex'; }
-function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace(_sigilIsLocalW() ? 'https://sigilgraph.org/' : 'enter-sigil.html'); }
+function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); localStorage.removeItem('sigil-wallet-scheme'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace(_sigilIsLocalW() ? 'https://sigilgraph.org/' : 'enter-sigil.html'); }
 // 10.4.23 (Viktor 2026-10-10: "when logging out it should go back to sigilgraph.org"): in sigil-top's [W]
 // (localhost:9800) the wallet is sigil-top's own (10.4.22, one wallet everywhere), so the local login page
 // has nothing to offer there — Log out and "New wallet" lead to sigilgraph.org instead.
@@ -10584,7 +10614,10 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
     var copyText;
     if(c.kind==='hex'){
       copyText=c.hex;
-      html+='<div class="note">This wallet was created from a <b>raw seed</b> (64 hex characters, the kind mining rigs and coins use), not a word list. Back up this exact string — every character, in order.</div>'
+      var isV3=false; try{ isV3=localStorage.getItem('sigil-wallet-scheme')==='v3'; }catch(e){}
+      if(isV3) html+='<div class="note">This is a <b>v3 wallet</b>: 12 recovery words, plus your password if you chose one. This browser deliberately keeps only the key made from them — never the words, never the password — so it cannot show them. <b>Your backup is what you wrote down.</b> The key below opens the same wallet too (sigil-top and the phone app accept it as a 64-character key): guard it like the words.</div>'
+        +'<div class="hex">'+esc(c.hex.match(/.{1,16}/g).join(' '))+'</div>';
+      else html+='<div class="note">This wallet was created from a <b>raw seed</b> (64 hex characters, the kind mining rigs and coins use), not a word list. Back up this exact string — every character, in order.</div>'
         +'<div class="hex">'+esc(c.hex.match(/.{1,16}/g).join(' '))+'</div>';
     } else {
       copyText=c.words.join(' ');
@@ -10791,6 +10824,9 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
         <input id="askInput" type="password" autocomplete="off" spellcheck="false" style="flex:1;background:rgba(33,212,253,.05);border:1px solid rgba(33,212,253,.3);color:#e6f7ff;border-radius:10px;padding:10px 12px;font-family:inherit;font-size:13px;outline:none">
         <button id="askEye" type="button" title="show" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;width:42px;cursor:pointer">👁</button>
       </div>
+      <div id="askPwRow" style="display:none">
+        <input id="askPw" type="password" autocomplete="off" spellcheck="false" placeholder="password — only if your wallet has one" style="width:100%;box-sizing:border-box;background:rgba(33,212,253,.05);border:1px solid rgba(33,212,253,.3);color:#e6f7ff;border-radius:10px;padding:10px 12px;font-family:inherit;font-size:13px;outline:none">
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
         <button id="askNo" type="button" style="background:transparent;border:1px solid rgba(255,255,255,.14);color:#9fb6c2;border-radius:10px;padding:9px 14px;cursor:pointer;font-family:'Orbitron';font-size:11px">CANCEL</button>
         <button id="askOk" type="button" style="background:linear-gradient(90deg,rgba(33,212,253,.28),rgba(0,224,198,.28));border:1px solid rgba(33,212,253,.5);color:#e6f7ff;border-radius:10px;padding:9px 16px;cursor:pointer;font-family:'Orbitron';font-size:11px;font-weight:700">OK</button>
@@ -10804,26 +10840,54 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       row=document.getElementById('askRow'), ok=document.getElementById('askOk'), no=document.getElementById('askNo'),
       eye=document.getElementById('askEye'), title=document.getElementById('askTitle'), icon=document.getElementById('askIcon');
   var pending=null;
-  function close(v){ m.style.display='none'; inp.value=''; inp.type='password'; var p=pending; pending=null; if(p) p(v); }
+  var pwRow=document.getElementById('askPwRow'), pwIn=document.getElementById('askPw'), lastPw='';
+  function close(v){ m.style.display='none'; inp.value=''; inp.type='password'; if(pwIn){ pwIn.value=''; pwIn.type='password'; } var p=pending; pending=null; if(p) p(v); }
   function open(o){
     return new Promise(function(resolve){
       if(pending){ var prev=pending; pending=null; prev(null); }
       pending=resolve;
       icon.textContent=o.icon||'🔐'; title.textContent=o.title||'UNLOCK'; txt.textContent=o.text||'';
       row.style.display=o.input?'flex':'none'; eye.style.display=o.secret?'':'none';
+      if(pwRow){ pwRow.style.display=o.password?'block':'none'; pwIn.value=''; }
       inp.type=o.secret?'password':'text'; inp.value=o.value||''; inp.placeholder=o.placeholder||'';
       no.style.display=o.cancel===false?'none':''; ok.textContent=o.okText||'OK';
       m.style.display='flex'; if(o.input) setTimeout(function(){ inp.focus(); inp.select(); },30); else setTimeout(function(){ ok.focus(); },30);
     });
   }
-  ok.addEventListener('click',function(){ close(row.style.display==='none' ? true : inp.value); });
+  ok.addEventListener('click',function(){ lastPw=(pwRow&&pwRow.style.display!=='none')?pwIn.value:''; close(row.style.display==='none' ? true : inp.value); });
+  eye.addEventListener('click',function(){ if(pwIn) pwIn.type = inp.type; });
+  if(pwIn) pwIn.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); ok.click(); } if(e.key==='Escape'){ e.preventDefault(); no.click(); } });
   no.addEventListener('click',function(){ close(row.style.display==='none' ? false : null); });
   eye.addEventListener('click',function(){ inp.type = inp.type==='password' ? 'text' : 'password'; inp.focus(); });
   inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); ok.click(); } if(e.key==='Escape'){ e.preventDefault(); no.click(); } });
   m.addEventListener('keydown',function(e){ if(e.key==='Escape' && row.style.display==='none'){ no.click(); } });
   m.addEventListener('click',function(e){ if(e.target===m) no.click(); });
   /** Ask for the recovery phrase / 64-hex seed. Resolves the string, or null on cancel. */
-  window.sigilAskSecret=function(reason){ return open({icon:'🔐',title:'UNLOCK TO SIGN',text:reason||'Enter your recovery phrase (or 64-hex mining seed).',input:true,secret:true,placeholder:'twelve words, or 64 hex characters',okText:'UNLOCK'}); };
+  // 2026-10-27: + an optional password (v3 wallets). Words (+ password) that open THIS wallet as v3 come back
+  // as the derived 64-hex key, which every caller already accepts and stores — so the words and the
+  // password are never kept by the page. Anything else comes back exactly as typed, as before.
+  window.sigilAskSecret=async function(reason){
+    var head=reason||'Enter your recovery phrase (or 64-hex mining seed).', note='';
+    for(var tries=0; tries<5; tries++){
+      var v=await open({icon:'🔐',title:'UNLOCK TO SIGN',text:(note?note+'\n\n':'')+head,input:true,secret:true,password:!!window.__sigilPhrase,placeholder:'twelve words, or 64 hex characters',okText:'UNLOCK'});
+      var pw=lastPw; lastPw='';
+      if(v==null) return v;
+      var P=window.__sigilPhrase, t=String(v).trim();
+      if(!P || !P.loaded() || !t || /^(0x)?[0-9a-fA-F]{64}$/.test(t)) return v;
+      var want=''; try{ want=String(localStorage.getItem('sigil-wallet-address')||'').toLowerCase(); }catch(e){}
+      var cs; try{ cs=P.candidates(t,pw); }catch(e){ note='⚠ '+e.message; continue; }
+      for(var i=0;i<cs.length;i++){
+        if(cs[i].scheme!=='v3') continue;
+        var h=Array.from(cs[i].secret,function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
+        var kp=null; try{ kp=window.sigilDeriveAuto(h); }catch(e){}
+        if(kp && (kp.address===want || (pw && !want))){ try{ localStorage.setItem('sigil-wallet-scheme','v3'); }catch(e){} return h; }
+        if(pw){ note='⚠ These words and this password open a different wallet ('+(kp?kp.address.slice(0,10)+'…':'?')+'), not this one. Check the password — capitals and spaces count.'; break; }
+      }
+      if(pw) continue;
+      return v;
+    }
+    return null;
+  };
   /** Ask for a short text (labels, names). Resolves the string, or null on cancel. */
   window.sigilAskText=function(q,dflt){ return open({icon:'✎',title:'NAME',text:q||'',input:true,secret:false,value:dflt||'',okText:'SAVE'}); };
   /** Yes/no. Resolves true/false. */

@@ -50,7 +50,9 @@ function fail(x, rc, words) {
   const pos = c === 3 ? x.swp_err_pos() : 0;
   let msg = MESSAGES[c] || ('Error ' + c);
   if (c === 3) { const w = String(words).trim().split(/\s+/)[pos - 1] || ''; msg = `Word ${pos} ("${w}") ${msg}`; }
-  if (viaPassword) msg = 'Only new (v3) wallets have a password, and these words are not v3 words. ' + msg;
+  // With a password the words must be new-style (v3) words. The likeliest cause is a typo in them; the
+  // other is an older wallet (no password) — say the first plainly, then the second.
+  if (viaPassword) msg += ' Older SIGIL wallets (made before 27 October 2026) have no password — if this is one, leave the password empty.';
   const e = new Error(msg); e.code = c; e.position = pos; e.viaPassword = viaPassword; return e;
 }
 

@@ -140,6 +140,8 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
         <div class="form-group">
           <label for="seed">Recovery phrase or address</label>
           <input type="text" id="seed" placeholder="Your 12-word recovery phrase (or a 64-hex address)" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false" autofocus>
+          <input type="password" id="pw" placeholder="Password — only if your wallet has one" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" style="margin-top:8px">
+          <input type="password" id="pw2" placeholder="The same password again" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" style="margin-top:8px;display:none">
         </div>
         <button type="submit" class="btn" id="goBtn">◈ Enter Sigilgraph</button>
       </form>
@@ -249,6 +251,7 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
       // Create a fresh wallet: generate a 6-word phrase, show it prominently with a
       // save-your-words warning, and pre-fill the seed so the user proceeds with one tap.
       window.createWallet = function(){
+        if(CREATE_V3){ createWalletV3(); return; }
         // TWELVE words, not six: 12 x log2(2159) = 132.9 bits, versus 66.5 before.
         // Rejection sampling rather than a bare `% WL.length` — the modulo bias is
         // tiny (~5e-7) but it costs nothing to not have it.
@@ -544,7 +547,7 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
       }
 
       // Commit: this is the wallet we are opening.
-      function enterWith(seed, address){
+      function enterWith(seed, address, scheme){
         // WRITE BOTH KEYS. Found 2026-09-06, and it is a silent wrong-wallet bug all on
         // its own — no typo required.
         //
@@ -566,6 +569,9 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
         localStorage.setItem('sigil-wallet-seed', seed);
         localStorage.setItem('sigil-wallet-mnemonic', seed);
         localStorage.setItem('sigil-wallet-address', address);
+        // 2026-10-27: a v3 wallet arrives here as its derived key; mark it so the wallet page can explain
+        // its backup honestly (the words + password are on paper, not in this browser).
+        if(scheme==='v3') localStorage.setItem('sigil-wallet-scheme','v3'); else localStorage.removeItem('sigil-wallet-scheme');
         // The node-local signer (:9800) adopts the seed once per session; clear the
         // latch or it keeps signing for the previous wallet.
         try{ sessionStorage.removeItem('sigil-adopted'); }catch(e){}
@@ -580,6 +586,101 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
         window.location.href='sigil-wallet-tron-embedded.html';
       }
       window.__enterWith = enterWith;
+
+      // ── Wallet v3 (2026-10-27): 12 BIP39 words + an optional password, Argon2id 64 MiB ─────────────
+      // The derivation is crates/sigil-wallet-phrase compiled to wasm — the same code sigil-top and the
+      // phone run. Returns true when it handled the login, false to let the older flow below run.
+      var CREATE_V3 = false;   // stage 2 of the rollout flips this (readers first)
+      var V3P = null;
+      async function v3Lib(){
+        if(V3P) return V3P;
+        try{ var M = await import('./sigil-wallet-phrase.mjs?v=1'); if(await M.ready) V3P = M; }catch(e){}
+        return V3P;
+      }
+      v3Lib();
+      function hexOf(u){ return Array.from(u, function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); }
+      function v3Button(cls, secretHex, addr, label){
+        return '<button type="button" class="cbtn'+(cls?' '+cls:'')+'" data-enter-seed="'+esc(secretHex)+'" data-enter-addr="'+esc(addr)+'" data-enter-scheme="v3">'+label+'</button>';
+      }
+      async function v3Login(seed, pw){
+        var P = await v3Lib();
+        if(!P || !P.loaded()){
+          if(pw){ chkShow('bad','<b>The password login could not load.</b><div class="cd">Reload the page and try again.</div>'); return true; }
+          return false;
+        }
+        if(window.__freshPhrase && seed === window.__freshPhrase && !window.__freshV3) return false;   // a v2 phrase this page just made
+        var fresh = !!(window.__freshV3 && seed === window.__freshPhrase);
+        if(fresh){
+          var pw2 = (document.getElementById('pw2')||{}).value||'';
+          if(pw !== pw2){ chkShow('warn','<b>The two passwords are not the same.</b><div class="cd">Type the password you chose twice — or leave both empty for no password.</div>'); return true; }
+          if(P.passwordHasEdgeWhitespace(pw)){ chkShow('warn','<b>The password starts or ends with a space.</b><div class="cd">Remove it — a hidden space is the easiest way to lock yourself out.</div>'); return true; }
+        }
+        var cs;
+        try{ cs = P.candidates(seed, pw); }
+        catch(e){ if(pw){ chkShow('bad','<b>'+esc(e.message)+'</b>'); return true; } return false; }
+        var v3 = cs.filter(function(c){ return c.scheme==='v3'; })[0];
+        if(!v3) return false;                 // an older phrase: the unchanged flow handles it
+        var a3 = privToAddress(v3.secret), h3 = hexOf(v3.secret);
+        if(fresh){
+          chkShow('good','<b>✓ New wallet'+(pw?' with a password':'')+'.</b><div class="cd">'+addrLine(a3)+'Opening the wallet…</div>');
+          setTimeout(function(){ enterWith(h3, a3, 'v3'); }, 400);
+          return true;
+        }
+        setBusy(true,'Checking the chain…');
+        try{
+          var p3 = await chainProbe(a3);
+          if(cs.length === 2 && !p3.known){
+            // Passwordless BIP39 words: a new-style wallet, or one of the ~3 % of older ones whose words
+            // happen to be valid BIP39 too. Whichever has history is the one.
+            var a2 = privToAddress(cs[1].secret), p2 = await chainProbe(a2);
+            if(p2.known){
+              chkShow('good','<b>✓ Found on chain</b> — an older-style wallet.<div class="cd">'+addrLine(a2)+'Opening the wallet…</div>');
+              setTimeout(function(){ enterWith(seed, a2); }, 700);
+              return true;
+            }
+            chkShow('warn','<b>These words open two possible wallets, and neither has been used yet.</b>'+
+              '<div class="cd">Made on or after 27 October 2026? Then it is the new-style wallet. Made before? The older style.</div>'+
+              '<div class="cbtns">'+v3Button('cbtn-go', h3, a3, 'New-style '+esc(a3.slice(0,10))+'…')+
+              '<button type="button" class="cbtn" data-enter-seed="'+esc(seed)+'" data-enter-addr="'+esc(a2)+'">Older-style '+esc(a2.slice(0,10))+'…</button></div>');
+            return true;
+          }
+          if(p3.known){
+            var bits=[];
+            if(p3.transparent!==null && p3.transparent>0n) bits.push(fmtSigil(p3.transparent)+' SIGIL transparent');
+            if(p3.registered) bits.push('private notes registered');
+            chkShow('good','<b>✓ Found on chain.</b> '+esc(bits.join(' · '))+'<div class="cd">'+addrLine(a3)+'Opening the wallet…</div>');
+            setTimeout(function(){ enterWith(h3, a3, 'v3'); }, 700);
+            return true;
+          }
+          if(!p3.reachable){
+            chkShow('warn','<b>Could not reach the chain to check this wallet.</b><div class="cd">'+addrLine(a3)+'If the balance shows 0, re-check the words'+(pw?' and the password':'')+'.</div>'+
+              '<div class="cbtns">'+v3Button('', h3, a3, 'Continue anyway')+'</div>');
+            return true;
+          }
+          chkShow('bad','<b>These words'+(pw?' and this password':'')+' open a wallet the chain has never seen.</b>'+
+            '<div class="cd">'+addrLine(a3)+(pw?'A wrong password opens a different, empty wallet — capitals, spaces and every letter count. ':'')+
+            'Nothing has ever been mined or received to this address. For a wallet you just made, that is expected.</div>'+
+            '<div class="cbtns">'+v3Button('', h3, a3, 'Open this new empty wallet anyway')+'</div>');
+          return true;
+        } finally { setBusy(false); }
+      }
+      // Stage 2: "Create New Wallet" makes v3 words; the optional password is asked twice.
+      async function createWalletV3(){
+        var P = await v3Lib();
+        if(!P || !P.loaded()) return false;
+        var phrase = P.generateWords();
+        var wl=document.getElementById('words'); wl.textContent = phrase; wl.classList.add('show');
+        var warn=document.getElementById('warn');
+        warn.innerHTML='⚠ Write these 12 words down — they <b>are</b> your wallet. <b>Optional:</b> choose a password in the two boxes above as an extra lock — but forget it and the wallet is gone, nobody can reset it. Then press <b>◈ Open this new wallet</b>.';
+        warn.classList.add('show');
+        document.getElementById('seed').value = phrase;
+        var p2=document.getElementById('pw2'); if(p2) p2.style.display='';
+        var p1=document.getElementById('pw'); if(p1){ p1.placeholder='Password (optional)'; p1.autocomplete='new-password'; }
+        window.__freshPhrase = phrase; window.__freshV3 = true;
+        var gb=document.getElementById('goBtn'); if(gb) gb.textContent='◈ Open this new wallet';
+        chkHide();
+        return true;
+      }
       // 2026-09-24: the verdict buttons used to carry the phrase INSIDE an inline
       // onclick="__enterWith("…")" — JSON's own double quotes ended the attribute at
       // the first one, the handler became `__enterWith(` and every click threw
@@ -591,7 +692,7 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
         var b = ev.target && ev.target.closest ? ev.target.closest('[data-enter-seed]') : null;
         if(!b) return;
         ev.preventDefault();
-        enterWith(b.getAttribute('data-enter-seed'), b.getAttribute('data-enter-addr'));
+        enterWith(b.getAttribute('data-enter-seed'), b.getAttribute('data-enter-addr'), b.getAttribute('data-enter-scheme'));
       });
 
       window.go = async function(){
@@ -602,6 +703,9 @@ body{font-family:var(--font-sans);font-size:16px;color:var(--text);display:flex;
         // A bare 64-hex string is already an address — nothing to derive, and the
         // wallet page treats it as watch-only/raw. Straight through, as before.
         if(/^[0-9a-fA-F]{64}$/.test(seed)){ enterWith(seed, seed.toLowerCase()); return; }
+
+        // 2026-10-27: wallet v3 first — BIP39 words with or without a password. Older phrases fall through.
+        if(await v3Login(seed, (document.getElementById('pw')||{}).value||'')) return;
 
         if(window.__freshPhrase && seed === window.__freshPhrase){
           // Made on this page a moment ago: derive and go, no verdict needed.

@@ -958,6 +958,14 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     if names(safe, "sigil-nation-whitepaper.html") {
         return Some((include_str!("../../../gui/sigil-nation-whitepaper.html").as_bytes().to_vec(), HTML));
     }
+    // 2026-10-27: wallet v3 (BIP39 words + optional password) and the fast v2 engine — crates/sigil-wallet-phrase
+    // as wasm. The wallet page loads it in its own module; without it [W] stays on the JS Argon2id and has no v3.
+    if names(safe, "sigil-wallet-phrase.mjs") {
+        return Some((include_str!("../../../gui/sigil-wallet-phrase.mjs").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "wasm/sigil_wallet_phrase.wasm") {
+        return Some((include_bytes!("../../../gui/wasm/sigil_wallet_phrase.wasm").to_vec(), "application/wasm"));
+    }
     if names(safe, "sigil-argon2.mjs") {        // v2 (12-word) key derivation — Send is dead without it
         return Some((include_str!("../../../gui/sigil-argon2.mjs").as_bytes().to_vec(), JS));
     }
@@ -2429,6 +2437,8 @@ mod tests {
             "sigil-tron-p2p.js",
             "wasm/sigil_shield.js",
             "wasm/sigil_shield_bg.wasm",
+            "sigil-wallet-phrase.mjs",
+            "wasm/sigil_wallet_phrase.wasm",
         ] {
             let got = embedded_surface(name);
             assert!(got.is_some(), "{name} is not served from the binary");

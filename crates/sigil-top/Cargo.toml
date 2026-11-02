@@ -139,6 +139,8 @@ ed25519-dalek = { version = "2.2", optional = true }
 # [features] below) because privacy-by-default is the product's own stated design —
 # see the whitepaper's "no opt-in path to transparency" line — not an edge feature.
 sigil-shield = { path = "../sigil-shield", optional = true }
+# Wallet v3 (2026-11-02): BIP39 words + optional password — the SAME code sigilgraph.org runs as wasm.
+sigil-wallet-phrase = { path = "../sigil-wallet-phrase", optional = true }
 # Post-quantum authorization for the shielded RAMPS (sqisign-rs 0.3, L5: 292-byte sigs,
 # 129-byte keys). Small enough to carry per-transaction, unlike Dilithium5's ~4.6 KB.
 # Part of `shield-register`, since that is the feature that publishes the key.
@@ -213,7 +215,7 @@ sqisign = []
 # the much heavier sigil-node/DagKnight graph) so a build that only needs this stays
 # comparatively light; still toggleable if build time ever matters more than this
 # being on by default: `--no-default-features --features gpu`.
-shield-register = ["dep:sigil-shield", "dep:sha3", "dep:argon2", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign"]
+shield-register = ["dep:sigil-shield", "dep:sha3", "dep:argon2", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign", "dep:sigil-wallet-phrase"]
 # v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
 # Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
 # dependency block above for why each crate is here.

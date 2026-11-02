@@ -9505,6 +9505,7 @@ dependencies = [
  "sigil-top-sync",
  "sigil-tx",
  "sigil-veil",
+ "sigil-wallet-phrase",
  "tokio",
  "winterfell",
  "zstd",

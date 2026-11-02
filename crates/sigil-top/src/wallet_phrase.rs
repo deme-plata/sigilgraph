@@ -49,21 +49,31 @@ fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// `s` without the case-insensitive prefix `p`. Never slices inside a letter: the old
+/// `t[..3]` panicked on a phrase whose first letters are multi-byte (e.g. "øøø …").
+fn strip_ci<'a>(s: &'a str, p: &str) -> Option<&'a str> {
+    (s.len() >= p.len() && s.is_char_boundary(p.len()) && s[..p.len()].eq_ignore_ascii_case(p)).then(|| &s[p.len()..])
+}
+
 /// `(is_v2, material)` — mirrors the phone's `scheme_for` and the browser's `schemeFor`.
 fn scheme_for(t: &str) -> (bool, String) {
-    if t.len() >= 3 && t[..3].eq_ignore_ascii_case("v1:") {
-        return (false, t[3..].trim().to_string());
+    if let Some(m) = strip_ci(t, "v1:") {
+        return (false, m.trim().to_string());
     }
-    if t.len() >= 3 && t[..3].eq_ignore_ascii_case("v2:") {
-        return (true, t[3..].trim().to_string());
+    if let Some(m) = strip_ci(t, "v2:") {
+        return (true, m.trim().to_string());
     }
-    if t.len() >= 4 && t[..4].eq_ignore_ascii_case("mm2:") {
+    if strip_ci(t, "mm2:").is_some() {
         return (true, t.to_string());
     }
     (t.split_whitespace().count() >= 12, t.to_string())
 }
 
 /// The 32-byte secret a phrase (or a raw 64-hex seed) opens.
+///
+/// `v3:<words>` is a new-style wallet (BIP39 words, crates/sigil-wallet-phrase) WITHOUT a
+/// password — the form sigil-top writes into its phrase file. A v3 wallet WITH a password cannot
+/// be re-derived from its words alone; `wallet import` derives it once and installs the key.
 pub(crate) fn derive_secret(phrase: &str) -> Result<[u8; 32], String> {
     let t = phrase.trim();
     let mut secret = [0u8; 32];
@@ -71,6 +81,9 @@ pub(crate) fn derive_secret(phrase: &str) -> Result<[u8; 32], String> {
         let h = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
         hex::decode_to_slice(h, &mut secret).map_err(|e| format!("bad hex seed: {e}"))?;
         return Ok(secret);
+    }
+    if let Some(words) = strip_ci(t, "v3:") {
+        return sigil_wallet_phrase::derive_v3(words.trim(), "").map_err(|e| e.to_string());
     }
     let (v2, material) = scheme_for(t);
     if material.is_empty() {
@@ -163,7 +176,13 @@ pub(crate) struct Installed {
 /// its coins are. Installing the same wallet again only (re)writes the phrase.
 pub(crate) fn install_in(home: &str, phrase: &str) -> Result<Installed, String> {
     let phrase = phrase.trim();
-    let secret = derive_secret(phrase)?;
+    install_secret_in(home, &derive_secret(phrase)?, phrase)
+}
+
+/// [`install_in`] for a secret that is already derived — a v3 wallet with a password cannot be
+/// re-derived from its words alone. `record` is what the phrase file keeps (never a password).
+pub(crate) fn install_secret_in(home: &str, secret: &[u8; 32], record: &str) -> Result<Installed, String> {
+    let secret = *secret;
     let address = address_of(&secret);
     let seed_hex = hex::encode(secret);
     std::fs::create_dir_all(format!("{home}/.flux")).map_err(|e| format!("cannot create {home}/.flux: {e}"))?;
@@ -186,8 +205,27 @@ pub(crate) fn install_in(home: &str, phrase: &str) -> Result<Installed, String> 
         }
     }
     write_private(&seed_p, &seed_hex)?;
-    write_private(&phrase_p, phrase)?;
+    write_private(&phrase_p, record)?;
     Ok(Installed { address, replaced })
+}
+
+/// The phrase-file record of a v3 wallet: `v3:` + the words in BIP39's canonical form
+/// (lowercase, single spaces). The `v3:` marker keeps a later reader from hashing the words as
+/// an older v2 phrase, which would open a different, empty wallet.
+fn v3_record(words: &str) -> String {
+    let t = words.trim();
+    let w = strip_ci(t, "v3:").unwrap_or(t);
+    format!("v3:{}", w.split_whitespace().map(str::to_lowercase).collect::<Vec<_>>().join(" "))
+}
+
+/// The words of a stored v3 record (`None` for a v1 / v2 / raw-key wallet).
+fn v3_words(record: &str) -> Option<&str> {
+    strip_ci(record.trim(), "v3:").map(str::trim)
+}
+
+/// True when a v3 wallet's words alone do NOT open `secret` — it was made with a password.
+fn v3_needs_password(words: &str, secret: &[u8; 32]) -> bool {
+    sigil_wallet_phrase::derive_v3(words, "").map(|s| s != *secret).unwrap_or(true)
 }
 
 /// Windows has no `HOME`. sigil-top's home was `HOME` with a `/root` fallback, so on Windows every
@@ -273,14 +311,134 @@ fn ask(prompt: &str) -> String {
     line.trim().to_string()
 }
 
-fn show_words(phrase: &str) {
+/// Read a line without showing it on screen (a password). `None` = cancelled with Ctrl-C.
+/// The text is kept exactly as typed — BIP39 never trims a password. Without a terminal
+/// (piped input) it reads one plain line.
+fn ask_hidden(prompt: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    if !std::io::stdin().is_terminal() {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        return Some(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    let _ = crossterm::terminal::enable_raw_mode();
+    let mut s = String::new();
+    let mut cancelled = false;
+    loop {
+        match event::read() {
+            // Windows reports key releases too; only presses (and held-key repeats) type.
+            Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => match k.code {
+                KeyCode::Enter => break,
+                KeyCode::Backspace => {
+                    s.pop();
+                }
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    cancelled = true;
+                    break;
+                }
+                KeyCode::Char(c) => s.push(c),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(_) => {
+                cancelled = true;
+                break;
+            }
+        }
+    }
+    let _ = crossterm::terminal::disable_raw_mode();
+    println!();
+    (!cancelled).then_some(s)
+}
+
+/// Has this wallet left a footprint on the chain (a published receiving key)? Every wallet made on
+/// sigilgraph.org, in the phone app or in sigil-top publishes one. `None` = the network did not answer.
+fn has_history(secret: &[u8; 32]) -> Option<bool> {
+    use crate::shield_setup::{self as ss, RegistrationState};
+    let seed_hex = hex::encode(secret);
+    let (sk, pk) = (ss::wallet_signing_key(&seed_hex)?, ss::expected_pk_shield(&seed_hex)?);
+    let wallet = hex::encode(sk.verifying_key().to_bytes());
+    match ss::registration_state(&crate::top_core::money_node_url(), &wallet, &pk) {
+        RegistrationState::Absent => Some(false),
+        RegistrationState::Unknown(_) => None,
+        _ => Some(true),
+    }
+}
+
+/// Turn typed words into ONE wallet. Standard BIP39 words may be a new-style (v3) wallet, which
+/// can have a password, so the password is asked for then. When the words (without a password)
+/// open both a v3 and an older v2 wallet — 2.9 % of old 12-word phrases are also valid BIP39 — the
+/// owner picks, helped by which address is in use on the chain. Returns the secret and the record
+/// for the phrase file.
+fn choose_wallet(phrase: &str) -> Result<([u8; 32], String), String> {
+    use sigil_wallet_phrase::{self as swp, Scheme};
+    let t = phrase.trim();
+    let bip39 = swp::bip39_entropy(strip_ci(t, "v3:").unwrap_or(t)).is_ok();
+    let password = if bip39 {
+        println!("  These are standard recovery words (BIP39). A new-style (v3) wallet can also have a password.");
+        ask_hidden("  Password (typing is hidden — just press Enter if your wallet has none): ")
+            .ok_or("cancelled — nothing changed")?
+    } else {
+        String::new()
+    };
+    let cands = swp::candidates(t, &password).map_err(|e| e.to_string())?;
+    let pick = if cands.len() == 1 {
+        0
+    } else {
+        println!("  These words open TWO different wallets, depending on where they were made:");
+        let hist: Vec<Option<bool>> = cands.iter().map(|c| has_history(&c.secret)).collect();
+        for (i, c) in cands.iter().enumerate() {
+            let kind = if c.scheme == Scheme::V3 { "new-style (v3)" } else { "older sigilgraph.org / phone wallet (v2)" };
+            let used = match hist[i] {
+                Some(true) => " · in use on the chain",
+                Some(false) => " · never used",
+                None => "",
+            };
+            println!("   [{}] {}  {kind}{used}", i + 1, address_of(&c.secret));
+        }
+        let default = if hist[0] == Some(false) && hist[1] == Some(true) { 2 } else { 1 };
+        match ask(&format!("  Which one is yours? 1 or 2 [{default}]: ")).as_str() {
+            "" => default - 1,
+            "1" => 0,
+            "2" => 1,
+            other => return Err(format!("\"{other}\" is not 1 or 2 — nothing changed")),
+        }
+    };
+    let c = &cands[pick];
+    let address = address_of(&c.secret);
+    if c.scheme == Scheme::V3 {
+        println!("  These words open new-style (v3) wallet {address}");
+        if !password.is_empty() {
+            println!("  sigil-top keeps the words, never the password — you will need it again on another device.");
+        }
+        return Ok((c.secret, v3_record(t)));
+    }
+    let warnings = phrase_warnings(t);
+    for w in &warnings {
+        println!("  ⚠ {w}");
+    }
+    println!("  This phrase opens wallet {address}");
+    if !warnings.is_empty() && ask("  Type yes to use this wallet anyway: ") != "yes" {
+        return Err("not installed — nothing changed".into());
+    }
+    Ok((c.secret, t.to_string()))
+}
+
+fn show_word_box(words: &str) {
     println!();
     println!("  ┌─ YOUR RECOVERY PHRASE ─────────────────────────────────────────────┐");
-    for (i, chunk) in phrase.split_whitespace().collect::<Vec<_>>().chunks(4).enumerate() {
+    for (i, chunk) in words.split_whitespace().collect::<Vec<_>>().chunks(4).enumerate() {
         let line: Vec<String> = chunk.iter().enumerate().map(|(j, w)| format!("{:>2}. {w:<10}", i * 4 + j + 1)).collect();
         println!("  │  {:<66}│", line.join(" "));
     }
     println!("  └────────────────────────────────────────────────────────────────────┘");
+}
+
+fn show_words(phrase: &str) {
+    show_word_box(phrase);
     println!("  Write these words down. They open THIS wallet on https://sigilgraph.org and in the phone");
     println!("  app, and they are the only way back in if this computer is lost. sigil-top keeps a copy");
     println!("  (`sigil-top wallet phrase` shows it).");
@@ -293,15 +451,8 @@ fn import_interactive(home: &str) -> Result<Installed, String> {
     if phrase.is_empty() {
         return Err("no phrase entered — nothing changed".into());
     }
-    let warnings = phrase_warnings(&phrase);
-    for w in &warnings {
-        println!("  ⚠ {w}");
-    }
-    let address = address_of(&derive_secret(&phrase)?);
-    println!("  This phrase opens wallet {address}");
-    if !warnings.is_empty() && ask("  Type yes to use this wallet anyway: ") != "yes" {
-        return Err("not installed — nothing changed".into());
-    }
+    let (secret, record) = choose_wallet(&phrase)?;
+    let address = address_of(&secret);
     if let Ok(old) = std::fs::read_to_string(seed_path_in(home)) {
         let mut s = [0u8; 32];
         if hex::decode_to_slice(old.trim(), &mut s).is_ok() && address_of(&s) != address {
@@ -312,7 +463,7 @@ fn import_interactive(home: &str) -> Result<Installed, String> {
             }
         }
     }
-    install_in(home, &phrase)
+    install_secret_in(home, &secret, &record)
 }
 
 fn new_wallet(home: &str) -> Result<Installed, String> {
@@ -370,19 +521,40 @@ pub(crate) fn run_cli(args: &[String]) {
                 Some(secret) => {
                     println!("\n  wallet   {}", address_of(&secret));
                     println!("  key      {} (only your user can read it)", seed_path_in(&home));
-                    match stored_phrase_in(&home) {
+                    let stored = stored_phrase_in(&home);
+                    let v3 = stored.as_deref().is_some_and(|p| v3_words(p).is_some());
+                    match stored {
+                        _ if v3 => println!("  phrase   new-style (v3) words kept by sigil-top — `sigil-top wallet phrase` shows them (a password is never kept)"),
                         Some(_) => println!("  phrase   kept by sigil-top — `sigil-top wallet phrase` shows it"),
                         None => println!("  phrase   none (made before 10.4.22) — its 64-character key is its phrase: `sigil-top wallet phrase`"),
                     }
-                    println!("  The same phrase opens this wallet on https://sigilgraph.org and in the phone app.\n");
+                    if v3 {
+                        println!("  The same words (and password) open this wallet on https://sigilgraph.org. The phone app cannot open v3 wallets yet.\n");
+                    } else {
+                        println!("  The same phrase opens this wallet on https://sigilgraph.org and in the phone app.\n");
+                    }
                 }
                 None => println!("\n  no wallet yet — `sigil-top wallet import` (use your sigilgraph.org / phone wallet) or `sigil-top wallet new`\n"),
             }
         }
         "phrase" => match (stored_phrase_in(&home), std::fs::read_to_string(seed_path_in(&home))) {
-            (Some(p), _) => {
+            (Some(p), key) => {
                 println!("\n  ⚠ anyone who sees these words can spend this wallet.");
-                show_words(&p);
+                match v3_words(&p) {
+                    Some(words) => {
+                        show_word_box(words);
+                        let secret = key.ok().and_then(|h| derive_secret(h.trim()).ok());
+                        if secret.is_some_and(|s| v3_needs_password(words, &s)) {
+                            println!("  A new-style (v3) wallet WITH a password: these words alone do not open it.");
+                            println!("  You need the words AND your password — sigil-top never stores the password.");
+                        } else {
+                            println!("  A new-style (v3) wallet without a password.");
+                        }
+                        println!("  Write the words down; with the password (if any) they open this wallet on https://sigilgraph.org.");
+                        println!("  The phone app cannot open v3 wallets yet.\n");
+                    }
+                    None => show_words(&p),
+                }
             }
             (None, Ok(key)) => {
                 println!("\n  ⚠ anyone who sees this key can spend this wallet.");
@@ -509,6 +681,76 @@ mod tests {
         assert!(derive_secret(&a).is_ok());
         assert_eq!(unknown_words("abandon notaword"), Some(vec!["notaword".to_string()]));
         assert_eq!(unknown_words(&"07".repeat(32)), None);
+    }
+
+    const ABOUT: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const LEGAL: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+    const DANISH_PW: &str = "Rødgrød med fløde — æøå ÆØÅ";
+
+    /// v3 wallets open the addresses an INDEPENDENT JavaScript implementation computed
+    /// (crates/sigil-wallet-phrase/tests/v3_vectors_js_reference.json), here through sigil-top's
+    /// OWN address function — so the key sigil-top mines with is the key the site will show.
+    #[test]
+    fn v3_words_and_password_open_the_reference_wallets() {
+        let c = sigil_wallet_phrase::candidates(ABOUT, "TREZOR").unwrap();
+        assert_eq!(c.len(), 1, "a password always means exactly one (v3) wallet");
+        assert_eq!(address_of(&c[0].secret), "3d9d79a8ee13cd0cb20fffe05cceda28485a9dfa8db2fab36963db40b0d568ca");
+        let c = sigil_wallet_phrase::candidates(LEGAL, DANISH_PW).unwrap();
+        assert_eq!(address_of(&c[0].secret), "1d08b318243c3d23ea2c0e09a03043a3639e6104217129d0f153af4dc8e276c3");
+    }
+
+    /// Words that are valid BIP39 AND an old v2 phrase: v3 is offered first, and the second
+    /// wallet is byte-for-byte what sigil-top derived before v3 existed — no old wallet moves.
+    #[test]
+    fn bip39_words_without_password_still_reach_the_old_v2_wallet() {
+        let c = sigil_wallet_phrase::candidates(ABOUT, "").unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(address_of(&c[0].secret), "3ac2ff16813fcde6656a0b24cf23caaf20b62a5a90df850b0654091f415f3771");
+        assert_eq!(c[1].secret, derive_secret(ABOUT).unwrap());
+        // a non-BIP39 phrase has exactly one reading, the one it always had
+        let old = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+        let c = sigil_wallet_phrase::candidates(old, "").unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(address_of(&c[0].secret), "f31437fff073dd8c2355d45050b038723e0babf273be0b5691bc6512f1139be9");
+    }
+
+    /// The phrase-file record (`v3:` + canonical words) re-derives a passwordless v3 wallet,
+    /// however the words were typed, and is never read as a v2 phrase.
+    #[test]
+    fn the_v3_record_reopens_the_passwordless_wallet() {
+        let v3 = sigil_wallet_phrase::derive_v3(ABOUT, "").unwrap();
+        let rec = v3_record(&format!("  {}  ", ABOUT.to_uppercase().replace(' ', "   ")));
+        assert_eq!(rec, format!("v3:{ABOUT}"));
+        assert_eq!(derive_secret(&rec).unwrap(), v3);
+        assert_eq!(derive_secret(&format!("V3: {ABOUT}")).unwrap(), v3);
+        assert_ne!(derive_secret(&rec).unwrap(), derive_secret(ABOUT).unwrap(), "v3 and v2 are different wallets");
+        assert!(!v3_needs_password(v3_words(&rec).unwrap(), &v3));
+    }
+
+    /// A v3 wallet with a password is installed by its derived KEY; the phrase file keeps the
+    /// words with the v3 marker and never the password.
+    #[test]
+    fn a_v3_wallet_is_installed_by_its_key_and_the_password_is_never_kept() {
+        let home = tmp("v3");
+        let c = sigil_wallet_phrase::candidates(LEGAL, DANISH_PW).unwrap();
+        let got = install_secret_in(&home, &c[0].secret, &v3_record(LEGAL)).unwrap();
+        assert_eq!(got.address, "1d08b318243c3d23ea2c0e09a03043a3639e6104217129d0f153af4dc8e276c3");
+        // the seed file — what the miner and the signer read — opens that same wallet
+        let seed = std::fs::read_to_string(seed_path_in(&home)).unwrap();
+        assert_eq!(address_of(&derive_secret(&seed).unwrap()), got.address);
+        let rec = stored_phrase_in(&home).unwrap();
+        assert_eq!(rec, format!("v3:{LEGAL}"));
+        assert!(!rec.contains("Rødgrød") && !rec.contains("ÆØÅ"));
+        assert!(v3_needs_password(v3_words(&rec).unwrap(), &c[0].secret));
+    }
+
+    /// The old `t[..3]` prefix check sliced inside a multi-byte letter and panicked.
+    #[test]
+    fn a_phrase_starting_with_danish_letters_does_not_crash() {
+        assert!(derive_secret("øøø blåbær").is_ok());
+        assert!(derive_secret("ææ fløde").is_ok());
+        assert_eq!(strip_ci("øv3:x", "v3:"), None);
+        assert_eq!(strip_ci("V2:abc", "v2:"), Some("abc"));
     }
 
     fn tmp(tag: &str) -> String {

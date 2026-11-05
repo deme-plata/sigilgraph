@@ -514,6 +514,14 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::F(5) if app.tab == Tab::Ai => { ai_setup_start(&mut app); }   // re-run auto-setup
                             KeyCode::F(6) if app.tab == Tab::Ai => { ai_skills_start(&mut app); }  // reload signed skills
                             KeyCode::Backspace if app.tab == Tab::Ai => { app.ai_input.pop(); }
+                            // No mouse capture: most terminals send the wheel as ↑/↓ in a full-screen app, and
+                            // leaving the mouse alone keeps selecting and copying an answer working.
+                            KeyCode::Up if app.tab == Tab::Ai => { ai_scroll(&mut app, AiScroll::Up); }
+                            KeyCode::Down if app.tab == Tab::Ai => { ai_scroll(&mut app, AiScroll::Down); }
+                            KeyCode::PageUp if app.tab == Tab::Ai => { ai_scroll(&mut app, AiScroll::PageUp); }
+                            KeyCode::PageDown if app.tab == Tab::Ai => { ai_scroll(&mut app, AiScroll::PageDown); }
+                            KeyCode::Home if app.tab == Tab::Ai => { ai_scroll(&mut app, AiScroll::Top); }
+                            KeyCode::End if app.tab == Tab::Ai => { ai_scroll(&mut app, AiScroll::Newest); }
                             KeyCode::Esc if app.tab == Tab::Ai => { app.tab = Tab::Node; }
                             KeyCode::Char(c) if app.tab == Tab::Ai => { app.ai_input.push(c); }
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
@@ -953,6 +961,9 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                         ai_setup::SetupEvent::Done { model } => {
                             app.ai_models = crate::flux_moe::list_models();
                             app.ai_model = Some(model.clone());
+                            if let Some(note) = flux_moe::reconcile_saved_model(&model) {
+                                app.ai_msgs.push(("assistant".to_string(), note));
+                            }
                             app.ai_msgs.push(("assistant".to_string(), format!("✓ flux-moe ready on {model} — ask me about mining, the wallet, the Nation, or the node")));
                             finished = true;
                         }
@@ -1185,6 +1196,7 @@ impl Tab {
 pub(crate) fn ai_submit(app: &mut App) {
     let msg = app.ai_input.trim().to_string();
     if msg.is_empty() { return; }
+    app.ai_view_top = None; // you just spoke: back to the newest row
     // A reply is still streaming: replacing `ai_rx` now would DROP it (the old bug — "it
     // missed my prompt"). Queue the message instead; `ai_drain` sends it when this one ends.
     if app.ai_thinking {
@@ -1196,9 +1208,23 @@ pub(crate) fn ai_submit(app: &mut App) {
     app.ai_msgs.push(("user".to_string(), msg.clone()));
     // An ACTION the model asked for waits for exactly this: the user's own `yes`.
     if let Some((name, _args)) = app.ai_pending.take() {
-        let yes = matches!(msg.trim().to_ascii_lowercase().as_str(), "yes" | "y" | "ja" | "j" | "ok");
+        let yes = is_yes(&msg);
         let reply = if !yes { format!("Cancelled — I did not {}.", ai_tools::action_summary(&name)) } else { ai_run_action(app, &name) };
         app.ai_msgs.push(("assistant".to_string(), reply));
+        return;
+    }
+    // A `model <tag>` that needs a big download waits for the same kind of `yes`.
+    if let Some(tag) = app.ai_model_confirm.take() {
+        if is_yes(&msg) {
+            ai_model_use(app, &tag, format!("Downloading {tag}. Progress appears below, and you can keep using the rest of sigil-top meanwhile."));
+        } else {
+            app.ai_msgs.push(("assistant".to_string(), "Cancelled. Nothing was downloaded.".to_string()));
+        }
+        return;
+    }
+    // `model` / `model <tag>` / `model auto`: which AI runs here.
+    if let Some(cmd) = flux_moe::parse_model_command(&msg) {
+        ai_model_command(app, cmd);
         return;
     }
     // Typed setup commands: `setup` / `install` / `retry` / `f5`. A phone or a terminal
@@ -1256,6 +1282,86 @@ pub(crate) fn ai_submit(app: &mut App) {
 }
 
 /// Run an ACTION the user just confirmed with `yes`. Never reachable from the model alone.
+fn is_yes(s: &str) -> bool {
+    matches!(s.trim().to_ascii_lowercase().as_str(), "yes" | "y" | "ja" | "j" | "ok")
+}
+
+/// One scroll key in the AI tab, against the page as it was last drawn.
+pub(crate) fn ai_scroll(app: &mut App, mv: AiScroll) {
+    let (max_top, page) = app.ai_view_geom.get();
+    app.ai_view_top = ai_scroll_to(app.ai_view_top, max_top, page, mv);
+}
+
+/// Save the choice and run setup, which pulls the model if it has to and proves it answers.
+fn ai_model_use(app: &mut App, tag: &str, note: String) {
+    match flux_moe::save_model_choice(Some(tag)) {
+        Ok(()) => {
+            app.ai_msgs.push(("assistant".to_string(), note));
+            ai_setup_start(app);
+        }
+        Err(e) => app.ai_msgs.push(("assistant".to_string(), format!("⚠ {e}"))),
+    }
+}
+
+/// The `model` command. Nothing here talks to the network or loads a model on the UI thread:
+/// the list is local, and the work happens in `ai_setup_start`'s background thread.
+fn ai_model_command(app: &mut App, cmd: flux_moe::ModelCommand) {
+    use crate::flux_moe::ModelCommand;
+    app.ai_models = flux_moe::list_models();
+    let hw = flux_moe::detect_hardware();
+    let free = flux_moe::free_ram_bytes();
+    if let ModelCommand::List = cmd {
+        let text = flux_moe::model_list_text(&app.ai_models, app.ai_model.as_deref(), hw, free);
+        app.ai_msgs.push(("assistant".to_string(), text));
+        return;
+    }
+    let refuse = if app.ai_setup_running {
+        Some("Setup is still running, progress is above. Try again when it finishes.".to_string())
+    } else {
+        flux_moe::env_model_choice().map(|t| format!("SIGIL_AI_MODEL={t} is set in this program's environment and wins. Remove it to choose here."))
+    };
+    if let Some(why) = refuse {
+        app.ai_msgs.push(("assistant".to_string(), why));
+        return;
+    }
+    let arg = match cmd {
+        ModelCommand::Choose(arg) => arg,
+        _ => {
+            match flux_moe::save_model_choice(None) {
+                Ok(()) => {
+                    app.ai_msgs.push(("assistant".to_string(), "Back to automatic: sigil-top picks the model that fits this machine.".to_string()));
+                    ai_setup_start(app);
+                }
+                Err(e) => app.ai_msgs.push(("assistant".to_string(), format!("⚠ {e}"))),
+            }
+            return;
+        }
+    };
+    let tag = match flux_moe::resolve_model_choice(&arg, &flux_moe::model_options(&app.ai_models)) {
+        Ok(t) => t,
+        Err(e) => {
+            app.ai_msgs.push(("assistant".to_string(), e));
+            return;
+        }
+    };
+    if app.ai_model.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(&tag)) {
+        app.ai_msgs.push(("assistant".to_string(), format!("{tag} is already in use.")));
+        return;
+    }
+    let need = flux_moe::approx_model_bytes(&tag);
+    let fit = flux_moe::model_fit(need, hw, free);
+    if let (flux_moe::ModelFit::TooBig, Some(n)) = (fit, need) {
+        app.ai_msgs.push(("assistant".to_string(), flux_moe::model_too_big_text(&tag, n, hw, free)));
+        return;
+    }
+    if ai_setup::have_model(&app.ai_models, &tag) {
+        ai_model_use(app, &tag, format!("Switching to {tag}. Loading it to prove it runs here; a big model can take minutes."));
+    } else {
+        app.ai_msgs.push(("assistant".to_string(), flux_moe::model_download_question(&tag, need, fit)));
+        app.ai_model_confirm = Some(tag);
+    }
+}
+
 pub(crate) fn ai_run_action(app: &mut App, name: &str) -> String {
     match name {
         "sigil_create_wallet" => match ai_tools::create_wallet() {
@@ -1357,8 +1463,11 @@ pub(crate) fn ai_enter_tab(app: &mut App) {
     if app.ai_detected { return; }
     app.ai_detected = true;
     app.ai_models = crate::flux_moe::list_models();
-    app.ai_model = app.ai_models.first().cloned();
-    if app.ai_model.is_none() && flux_moe::autosetup_enabled() { ai_setup_start(app); }
+    let chosen = flux_moe::explicit_model_choice().map(|(tag, _)| tag);
+    app.ai_model = flux_moe::model_on_open(app.ai_model.as_deref(), chosen.as_deref(), &app.ai_models);
+    // A choice not on disk yet is a download someone said yes to and did not finish (ollama resumes it).
+    let chosen_missing = chosen.as_deref().is_some_and(|c| !ai_setup::have_model(&app.ai_models, c));
+    if (app.ai_model.is_none() || chosen_missing) && flux_moe::autosetup_enabled() { ai_setup_start(app); }
     ai_skills_start(app); // flux-signed skills, off-thread
 }
 

@@ -688,7 +688,7 @@ fn install_termux(tx: &Sender<SetupEvent>) -> Result<(), String> {
 
 // ── model pull ─────────────────────────────────────────────────────────────
 
-fn have_model(models: &[String], want: &str) -> bool {
+pub(crate) fn have_model(models: &[String], want: &str) -> bool {
     // ollama reports "qwen3:8b" for a pull of "qwen3:8b"; a bare "qwen3" pull shows as "qwen3:latest".
     let want_l = want.to_ascii_lowercase();
     models.iter().any(|m| {
@@ -705,7 +705,9 @@ pub(crate) fn pull_model(model: &str, tx: &Sender<SetupEvent>) -> Result<(), Str
     emit(tx, format!("  ⬇ pulling model {model} (this is a multi-GB download; progress below)"));
     let url = format!("{}/api/pull", crate::flux_moe::ollama_base());
     let body = serde_json::json!({ "name": model, "stream": true });
-    let resp = client(4 * 3600)
+    // Budget at 1 MB/s or 4 h, whichever is longer: 4 h flat cut gpt-oss:120b off on any line under ~40 Mbit/s.
+    let budget = crate::flux_moe::approx_model_bytes(model).map_or(4 * 3600, |b| (b / 1_000_000).max(4 * 3600));
+    let resp = client(budget)
         .post(&url)
         .json(&body)
         .send()
@@ -949,7 +951,14 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>, boot: bool) -> Result<St
     let m = match &manifest {
         Some(m) => m,
         None => {
-            // No signed guidance. If the user already has a model, use it — but say so.
+            // No signed guidance. A model the user chose and already has needs none.
+            if let Some((tag, _)) = crate::flux_moe::explicit_model_choice() {
+                if have_model(&models, &tag) {
+                    emit(tx, format!("  ⚠ AI manifest unavailable; using your chosen model {tag}"));
+                    return Ok(tag);
+                }
+            }
+            // If the user already has a model, use it — but say so.
             return match models.first().cloned() {
                 Some(m) => {
                     emit(tx, format!("  ⚠ using your existing model {m} (manifest unavailable, no pull attempted)"));

@@ -72,6 +72,9 @@ pub(crate) struct App {
     pub(crate) ai_load_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) ai_last_stats: String,                      // "120 tok · 19.8 tok/s · 6.1 s" of the last reply
     pub(crate) ai_pending: Option<(String, serde_json::Value)>, // an ACTION the model asked for, awaiting the user's `yes`
+    pub(crate) ai_model_confirm: Option<String>,           // a `model <tag>` that needs a big download, awaiting the user's `yes`
+    pub(crate) ai_view_top: Option<usize>,                 // transcript reading position: None = follow the newest row, Some(r) = row r is at the top
+    pub(crate) ai_view_geom: std::cell::Cell<(usize, usize)>, // (highest possible top row, page height) as last drawn; the scroll keys read it
     pub(crate) ai_queued: std::collections::VecDeque<String>, // typed while a reply was in flight — sent next, never dropped
     pub(crate) ai_reply_idx: Option<usize>,                // index of the in-flight reply in ai_msgs (others may push meanwhile)
     pub(crate) ai_setup_rx: Option<mpsc::Receiver<ai_setup::SetupEvent>>, // auto-setup progress (install/pull), off-UI-thread
@@ -171,7 +174,7 @@ impl App {
               ai_detected: false, ai_models: Vec::new(), ai_model: None,
               ai_input: String::new(), ai_msgs: Vec::new(), ai_thinking: false, ai_rx: None,
               ai_started: None, ai_first_token: None, ai_think_chars: 0, ai_tokens: 0, ai_avg_reply_tokens: 0.0,
-              ai_load: Default::default(), ai_load_stop: None, ai_last_stats: String::new(), ai_pending: None, ai_queued: Default::default(), ai_reply_idx: None,
+              ai_load: Default::default(), ai_load_stop: None, ai_last_stats: String::new(), ai_pending: None, ai_model_confirm: None, ai_view_top: None, ai_view_geom: Default::default(), ai_queued: Default::default(), ai_reply_idx: None,
               ai_setup_rx: None, ai_setup_running: false, ai_skills: Vec::new(), ai_skills_rx: None,
               ai_skills_note: String::new(),
               splash_frame: 0,

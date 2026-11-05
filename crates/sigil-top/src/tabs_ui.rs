@@ -152,7 +152,7 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
     let skills = if app.ai_skills_note.is_empty() { String::new() } else { format!("   ·   🔏 skills: {}", app.ai_skills_note) };
     let status = match (&app.ai_model, app.ai_setup_running) {
         (_, true) => format!(" 🧠 setting up your local AI — progress below{skills}"),
-        (Some(m), false) => format!(" 🧠 local model: {m}   ·   {} available{skills}   ·   Enter sends · F5 re-setup · F6 reload skills · Tab leaves",
+        (Some(m), false) => format!(" 🧠 local model: {m} (type `model` to change)   ·   {} available{skills}   ·   Enter sends · F5 re-setup · F6 reload skills · Tab leaves",
                                     app.ai_models.len()),
         (None, false) => format!(" 🧠 no local model yet — auto-setup runs at start-up and when this tab opens; type `setup` + Enter (or F5) to run it again{skills}"),
     };
@@ -181,6 +181,7 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
             )));
         }
         lines.push(Line::from(dim("  It never invents balances or prices — those come from the node.")));
+        lines.push(Line::from(dim("  Type `model` to see which AIs this machine can run, or to switch.")));
     }
     for (i, (role, content)) in app.ai_msgs.iter().enumerate() {
         // The in-flight assistant message is still empty while the model thinks: the
@@ -195,7 +196,8 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
         } else {
             lines.push(Line::from(Span::styled("moe ›", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))));
         }
-        let width = msgs_area.width.max(8) as usize;
+        // One column short of the area: the last column is the scrollbar's.
+        let width = msgs_area.width.saturating_sub(1).max(8) as usize;
         for l in content.lines() {
             // Wrap HERE, one Line per screen row, so the scroll arithmetic below is exact.
             for row in wrap_rows(&format!("  {l}"), width, 2) {
@@ -220,14 +222,28 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
     let width = msgs_area.width.max(1) as usize;
     let total: usize = lines.iter().map(|l| wrapped_rows(l, width)).sum();
     let inner_h = msgs_area.height.saturating_sub(2) as usize; // top border + breathing room
-    let scroll = total.saturating_sub(inner_h).min(u16::MAX as usize) as u16;
+    let max_top = total.saturating_sub(inner_h);
+    let top = ai_view_row(app.ai_view_top, max_top);
+    app.ai_view_geom.set((max_top, inner_h.max(1)));
+    let mut block = Block::default().borders(Borders::TOP).border_style(Style::default().fg(C_DIM));
+    let hint = ai_scroll_hint(top, max_top);
+    if !hint.is_empty() {
+        block = block.title(Line::from(Span::styled(hint, Style::default().fg(C_NEON_CYAN))).right_aligned());
+    }
     f.render_widget(
         Paragraph::new(lines)
             .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((scroll, 0))
-            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(C_DIM))),
+            .scroll((top.min(u16::MAX as usize) as u16, 0))
+            .block(block),
         msgs_area,
     );
+    if max_top > 0 {
+        use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+        let rail = ratatui::layout::Rect { y: msgs_area.y + 1, height: msgs_area.height.saturating_sub(1), ..msgs_area };
+        // position runs 0..=content_length-1, so `max_top + 1` puts the thumb on the floor at the newest row.
+        let mut state = ScrollbarState::new(max_top + 1).position(top).viewport_content_length(inner_h);
+        f.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None), rail, &mut state);
+    }
 
     // input line
     let cursor = if app.ai_thinking { "" } else { "▏" };
@@ -236,6 +252,44 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(C_NEON_CYAN)).title(" ask flux-moe ")),
         input_area,
     );
+}
+
+/// One keypress of AI-transcript scrolling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AiScroll { Up, Down, PageUp, PageDown, Top, Newest }
+
+/// Pure: the row at the top of the view. `None` follows the newest row. A reader's `Some(row)` is an
+/// ABSOLUTE row, not a distance from the bottom, so the text under their eyes stands still while a
+/// reply keeps streaming in below it.
+pub(crate) fn ai_view_row(top: Option<usize>, max_top: usize) -> usize {
+    top.unwrap_or(max_top).min(max_top)
+}
+
+/// Pure: where a scroll key takes the view. Reaching the bottom returns `None`, which is what puts
+/// the view back on the newest row. A page keeps one row of the previous page for context.
+pub(crate) fn ai_scroll_to(top: Option<usize>, max_top: usize, page: usize, mv: AiScroll) -> Option<usize> {
+    let at = ai_view_row(top, max_top);
+    let step = page.saturating_sub(1).max(1);
+    let new = match mv {
+        AiScroll::Up => at.saturating_sub(1),
+        AiScroll::Down => at + 1,
+        AiScroll::PageUp => at.saturating_sub(step),
+        AiScroll::PageDown => at + step,
+        AiScroll::Top => 0,
+        AiScroll::Newest => max_top,
+    };
+    if new >= max_top { None } else { Some(new) }
+}
+
+/// Pure: the transcript's corner label — how to scroll, or how far from the newest row you are.
+pub(crate) fn ai_scroll_hint(top: usize, max_top: usize) -> String {
+    if max_top == 0 {
+        String::new()
+    } else if top < max_top {
+        format!(" ▲ {} rows below · End = newest ", max_top - top)
+    } else {
+        " ↑↓ PgUp PgDn scroll ".to_string()
+    }
 }
 
 /// Pure: greedy word-wrap of `text` into rows at most `width` columns wide; continuation
@@ -754,6 +808,63 @@ mod wrap_tests {
             assert_eq!(joined.split_whitespace().count(), text.split_whitespace().count(), "no word lost at {width}");
         }
         assert_eq!(wrap_rows("", 10, 2), vec![String::new()]);
+    }
+}
+
+#[cfg(test)]
+mod ai_scroll_tests {
+    use super::{ai_scroll_hint, ai_scroll_to, ai_view_row, AiScroll};
+
+    #[test]
+    fn a_new_transcript_follows_the_newest_row() {
+        assert_eq!(ai_view_row(None, 100), 100);
+        assert_eq!(ai_scroll_to(None, 100, 20, AiScroll::Down), None);
+        assert_eq!(ai_scroll_to(None, 100, 20, AiScroll::PageDown), None);
+        assert_eq!(ai_scroll_to(None, 100, 20, AiScroll::Newest), None);
+    }
+
+    #[test]
+    fn scrolling_up_starts_from_the_bottom_and_stops_at_the_top() {
+        assert_eq!(ai_scroll_to(None, 100, 20, AiScroll::Up), Some(99));
+        assert_eq!(ai_scroll_to(None, 100, 20, AiScroll::PageUp), Some(81)); // keeps one row of context
+        assert_eq!(ai_scroll_to(Some(5), 100, 20, AiScroll::PageUp), Some(0));
+        assert_eq!(ai_scroll_to(Some(0), 100, 20, AiScroll::Up), Some(0));
+        assert_eq!(ai_scroll_to(Some(40), 100, 20, AiScroll::Top), Some(0));
+    }
+
+    #[test]
+    fn reaching_the_bottom_returns_to_following() {
+        assert_eq!(ai_scroll_to(Some(99), 100, 20, AiScroll::Down), None);
+        assert_eq!(ai_scroll_to(Some(90), 100, 20, AiScroll::PageDown), None);
+        assert_eq!(ai_scroll_to(Some(10), 100, 20, AiScroll::Newest), None);
+        assert_eq!(ai_scroll_to(Some(10), 100, 20, AiScroll::Down), Some(11));
+    }
+
+    /// The whole point of an absolute row: a reply streaming in below must not move what you are reading.
+    #[test]
+    fn the_text_stands_still_while_a_reply_grows_below_it() {
+        assert_eq!(ai_view_row(Some(40), 100), 40);
+        assert_eq!(ai_view_row(Some(40), 500), 40);
+        assert_eq!(ai_view_row(None, 500), 500);
+    }
+
+    #[test]
+    fn a_transcript_that_fits_cannot_scroll() {
+        assert_eq!(ai_scroll_to(None, 0, 20, AiScroll::Up), None);
+        assert_eq!(ai_scroll_to(None, 0, 20, AiScroll::Top), None);
+        assert_eq!(ai_scroll_hint(0, 0), "");
+    }
+
+    #[test]
+    fn a_page_of_one_row_still_moves() {
+        assert_eq!(ai_scroll_to(Some(10), 100, 1, AiScroll::PageUp), Some(9));
+        assert_eq!(ai_scroll_to(Some(10), 100, 0, AiScroll::PageDown), Some(11));
+    }
+
+    #[test]
+    fn the_label_says_how_to_scroll_or_how_far_back_you_are() {
+        assert!(ai_scroll_hint(100, 100).contains("PgUp"));
+        assert!(ai_scroll_hint(60, 100).contains("40 rows below"));
     }
 }
 

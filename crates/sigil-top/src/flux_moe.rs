@@ -361,7 +361,287 @@ pub(crate) fn tag_params_b(tag: &str) -> Option<f64> {
 /// params, qwen3:4b ≈ 2.5 GB ⇒ ~0.65 GB per billion params, plus ~1 GB of KV
 /// cache and runtime overhead.
 pub(crate) fn approx_model_bytes(tag: &str) -> Option<u64> {
+    if let Some(gib) = measured_weights_gib(tag) {
+        return Some(((gib + 1.0) * GIB as f64) as u64);
+    }
     tag_params_b(tag).map(|b| ((b * 0.65 + 1.0) * GIB as f64) as u64)
+}
+
+/// Weights measured from Ollama's registry, for a tag the 0.65-per-billion rule gets wrong.
+/// gpt-oss:120b is 65.37 GB = 60.9 GiB (registry manifest, 2026-11-06); the rule would say 79,
+/// and the disk check would refuse a pull that fits.
+fn measured_weights_gib(tag: &str) -> Option<f64> {
+    match tag.trim().to_ascii_lowercase().as_str() {
+        "gpt-oss:120b" => Some(60.9),
+        _ => None,
+    }
+}
+
+/// What the `model` command offers, largest first. These are CHOICES ONLY: auto-setup reads the signed
+/// manifest's ladder and never this list, so a 61 GiB download can only ever start from a user's `yes`.
+/// Any other tag works too (`model <tag>`); models already installed are added to the list.
+pub(crate) const MODEL_OPTIONS: &[&str] = &["gpt-oss:120b", "qwen3.8:27b", "qwen3.5:9b", "qwen3:8b", "qwen3:4b", "qwen3:1.7b"];
+
+/// What the user typed in the AI tab about the model.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ModelCommand {
+    /// `model` / `models`: show what can run here.
+    List,
+    /// `model auto`: forget the choice, let sigil-top pick.
+    Auto,
+    /// `model <tag>` or `model <number from the list>`.
+    Choose(String),
+}
+
+/// Chat-box words about the model. Deliberately narrow, because this box is also where questions are
+/// typed: "model training?" and "what model is this" must still reach the AI. A tag has a colon.
+pub(crate) fn parse_model_command(s: &str) -> Option<ModelCommand> {
+    let mut words = s.trim().trim_start_matches('/').split_whitespace();
+    let first = words.next()?.to_ascii_lowercase();
+    if first != "model" && first != "models" {
+        return None;
+    }
+    match (words.next(), words.next()) {
+        (None, _) => Some(ModelCommand::List),
+        (Some(w), None) => {
+            let l = w.to_ascii_lowercase();
+            if l == "auto" || l == "automatic" {
+                Some(ModelCommand::Auto)
+            } else if l.contains(':') || l.parse::<usize>().is_ok() {
+                Some(ModelCommand::Choose(w.to_string()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The numbered list: [`MODEL_OPTIONS`], then whatever else is installed.
+pub(crate) fn model_options(installed: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = MODEL_OPTIONS.iter().map(|s| s.to_string()).collect();
+    for m in installed {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(m)) {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
+/// A number picks from the list; anything else must look like a tag.
+pub(crate) fn resolve_model_choice(arg: &str, options: &[String]) -> Result<String, String> {
+    if let Ok(n) = arg.parse::<usize>() {
+        return options.get(n.wrapping_sub(1)).cloned()
+            .ok_or_else(|| format!("There is no number {n} in the list. Type `model` to see it."));
+    }
+    let ok = !arg.is_empty() && arg.len() <= 128
+        && arg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_' | '/'));
+    if ok { Ok(arg.to_string()) } else { Err(format!("`{arg}` does not look like a model name. Type `model` to see the list.")) }
+}
+
+/// `$SIGIL_TOP_HOME` (default `~/.sigil-top/`): where this program keeps its own small files.
+fn top_home_dir() -> std::path::PathBuf {
+    std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .or_else(|| std::env::var("USERPROFILE").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+const SAVED_MODEL_FILE: &str = "ai-model";
+
+fn saved_model_in(dir: &std::path::Path) -> Option<String> {
+    let s = std::fs::read_to_string(dir.join(SAVED_MODEL_FILE)).ok()?;
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+fn save_model_in(dir: &std::path::Path, tag: Option<&str>) -> Result<(), String> {
+    let path = dir.join(SAVED_MODEL_FILE);
+    let Some(tag) = tag else {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("could not forget the saved model ({}): {e}", path.display())),
+            _ => Ok(()),
+        };
+    };
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    let tmp = dir.join(format!("{SAVED_MODEL_FILE}.tmp"));
+    std::fs::write(&tmp, format!("{tag}\n")).map_err(|e| format!("could not save your choice ({}): {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("could not save your choice ({}): {e}", path.display()))
+}
+
+pub(crate) fn saved_model() -> Option<String> { saved_model_in(&top_home_dir()) }
+pub(crate) fn save_model_choice(tag: Option<&str>) -> Result<(), String> { save_model_in(&top_home_dir(), tag) }
+
+/// `SIGIL_AI_MODEL`, when it is set.
+pub(crate) fn env_model_choice() -> Option<String> {
+    std::env::var("SIGIL_AI_MODEL").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// The user's own choice: `SIGIL_AI_MODEL` first, then what `model <tag>` saved. Returns (tag, why).
+pub(crate) fn explicit_model_choice() -> Option<(String, String)> {
+    if let Some(forced) = env_model_choice() {
+        let why = format!("SIGIL_AI_MODEL={forced} (your explicit choice)");
+        return Some((forced, why));
+    }
+    saved_model().map(|t| {
+        let why = format!("{t} (you chose it with `model`; `model auto` goes back to automatic)");
+        (t, why)
+    })
+}
+
+/// Which model the tab uses when it opens. A choice that is installed wins, then what setup already
+/// settled on, and only then the newest pull. This used to be `installed.first()` alone, so
+/// `SIGIL_AI_MODEL` was ignored whenever any other model was present, until someone pressed F5.
+pub(crate) fn model_on_open(current: Option<&str>, chosen: Option<&str>, installed: &[String]) -> Option<String> {
+    if let Some(c) = chosen.filter(|c| crate::ai_setup::have_model(installed, c)) {
+        return Some(c.to_string());
+    }
+    current.map(str::to_string).or_else(|| installed.first().cloned())
+}
+
+/// Setup finished on `model`. If that is not what the user chose, the choice did not work here: forget it,
+/// so the next launch does not walk into the same wall, and say so. The environment variable is theirs to
+/// change, so it is left alone.
+pub(crate) fn reconcile_saved_model(model: &str) -> Option<String> {
+    if env_model_choice().is_some() {
+        return None;
+    }
+    let saved = saved_model()?;
+    if saved.eq_ignore_ascii_case(model) {
+        return None;
+    }
+    let _ = save_model_choice(None);
+    Some(format!("⚠ `{saved}` did not work on this machine, so flux-moe went back to {model}. Your choice is cleared; type `model` to pick again."))
+}
+
+/// Memory free right now. MemAvailable, not MemFree: page cache is memory a model can have.
+#[cfg(target_os = "linux")]
+pub(crate) fn free_ram_bytes() -> Option<u64> {
+    meminfo_available(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn meminfo_available(meminfo: &str) -> Option<u64> {
+    let rest = meminfo.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?;
+    let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+    Some(kb * 1024)
+}
+
+/// Windows: ullAvailPhys counts the standby list, unlike WMI's FreePhysicalMemory, and needs no locale-named
+/// performance counter (Viktor's PC is Danish).
+#[cfg(windows)]
+pub(crate) fn free_ram_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut s: MemoryStatusEx = unsafe { std::mem::zeroed() };
+    s.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+    // SAFETY: `s` is a live, correctly sized MEMORYSTATUSEX with its length field set, as the API requires.
+    if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 { Some(s.avail_phys) } else { None }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(crate) fn free_ram_bytes() -> Option<u64> { None }
+
+/// Will this model run here, by the numbers we can measure?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModelFit {
+    /// The GPU alone holds it.
+    Gpu,
+    /// GPU + free RAM hold it; ollama splits it, and anything on the CPU is slow.
+    Memory,
+    /// Not enough memory free right now.
+    TooBig,
+    /// No size for the tag, or no measurement of the machine.
+    Unknown,
+}
+
+/// The test is FREE memory, not installed memory. sigil-top also runs on boxes doing other work, and a model
+/// that takes the last free gigabyte pushes those programs into the kernel's OOM killer. Keep 2 GiB clear.
+pub(crate) fn model_fit(need: Option<u64>, hw: &Hardware, free_ram: Option<u64>) -> ModelFit {
+    let Some(need) = need else { return ModelFit::Unknown };
+    // Apple's "VRAM" is half of the same memory the RAM figure counts, so adding them would count it twice.
+    let unified = hw.gpu_name.as_deref().is_some_and(|n| n.starts_with("Apple"));
+    let vram = if unified { 0 } else { hw.vram_bytes.unwrap_or(0) };
+    if vram >= need {
+        return ModelFit::Gpu;
+    }
+    match free_ram.or(hw.ram_bytes) {
+        Some(ram) if ram.saturating_add(vram) >= need.saturating_add(2 * GIB) => ModelFit::Memory,
+        Some(_) => ModelFit::TooBig,
+        None => ModelFit::Unknown,
+    }
+}
+
+fn gib_text(bytes: u64) -> String { format!("{:.0} GB", bytes as f64 / GIB as f64) }
+
+fn machine_text(hw: &Hardware, free_ram: Option<u64>) -> String {
+    match free_ram {
+        Some(f) => format!("{}, {} free right now", describe_hardware(hw), gib_text(f)),
+        None => describe_hardware(hw),
+    }
+}
+
+/// The answer to `model`: every option, what it costs, and whether it can run here.
+pub(crate) fn model_list_text(installed: &[String], current: Option<&str>, hw: &Hardware, free_ram: Option<u64>) -> String {
+    let mut out = format!("Models flux-moe can use ({}):\n", machine_text(hw, free_ram));
+    let in_use = |t: &str| current.is_some_and(|c| c.eq_ignore_ascii_case(t));
+    for (i, tag) in model_options(installed).iter().enumerate() {
+        let need = approx_model_bytes(tag);
+        let size = need.map_or_else(|| "size unknown".to_string(), |n| format!("needs ~{}", gib_text(n)));
+        let state = if in_use(tag) {
+            "in use"
+        } else if crate::ai_setup::have_model(installed, tag) {
+            "installed"
+        } else {
+            "download first"
+        };
+        let fit = match model_fit(need, hw, free_ram) {
+            ModelFit::Gpu => "fits your GPU",
+            ModelFit::Memory => "fits in memory, slow on CPU",
+            ModelFit::TooBig => "too big here right now",
+            ModelFit::Unknown => "cannot tell if it fits",
+        };
+        let mark = if in_use(tag) { "▶" } else { " " };
+        out.push_str(&format!("{mark}{:>2}. {tag} · {size} · {state} · {fit}\n", i + 1));
+    }
+    out.push_str("Type `model 1` or `model gpt-oss:120b` to switch, `model auto` to let sigil-top choose. Nothing downloads until you say yes.");
+    out
+}
+
+/// Why `model <tag>` will not start this one.
+pub(crate) fn model_too_big_text(tag: &str, need: u64, hw: &Hardware, free_ram: Option<u64>) -> String {
+    format!(
+        "`{tag}` does not fit here right now: it needs about {} of memory ({}).\nLoading it anyway could push other programs on this machine out of memory, so nothing was downloaded or started.\nClose other programs and try again, or type `model` to see what fits. To skip this check, start sigil-top with SIGIL_AI_MODEL={tag}.",
+        gib_text(need),
+        machine_text(hw, free_ram),
+    )
+}
+
+/// The question before a download.
+pub(crate) fn model_download_question(tag: &str, need: Option<u64>, fit: ModelFit) -> String {
+    let cost = need.map_or_else(
+        || "I cannot tell its size from the name.".to_string(),
+        |n| format!("It is a ~{} download and needs ~{} of memory to run.", gib_text(n.saturating_sub(GIB)), gib_text(n)),
+    );
+    let speed = match fit {
+        ModelFit::Gpu => "It fits your GPU.",
+        ModelFit::Memory => "It fits in memory, but whatever is not on a GPU runs on the CPU, which is slow for a model this size.",
+        _ => "I cannot measure whether it fits here.",
+    };
+    format!("`{tag}` is not on this machine yet. {cost} {speed}\nType yes to download it. Anything else cancels.")
 }
 
 /// Choose between the signed manifest's `default_model` and its `fallback_model`
@@ -573,7 +853,7 @@ fn http_error_message(status: reqwest::StatusCode, body: &str, model: &str) -> S
         return format!(
             "`{model}` does not fit in this machine's memory.\n\
              ollama said: {detail}\n\
-             Pick a smaller model — SIGIL_AI_MODEL=qwen3:4b (or qwen3:0.6b) then press F5."
+             Type `model` to see what fits, or `model auto` to go back to automatic. Or set SIGIL_AI_MODEL=qwen3:4b (or qwen3:0.6b) then press F5."
         );
     }
     if detail.is_empty() {
@@ -1035,11 +1315,7 @@ pub(crate) fn rewrite_mode() -> RewriteMode {
 
 /// `$SIGIL_TOP_HOME/veil-egress.jsonl` (default `~/.sigil-top/`) — "what did my AI send out?"
 pub(crate) fn veil_ledger_path() -> std::path::PathBuf {
-    std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
-        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
-        .or_else(|| std::env::var("USERPROFILE").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("veil-egress.jsonl")
+    top_home_dir().join("veil-egress.jsonl")
 }
 
 /// Gate a chat request bound for an OFF-BOX model, in place. System text
@@ -1193,7 +1469,7 @@ pub(crate) fn setup_hint() -> &'static str {
      3. you chat here.\n\
      To run it again: type `setup` and press Enter (F5 does the same on a keyboard that has it).\n\
      By hand instead: install ollama (ollama.com), `ollama serve`, `ollama pull qwen3:4b`, reopen this tab.\n\
-     Overrides: SIGIL_AI_MODEL=<tag> forces a model · SIGIL_OLLAMA=<url> points at another host · SIGIL_AI_AUTOSETUP=0 never installs without being asked."
+     Overrides: type `model` to choose one · SIGIL_AI_MODEL=<tag> forces a model · SIGIL_OLLAMA=<url> points at another host · SIGIL_AI_AUTOSETUP=0 never installs without being asked."
 }
 
 /// Chat-box words that mean "run the out-of-the-box setup". Function keys are not
@@ -1253,7 +1529,7 @@ const PHONE_MAX_PARAMS_B: f64 = 2.5;
 /// Pick the best rung of a model LADDER — largest first, as the signed manifest lists
 /// them — for THIS machine. Returns `(tag, why)`; the reason names the measurement so a
 /// user who disagrees can point at the number. Rules, in order:
-///  * `SIGIL_AI_MODEL` wins outright.
+///  * `SIGIL_AI_MODEL` wins outright, then what the user chose with `model <tag>`.
 ///  * A phone (Termux) takes the largest rung ≤ 2.5 B parameters.
 ///  * A GPU takes the largest rung whose weights fit its VRAM.
 ///  * No GPU takes the largest rung ≤ 10 B that leaves 2.5× headroom in RAM and, above
@@ -1262,9 +1538,8 @@ const PHONE_MAX_PARAMS_B: f64 = 2.5;
 ///  * Tags without a size (`foo:latest`) cannot be judged and are skipped, unless every
 ///    rung is unsized — then the manifest's first choice stands.
 pub(crate) fn pick_from_ladder(rungs: &[String], hw: &Hardware) -> (String, String) {
-    if let Some(forced) = std::env::var("SIGIL_AI_MODEL").ok().filter(|s| !s.trim().is_empty()) {
-        let forced = forced.trim().to_string();
-        return (forced.clone(), format!("SIGIL_AI_MODEL={forced} (your explicit choice)"));
+    if let Some(choice) = explicit_model_choice() {
+        return choice;
     }
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     pick_from_ladder_with(rungs, hw, cores, is_termux())
@@ -1337,6 +1612,155 @@ pub(crate) fn pick_model_tiered(
         }
     }
     pick_model(default_model, fallback_model, hw)
+}
+
+#[cfg(test)]
+mod model_choice_tests {
+    use super::*;
+
+    fn cpu_box(total_gib: u64) -> Hardware {
+        Hardware { vram_bytes: None, ram_bytes: Some(total_gib * GIB), gpu_name: None }
+    }
+    fn gpu_box(vram_gib: u64, total_gib: u64) -> Hardware {
+        Hardware { vram_bytes: Some(vram_gib * GIB), ram_bytes: Some(total_gib * GIB), gpu_name: Some("NVIDIA".into()) }
+    }
+    fn tags(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn typed_words_that_mean_the_model_command() {
+        use ModelCommand::*;
+        assert_eq!(parse_model_command("model"), Some(List));
+        assert_eq!(parse_model_command("  /Models "), Some(List));
+        assert_eq!(parse_model_command("model auto"), Some(Auto));
+        assert_eq!(parse_model_command("MODEL Automatic"), Some(Auto));
+        assert_eq!(parse_model_command("model gpt-oss:120b"), Some(Choose("gpt-oss:120b".into())));
+        assert_eq!(parse_model_command("models qwen3:4b"), Some(Choose("qwen3:4b".into())));
+        assert_eq!(parse_model_command("model 3"), Some(Choose("3".into())));
+    }
+
+    /// The same box is where questions are typed.
+    #[test]
+    fn questions_about_models_still_reach_the_ai() {
+        for q in ["what model is this", "model training", "model training is what?", "modeling", "models: what are they?", "model 3?", "model gpt-oss:120b please", ""] {
+            assert_eq!(parse_model_command(q), None, "{q:?}");
+        }
+    }
+
+    #[test]
+    fn gpt_oss_120b_is_on_the_list_with_its_measured_size() {
+        assert_eq!(model_options(&[])[0], "gpt-oss:120b");
+        let need = approx_model_bytes("gpt-oss:120b").unwrap() as f64 / GIB as f64;
+        assert!((61.0..63.0).contains(&need), "{need}");
+        // Every other tag keeps the old rule.
+        assert_eq!(approx_model_bytes("qwen3:4b"), Some(((4.0 * 0.65 + 1.0) * GIB as f64) as u64));
+    }
+
+    /// A 61 GiB download must only ever start from a person's `yes`.
+    #[test]
+    fn auto_setup_never_picks_it_even_when_it_is_on_the_ladder() {
+        let rungs = tags(&["gpt-oss:120b", "qwen3:8b", "qwen3:4b"]);
+        for hw in [cpu_box(512), cpu_box(62), gpu_box(24, 128)] {
+            assert_ne!(pick_from_ladder_with(&rungs, &hw, 64, false).0, "gpt-oss:120b");
+        }
+    }
+
+    #[test]
+    fn the_list_adds_what_is_installed_without_repeating() {
+        let o = model_options(&tags(&["llama3:latest", "qwen3:8b", "GPT-OSS:120B"]));
+        assert_eq!(o.iter().filter(|m| m.eq_ignore_ascii_case("gpt-oss:120b")).count(), 1);
+        assert_eq!(o.iter().filter(|m| *m == "qwen3:8b").count(), 1);
+        assert_eq!(o.last().unwrap(), "llama3:latest");
+    }
+
+    #[test]
+    fn a_number_picks_from_the_list_and_a_bad_one_says_so() {
+        let o = model_options(&[]);
+        assert_eq!(resolve_model_choice("1", &o).unwrap(), "gpt-oss:120b");
+        assert!(resolve_model_choice("0", &o).is_err());
+        assert!(resolve_model_choice("999", &o).is_err());
+        assert_eq!(resolve_model_choice("library/foo:1.2b-q4", &o).unwrap(), "library/foo:1.2b-q4");
+        assert!(resolve_model_choice("bad;tag:1", &o).is_err());
+    }
+
+    /// Epsilon's own numbers: 62 GB of RAM, 24 free, because Quillon lives there too.
+    #[test]
+    fn it_is_refused_on_a_busy_box_by_free_memory_not_installed_memory() {
+        let need = approx_model_bytes("gpt-oss:120b");
+        assert_eq!(model_fit(need, &cpu_box(62), Some(24 * GIB)), ModelFit::TooBig);
+        assert_eq!(model_fit(need, &cpu_box(128), Some(24 * GIB)), ModelFit::TooBig);
+        assert_eq!(model_fit(need, &cpu_box(128), Some(100 * GIB)), ModelFit::Memory);
+    }
+
+    #[test]
+    fn a_gpu_counts_and_is_not_counted_twice_on_apple() {
+        let need = approx_model_bytes("gpt-oss:120b");
+        assert_eq!(model_fit(need, &gpu_box(96, 64), Some(10 * GIB)), ModelFit::Gpu);
+        assert_eq!(model_fit(need, &gpu_box(24, 128), Some(60 * GIB)), ModelFit::Memory);
+        assert_eq!(model_fit(need, &gpu_box(24, 64), Some(30 * GIB)), ModelFit::TooBig);
+        let apple = Hardware { vram_bytes: Some(32 * GIB), ram_bytes: Some(64 * GIB), gpu_name: Some("Apple Silicon (unified memory)".into()) };
+        assert_eq!(model_fit(need, &apple, Some(40 * GIB)), ModelFit::TooBig);
+    }
+
+    #[test]
+    fn unknowns_stay_unknown() {
+        assert_eq!(model_fit(None, &cpu_box(64), Some(10 * GIB)), ModelFit::Unknown);
+        let blank = Hardware { vram_bytes: None, ram_bytes: None, gpu_name: None };
+        assert_eq!(model_fit(Some(GIB), &blank, None), ModelFit::Unknown);
+        // No free-memory reading: fall back to the installed figure.
+        assert_eq!(model_fit(Some(GIB), &cpu_box(64), None), ModelFit::Memory);
+    }
+
+    #[test]
+    fn opening_the_tab_honours_the_choice() {
+        let installed = tags(&["newest:8b", "qwen3:4b"]);
+        // The old bug: the newest pull won over everything.
+        assert_eq!(model_on_open(None, Some("qwen3:4b"), &installed).as_deref(), Some("qwen3:4b"));
+        assert_eq!(model_on_open(Some("newest:8b"), Some("qwen3:4b"), &installed).as_deref(), Some("qwen3:4b"));
+        // Chosen but not downloaded yet: use what works meanwhile.
+        assert_eq!(model_on_open(Some("qwen3:4b"), Some("gpt-oss:120b"), &installed).as_deref(), Some("qwen3:4b"));
+        assert_eq!(model_on_open(None, Some("gpt-oss:120b"), &installed).as_deref(), Some("newest:8b"));
+        // No choice: what setup settled on, else the newest. Nothing installed: nothing.
+        assert_eq!(model_on_open(Some("qwen3:4b"), None, &installed).as_deref(), Some("qwen3:4b"));
+        assert_eq!(model_on_open(None, None, &installed).as_deref(), Some("newest:8b"));
+        assert_eq!(model_on_open(None, None, &[]), None);
+    }
+
+    #[test]
+    fn the_choice_survives_a_restart_and_can_be_forgotten() {
+        let dir = std::env::temp_dir().join(format!("sigil-model-choice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(saved_model_in(&dir), None);
+        save_model_in(&dir, Some("gpt-oss:120b")).unwrap();
+        assert_eq!(saved_model_in(&dir).as_deref(), Some("gpt-oss:120b"));
+        assert!(!dir.join("ai-model.tmp").exists());
+        save_model_in(&dir, None).unwrap();
+        assert_eq!(saved_model_in(&dir), None);
+        save_model_in(&dir, None).unwrap(); // forgetting twice is fine
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn free_memory_reads_memavailable() {
+        assert_eq!(meminfo_available("MemTotal: 100 kB\nMemFree: 1 kB\nMemAvailable:   2048 kB\n"), Some(2048 * 1024));
+        assert_eq!(meminfo_available("MemTotal: 100 kB\n"), None);
+    }
+
+    #[test]
+    fn the_list_says_what_is_in_use_what_it_costs_and_what_fits() {
+        let t = model_list_text(&tags(&["qwen3:4b"]), Some("qwen3:4b"), &cpu_box(62), Some(24 * GIB));
+        assert!(t.contains("24 GB free right now"), "{t}");
+        assert!(t.contains(" 1. gpt-oss:120b · needs ~62 GB · download first · too big here right now"), "{t}");
+        assert!(t.lines().any(|l| l.starts_with('▶') && l.contains("qwen3:4b · needs") && l.contains("in use")), "{t}");
+        assert!(t.contains("`model auto`"), "{t}");
+    }
+
+    #[test]
+    fn the_messages_name_the_numbers_and_the_way_out() {
+        let t = model_too_big_text("gpt-oss:120b", approx_model_bytes("gpt-oss:120b").unwrap(), &cpu_box(62), Some(24 * GIB));
+        assert!(t.contains("62 GB") && t.contains("24 GB free") && t.contains("SIGIL_AI_MODEL=gpt-oss:120b"), "{t}");
+        let q = model_download_question("gpt-oss:120b", approx_model_bytes("gpt-oss:120b"), ModelFit::Memory);
+        assert!(q.contains("~61 GB download") && q.contains("yes"), "{q}");
+    }
 }
 
 #[cfg(test)]

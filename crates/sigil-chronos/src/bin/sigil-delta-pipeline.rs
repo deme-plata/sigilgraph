@@ -111,13 +111,18 @@ fn simulate_pipeline(point: &PipelinePoint) -> PipelineResult {
     //   + propagation × 1      (last block's propagation, everything else overlaps)
     // But CPU can only get `depth` blocks ahead. If build < prop/depth,
     // CPU stalls waiting for propagation to drain.
-    let cpu_can_keep_up = build * depth as u64 <= prop;
+    // v0.32.9 fix: the CPU is the BOTTLENECK (never stalls) when building `depth` blocks
+    // takes at least as long as one propagation — the head of the window has always cleared
+    // by the time the window fills. The old `<=` had this inverted, so depth=1 scored the
+    // ideal-overlap formula and deeper pipelines never looked better (failed its own test).
+    let cpu_can_keep_up = build * depth as u64 >= prop;
     let pipelined_us = if cpu_can_keep_up {
         // CPU builds all blocks at full speed; last block's propagation
         // happens after CPU finishes.
         build * n_blocks + prop
     } else {
-        // CPU outruns propagation; stalls every `depth` blocks.
+        // Propagation-bound: the window fills, then every batch of `depth` blocks waits
+        // for its head to clear (~one propagation per batch).
         // Each batch of `depth` blocks: CPU builds depth × build,
         // then waits for the first of those to propagate before continuing.
         let batches = n_blocks.div_ceil(depth as u64);

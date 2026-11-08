@@ -1,0 +1,392 @@
+{
+ "generated_at": 1780496225795,
+ "hub": "git://185.182.185.227:9418/q-narwhalknight",
+ "repos": [
+  {
+   "id": "q-narwhalknight",
+   "name": "Quillon Graph",
+   "path": "/home/orobit/q-narwhalknight",
+   "hue": 265,
+   "branch": "",
+   "total_commits": 0,
+   "commits": [],
+   "branches": [],
+   "contributors": []
+  },
+  {
+   "id": "sigil",
+   "name": "SIGIL chain",
+   "path": "/home/storage/deepseek-codewhale/sigil",
+   "hue": 190,
+   "branch": "master",
+   "total_commits": 153,
+   "commits": [
+    {
+     "hash": "021fd749",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "audit(testnet): (b) convergence — 4 separate lanes, NOT one DAG (root cause found)"
+    },
+    {
+     "hash": "b99f5aec",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "fix(testnet): (a) peer-id stability SOLVED — deterministic from SIGIL_NODE_ID (proven)"
+    },
+    {
+     "hash": "2fa8a877",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: control panel as a global-topbar overlay — qwen topmost (before Overlord), sides live"
+    },
+    {
+     "hash": "89811acb",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "feat(testnet): 4-node SIGIL g0 testnet LIVE on WireGuard mesh (node layer deployed)"
+    },
+    {
+     "hash": "68e6dbe9",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "feat(testnet): WireGuard 4-way mesh deployed (sigilwg0 10.77.0.0/24) — node layer pending"
+    },
+    {
+     "hash": "482ca19a",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: Why Flux reel in the UI — 6 ElevenLabs clips, playable from the topbar"
+    },
+    {
+     "hash": "3b80deae",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "docs(sigil): SIGIL g0 testnet — 4-node fleet uniform target-spec v0 (read-only inventory)"
+    },
+    {
+     "hash": "0592f80b",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: bundle welcome.mp3 as an imported asset so it deploys via assets/ (deploy-owner copies assets/, not dist/audio/)"
+    },
+    {
+     "hash": "2f176023",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: first project launch reframes flux qwen into a window + AI welcome (saga ElevenLabs)"
+    },
+    {
+     "hash": "88eb2bc3",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "p5-gate: fail-closed verdict = RED — fluxc-serve mesh + flux-native VC + aether-sov not yet stood up; git stays authoritative"
+    },
+    {
+     "hash": "16c5e0b2",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: flux qwen Start panel — describe→build is the first thing you see, auto model chooser"
+    },
+    {
+     "hash": "801e1832",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "feat(sigil-top): v0.2.19 ground-up UI redesign (DeepSeek-V4 co-author) — rich on legacy console"
+    },
+    {
+     "hash": "18371967",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "fix(sigil-top): terminal-adaptive glyphs (no '?' on legacy Windows console) + clean hash"
+    },
+    {
+     "hash": "b42ab55e",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: flux qwen LIVE — Flux IDE Build wired to local qwen via the new /capi wire"
+    },
+    {
+     "hash": "10b6143e",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "fix(sigil-top): robust updater — surface real parse error + cache-bust + retry"
+    },
+    {
+     "hash": "b5c44e5e",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "feat(sigil-top): q-tui-style CARD dashboard, co-authored with DeepSeek-V4"
+    },
+    {
+     "hash": "01d9b975",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: global flux topbar + Flux IDE = flux dev with code-panel diff"
+    },
+    {
+     "hash": "28244509",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: strip FLUX OS to one app — Flux IDE Pro"
+    },
+    {
+     "hash": "b96d0d7f",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "release(sigil-top): v0.2.13 — align NODE row; force a real Windows [U] swap test"
+    },
+    {
+     "hash": "b3a2210e",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "release(sigil-top): v0.2.12 — rich airy single-column TUI + robust Windows self-update"
+    },
+    {
+     "hash": "7b61a7f6",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: redesign FLUX OS — six tailored pillars, not an app dump"
+    },
+    {
+     "hash": "96e2b85c",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: FLUX OS landing — blank control panel + topbar show/hide-OS toggle"
+    },
+    {
+     "hash": "0ab98c9b",
+     "author": "root",
+     "date": "2026-06-03",
+     "subject": "fix(sigil-top): single-column UI + live-update bug (the 'unreachable' on Windows)"
+    },
+    {
+     "hash": "ab4d451b",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: golden path for the job board - savored entrance + faster fetch"
+    },
+    {
+     "hash": "81cb3c9c",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "cockpit: right-click = the human god-button - AI-reasoned MCP combo + predict + fast-lane feature"
+    }
+   ],
+   "branches": [
+    "master",
+    "origin/main"
+   ],
+   "contributors": [
+    {
+     "commits": 106,
+     "name": "root"
+    },
+    {
+     "commits": 31,
+     "name": "claude-desktop-viktor"
+    },
+    {
+     "commits": 10,
+     "name": "rocky-vision-infra"
+    },
+    {
+     "commits": 6,
+     "name": "rocky-vision-skill"
+    }
+   ]
+  },
+  {
+   "id": "flux",
+   "name": "Flux orchestrator",
+   "path": "/home/storage/deepseek-codewhale/flux",
+   "hue": 45,
+   "branch": "master",
+   "total_commits": 135,
+   "commits": [
+    {
+     "hash": "d47099d0",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(mcp): flux_vast_recommend + flux_vast_fleet — agentic GPU decisions in one tool-call"
+    },
+    {
+     "hash": "d92f28bc",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(gpu-market): fold_fleet() — autostop-aware runtime fleet folding"
+    },
+    {
+     "hash": "b95843e1",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(flux-gpu-market): plan_fleet() — cost-optimal propose-only fabric planner"
+    },
+    {
+     "hash": "d98ba8d2",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(flux-gpu-market): recommend() — the propose-only agentic GPU-rental decision"
+    },
+    {
+     "hash": "25f09cb7",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "fluxc-core SEC-1: close RCE — validate crate name before remote ssh build"
+    },
+    {
+     "hash": "0c07a9f1",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "flux-moe: autotune.rs - dynamic inference auto-tuner (no model downgrade)"
+    },
+    {
+     "hash": "1932d644",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): live boss fights — Prism Czar / Sediment / Nullglyph playable"
+    },
+    {
+     "hash": "f929d492",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): P6 capstone — flux_game_scaffold mold stamp"
+    },
+    {
+     "hash": "693dc755",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "fix(ashwalker): ai.rs — correct DeepSeek's diminishing-returns test harness"
+    },
+    {
+     "hash": "b0688b82",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): prototype 3 — The Ten Crowns of Ash (unique bosses)"
+    },
+    {
+     "hash": "bc3c0ce0",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "sigil-ashwalker: bestiary top-up to 20 foes (fixes its own 18+ test)"
+    },
+    {
+     "hash": "4fab92a7",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "docs(ashwalker): prototype 6 — ASHWALKER as a Flux boilerplate mold (50 features, 10 clusters)"
+    },
+    {
+     "hash": "2ab9e9b2",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): ai.rs — adaptive enemy brain (DeepSeek-v4-pro authored, human-verified clean)"
+    },
+    {
+     "hash": "c2cdcc28",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "sigil-ashwalker: PROTOTYPE 5 - campaign.rs (The Ashlands run layer)"
+    },
+    {
+     "hash": "2feb6fc7",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "f1-pitlane + sigil-ashwalker: DeepSeek-generated content modules"
+    },
+    {
+     "hash": "1e2d019d",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): simulated body + agility/dexterity + combo-timers + archery + battle-learning AI"
+    },
+    {
+     "hash": "f806dfad",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): real-time Witcher-3 combat — dodge/light/heavy/parry + 5 Signs + enemy telegraphs"
+    },
+    {
+     "hash": "773d2240",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): multiplayer co-op protocol (std-only) behind a Transport trait"
+    },
+    {
+     "hash": "ac1fc3d1",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): merkle boss-gen + item tiers/loot/gear-gating + pets & mounts"
+    },
+    {
+     "hash": "783ee917",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "feat(ashwalker): character creator (unique traits) + rich-text terminal avatar"
+    },
+    {
+     "hash": "4182ddfd",
+     "author": "DeepSeek V4",
+     "date": "2026-06-03",
+     "subject": "flux-legacy: hospital wards + BETA 2 multi-language + 1M-DeepSeek bridge (rocky-vision)"
+    },
+    {
+     "hash": "86fda13e",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "flux-legacy: harden import.rs - disk-budget guard + symlink-escape scan"
+    },
+    {
+     "hash": "6a7e6af0",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "flux-legacy: import.rs live-clone integration test (proven on octocat/Hello-World)"
+    },
+    {
+     "hash": "57e901ea",
+     "author": "rocky-vision-infra",
+     "date": "2026-06-03",
+     "subject": "release(flux-legacy): cut 0.1.0-beta.2 — any-repo survey + GitHub import"
+    },
+    {
+     "hash": "c074cffb",
+     "author": "claude-desktop-viktor",
+     "date": "2026-06-03",
+     "subject": "flux-legacy: import.rs (Beta-2 inc 2) - SAFE GitHub import, fail-closed"
+    }
+   ],
+   "branches": [
+    "master"
+   ],
+   "contributors": [
+    {
+     "commits": 67,
+     "name": "DeepSeek V4"
+    },
+    {
+     "commits": 23,
+     "name": "rocky-vision-infra"
+    },
+    {
+     "commits": 14,
+     "name": "claude-desktop-viktor"
+    },
+    {
+     "commits": 13,
+     "name": "Claude Opus 4.7"
+    },
+    {
+     "commits": 11,
+     "name": "rocky-vision-skill"
+    },
+    {
+     "commits": 6,
+     "name": "rocky"
+    },
+    {
+     "commits": 1,
+     "name": "rocky-vision"
+    }
+   ]
+  }
+ ]
+}

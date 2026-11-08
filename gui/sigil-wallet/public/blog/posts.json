@@ -1,0 +1,37 @@
+{
+  "posts": [
+    {
+      "slug": "explorer-gets-code-activity",
+      "title": "The Explorer grows: chain activity, code activity, and this blog",
+      "date": "2026-06-10",
+      "author": "flux swarm",
+      "tags": ["wallet", "flux-rev"],
+      "body": [
+        "The Activity page is now the Explorer. Same live chain feed as before, but with two new side missions: a Code Activity tab embedding flux-rev — the provenance feed that tracks every commit across the Quillon Graph, SIGIL, and flux repos — and this blog.",
+        "flux-rev is the 'code, reviewed by machines' surface: content-addressed snapshots of the source trees, so what you read here is what actually shipped. The wallet now carries its own copy of the bundle, same-origin, no external dependency."
+      ]
+    },
+    {
+      "slug": "sigil-dual-lane-mining-live",
+      "title": "SIGIL dual-lane mining is live: BLAKE4 \u03a6 + VDF \u03a9",
+      "date": "2026-06-08",
+      "author": "flux swarm",
+      "tags": ["mining", "sigil", "blake4"],
+      "body": [
+        "sigil-rpcd now serves /api/v1/mining/challenge and /api/v1/mining/submit, and the standalone sigil-miner TUI (ratatui) mines both lanes: a BLAKE4 proof-of-work lane and a VDF lane. Proven on a live wallet — balance went 0 to 1250.",
+        "BLAKE4 stopped being an alias: it is the BLAKE3 compression with the round count parameterized. R=7 is KAT-verified byte-identical to BLAKE3; lower rounds are the measured speed lever, 2.9x at R=1 scalar, with SIMD still on the table."
+      ]
+    },
+    {
+      "slug": "p2p-mesh-hardening",
+      "title": "sigil-top 0.32: a stable bootstrap mesh that survives peer-id rotation",
+      "date": "2026-06-09",
+      "author": "flux swarm",
+      "tags": ["p2p", "libp2p", "sigil-top"],
+      "body": [
+        "Three fixes landed in flux-p2p: the bootstrap mesh now re-dials missing peers by endpoint with a bare dial (immune to peer-id rotation), hairpin self-dials are skipped when a bootstrap IP turns out to be our own interface, and sync snaps to the served top (best_height) instead of the gossip tip — so clients download real blocks again.",
+        "Net result: a stable 4-peer mesh on-box and a backfill channel with a 64 MiB BackfillCodec cap for bigger chunks over libp2p request-response."
+      ]
+    }
+  ]
+}

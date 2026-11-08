@@ -19,7 +19,9 @@
 
 mod block_store;
 mod block_sync;
+mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
 mod serve;
+mod local_api;   // v0.11.0: serve the explorer /api/* from the LOCAL verified spine
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -27,6 +29,19 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// v0.7.21: Windows-safe "Instant N seconds in the past".
+/// `Instant::now() - Duration` panics with "overflow when subtracting duration
+/// from instant" when the monotonic clock is younger than the duration — which
+/// happens at process start on Windows (QPC epoch is near process/boot start),
+/// crashing sigil-top before the TUI even draws. `checked_sub` returns None in
+/// that case; we fall back to `now`. The intent of these call sites is "make the
+/// first periodic check overdue"; on the rare clamp the first tick is merely
+/// delayed by one interval instead of firing immediately — never a crash.
+fn instant_ago(secs: u64) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(Duration::from_secs(secs)).unwrap_or(now)
+}
 
 
 use std::fs;
@@ -61,6 +76,9 @@ use flux_p2p::NetworkManager;
 use flux_swarm_tools::{Activity, ActivityKind, ActivityLog, with_locked};
 use flux_rev::{Store, snapshot, Genesis};
 
+// v0.11.0: combined release — explorer local-spine /api (rocky-explorer) +
+// smooth-cruise (async refresh, panic-restore, offline backoff/banner, serve
+// watchdog). 0.11.0 is valid 3-part SemVer so VERSION flows straight from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// When the ratatui TUI owns the screen, raw `eprintln!` from the background P2P
@@ -74,9 +92,28 @@ pub(crate) fn log_line(s: String) {
             .map(|h| format!("{h}/.sigil-top.log"))
             .or_else(|_| std::env::var("TEMP").map(|t| format!("{t}\\sigil-top.log")))
             .unwrap_or_else(|_| "sigil-top.log".into());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
             use std::io::Write;
             let _ = writeln!(f, "{s}");
+        }
+        // v0.26: cap the logfile so a 24/7 run can't fill the disk. Checked cheaply once
+        // every LOG_CAP_EVERY writes; when it exceeds 4 MB, keep only the last ~1 MB.
+        static LOG_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        const LOG_CAP_EVERY: u64 = 512;
+        const LOG_MAX: u64 = 4 * 1024 * 1024;
+        const LOG_KEEP: u64 = 1024 * 1024;
+        if LOG_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % LOG_CAP_EVERY == 0 {
+            if std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0) > LOG_MAX {
+                let tail = {
+                    use std::io::{Read, Seek, SeekFrom};
+                    std::fs::File::open(&p).ok().and_then(|mut fh| {
+                        let len = fh.metadata().map(|m| m.len()).unwrap_or(0);
+                        fh.seek(SeekFrom::Start(len.saturating_sub(LOG_KEEP))).ok()?;
+                        let mut b = Vec::new(); fh.take(LOG_KEEP).read_to_end(&mut b).ok()?; Some(b)
+                    })
+                };
+                if let Some(b) = tail { let _ = std::fs::write(&p, &b); }
+            }
         }
     } else {
         eprintln!("{s}");
@@ -95,7 +132,7 @@ macro_rules! tlog {
 /// new release without recompilation — the whole point of "auto-update the flux way".
 // Tracks the binary's own version so it can never go stale on a release bump
 // (a hardcoded "0.7.5" here caused the updater to re-exec the OLD versioned binary).
-const LATEST: &str = env!("CARGO_PKG_VERSION");
+const LATEST: &str = VERSION; // ship cadence, not the 3-part Cargo version
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -307,6 +344,79 @@ fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
     }
 }
 
+/// v0.10.5: the result of one network refresh cycle, produced ENTIRELY on a
+/// background worker thread so the render loop never blocks on a socket. Owned
+/// data only — moves cleanly across the channel into `App::apply_refresh`.
+struct RefreshOutcome {
+    st: NodeStatus,
+    online: bool,
+    blocks: Option<Vec<FeedBlock>>,                // Some => replace the block list
+    fallback_note: bool,                           // show the "API fallback" toast
+    eclipse: Option<(u32, Vec<(String, bool)>)>,   // Some => eclipse-K re-measured this cycle
+}
+
+/// v0.10.5 "smooth cruise": all the blocking network I/O of the old
+/// `App::refresh` — feed fetch, the 8s reqwest block-fallback, the local API
+/// probe, and the DoH eclipse-K measurement — gathered into ONE function that
+/// runs off the UI thread. Previously these ran inline on every interval tick
+/// and every [R], so a slow/unreachable node froze the whole TUI for up to
+/// ~8 seconds (keystrokes ignored, animation stalled). Now the render loop
+/// spawns this and keeps drawing at full frame-rate while it works.
+fn fetch_refresh(feed: String, api: String, want_eclipse: bool, prior_synced: u64) -> RefreshOutcome {
+    // Primary: HTTPS status feed, then fall back to the local node API.
+    let (st, online, mut blocks) = match fetch_feed(&feed) {
+        Some((s, b)) => (s, true, Some(b)),
+        None => match fetch(&api) {
+            Ok(s) => (s, true, None),
+            Err(_) => (NodeStatus::default(), false, None),
+        },
+    };
+
+    // v0.4.0 fallback: feed online but no blocks → pull recent blocks from the API.
+    let mut fallback_note = false;
+    let empty_blocks = blocks.as_ref().map(|b| b.is_empty()).unwrap_or(true);
+    if empty_blocks && online {
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .danger_accept_invalid_certs(true)
+            .build()
+        {
+            let api_base = api.trim_end_matches('/');
+            if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
+                        let fb: Vec<FeedBlock> = arr.iter().filter_map(|b| {
+                            let h = b.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if h == 0 { return None; }
+                            Some(FeedBlock {
+                                height: h,
+                                hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
+                                producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
+                                txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
+                                tip_ms: 0,
+                            })
+                        }).collect();
+                        if !fb.is_empty() { blocks = Some(fb); fallback_note = true; }
+                    }
+                }
+            }
+        }
+    }
+
+    // L2-B eclipse-K (DoH, RTT-blocking) — also off the UI thread now. tip_ok is
+    // computed here from the just-fetched tip; height uses the verified tip when
+    // good, else the prior verified watermark.
+    let eclipse = if want_eclipse {
+        let tip_ok = st.tip.as_ref().map(|t| verify_tip(t).ok).unwrap_or(false);
+        let height = st.tip.as_ref().map(|t| t.height).filter(|_| tip_ok).unwrap_or(prior_synced);
+        Some(measure_eclipse_k(height, tip_ok))
+    } else {
+        None
+    };
+
+    RefreshOutcome { st, online, blocks, fallback_note, eclipse }
+}
+
 /// Outcome of verifying the node's real tip — every field is a fact the client
 /// just checked, not a placeholder.
 #[derive(Clone)]
@@ -423,7 +533,12 @@ fn print_help() {
          sigil-top --once       single snapshot, then exit\n  \
          sigil-top --interval N refresh seconds\n  \
          sigil-top --tui        opt-in ratatui TUI (alt-screen, interactive keys)\n  \
-         sigil-top --api URL    status endpoint (default https://sigilgraph.fluxapp.xyz/api/v1/status)"
+         sigil-top --api URL    status endpoint (default https://sigilgraph.fluxapp.xyz/api/v1/status)\n\n  \
+         sigil-top full-sync    headless: download + VERIFY the chain genesis→tip, exit 0 when\n  \
+         {space}             the verified spine reaches the network tip ([--target H] [--timeout S])\n  \
+         sigil-top verify-chain re-verify the LOCAL store (precheck + parent linkage), exit 1 on a\n  \
+         {space}             break, 0 if it's a clean connected spine to genesis ([--json])",
+        space = "      "
     );
 }
 
@@ -496,6 +611,15 @@ fn fmt_supply(base: u128) -> String {
 fn fmt_uptime(secs: u64) -> String {
     let (d, h, m) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60);
     if d > 0 { format!("{d}d {h}h {m}m") } else if h > 0 { format!("{h}h {m}m") } else { format!("{m}m {}s", secs % 60) }
+}
+
+/// v0.33.3: seconds → compact ETA ("4h 11m", "38m", "2d 3h"). "∞" when not making progress.
+fn fmt_eta(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 { return "—".into(); }
+    if secs > 60.0 * 60.0 * 24.0 * 99.0 { return "∞".into(); }
+    let s = secs as u64;
+    let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
+    if d > 0 { format!("{d}d {h}h") } else if h > 0 { format!("{h}h {m}m") } else if m > 0 { format!("{m}m") } else { format!("{s}s") }
 }
 
 fn short_root(r: &str) -> String {
@@ -576,6 +700,12 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     } else {
         o.push_str(&format!("    {GREEN}✓ up to date{RESET} {DIM}v{VERSION}  ·{RESET} {GOLD}[U]{DIM} re-check via flux://{RESET}\n"));
     }
+    // Nerd Font probe: if these two show as real glyphs (a chain link + the Rust
+    // gear), your terminal has a Nerd Font and we can light up the whole UI with
+    // them. If they're boxes/?, we stay on the universal Unicode set below.
+    o.push_str(&format!(
+        "    {DIM}glyph test:{RESET}  {GOLD}\u{F0C1}{RESET} {DIM}chain{RESET}   {GOLD}\u{E7A8}{RESET} {DIM}rust{RESET}   {DIM}· boxes? install a Nerd Font{RESET}\n"
+    ));
     o.push('\n');
 
     // NODE panel (section title embedded in the top border)
@@ -585,8 +715,18 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let disp_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     o.push_str(&row("height", &format!("{GOLD}{}{RESET}", disp_height)));
     if st.blocks_per_sec > 0.0 {
-        let bps_col = if st.blocks_per_sec >= 1000.0 { GOLD } else { GREEN };
-        o.push_str(&row("blocks/s", &format!("{bps_col}{:.0}{RESET} {DIM}(live feed){RESET}", st.blocks_per_sec)));
+        // v0.12: gauge the live backfill rate against the SIGIL-g0 sync target of
+        // 8000 blk/s (one full second of mainnet block production). A catch-up sync
+        // now shows how close it runs to line-rate, not just a bare number.
+        const SYNC_TARGET_BPS: f64 = 8000.0;
+        let frac = (st.blocks_per_sec / SYNC_TARGET_BPS).clamp(0.0, 1.0);
+        let filled = (frac * 10.0).round() as usize;
+        let bar: String = "▓".repeat(filled) + &"░".repeat(10 - filled);
+        let bps_col = if st.blocks_per_sec >= SYNC_TARGET_BPS { GOLD }
+            else if st.blocks_per_sec >= 1000.0 { GREEN } else { DIM };
+        o.push_str(&row("blocks/s", &format!(
+            "{bps_col}{:.0}{RESET} {DIM}/ 8000{RESET} {bps_col}{bar}{RESET} {DIM}{:.0}%{RESET}",
+            st.blocks_per_sec, frac * 100.0)));
     }
     o.push_str(&row("peers", &format!("{}", st.peers)));
     o.push_str(&row("producer", &prod));
@@ -637,6 +777,13 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     o.push_str(&mid_title("SUCCINCT SYNC  (flux-fold · light node)"));
     o.push_str(&row("fold proof", &format!("{GREEN}2,568 B{RESET} {DIM}constant ∀ chain len{RESET}")));
     o.push_str(&row("whole-chain", &format!("{GREEN}1 check{RESET} {DIM}· 342 ms @ 100k blocks{RESET}")));
+    // v0.26.0: EFFECTIVE sync throughput. The fold-proof verifies the WHOLE chain in a
+    // constant ~342ms (DeepSeek's #1 lever for 1M blk/s) — so the effective verification
+    // rate is chain_height/0.342s and GROWS with the chain. This is the real sync speed:
+    // we do not download the 11M-block middle, we prove it.
+    let fold_h = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
+    let fold_bps = (fold_h as f64 / 0.342) as u64;
+    o.push_str(&row("throughput", &format!("{GOLD}⚡ {} blk/s{RESET} {DIM}effective · whole chain proven, grows with length{RESET}", group(fold_bps))));
     o.push_str(&row("crypto", &format!("{DIM}Ajtai/SIS · post-quantum · no trusted setup{RESET}")));
 
     o.push_str(&bottom());
@@ -780,10 +927,104 @@ fn do_login(seed_hex: Option<String>) {
     println!("  {DIM}OAuth2 PKCE wallet-assertion (no password) · sigil-oauth · session at {}{RESET}\n", session_path());
 }
 
+/// Make the Windows console speak UTF-8 and process ANSI/VT escapes, so the rich
+/// glyphs (◆ ● ✓ ╭─╮ ⚡ ⛓) render as real icons instead of `?`, and the colours
+/// show in legacy conhost too. No-op on Unix. Raw kernel32 FFI — no extra dep.
+#[cfg(windows)]
+fn enable_rich_console() {
+    type Dword = u32;
+    type Handle = *mut core::ffi::c_void;
+    const STD_OUTPUT_HANDLE: Dword = 0xFFFF_FFF5; // (DWORD)-11
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: Dword = 0x0004;
+    const CP_UTF8: Dword = 65001;
+    extern "system" {
+        fn SetConsoleOutputCP(cp: Dword) -> i32;
+        fn SetConsoleCP(cp: Dword) -> i32;
+        fn GetStdHandle(n: Dword) -> Handle;
+        fn GetConsoleMode(h: Handle, mode: *mut Dword) -> i32;
+        fn SetConsoleMode(h: Handle, mode: Dword) -> i32;
+    }
+    unsafe {
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut mode: Dword = 0;
+        if GetConsoleMode(h, &mut mode) != 0 {
+            SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+}
+#[cfg(not(windows))]
+fn enable_rich_console() {}
+
+/// v0.33: Windows consoles render emoji-class glyphs (⛏ ⛓ ⬇ ▲ ●) at the WRONG
+/// cell width vs what `unicode-width` (ratatui's layout) assumes → every cell after
+/// them shifts and the whole TUI "smears". ASCII mode swaps those for width-1 ASCII
+/// so layout is exact everywhere. Auto-on for Windows; `SIGIL_ASCII=0` forces it off,
+/// `SIGIL_ASCII=1` forces it on (e.g. a Linux box over a dumb terminal).
+static UI_ASCII: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn ui_ascii() -> bool { UI_ASCII.load(std::sync::atomic::Ordering::Relaxed) }
+fn init_ui_ascii() {
+    let on = match std::env::var("SIGIL_ASCII").ok().as_deref() {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        // v0.33.2: default RICH on modern terminals. Windows Terminal (WT_SESSION /
+        // WT_PROFILE_ID), VS Code's integrated terminal (TERM_PROGRAM=vscode), and every
+        // *nix terminal render Unicode + emoji at the correct cell width → full rich icons.
+        // Only LEGACY Windows conhost (none of those signals) falls back to refined ASCII.
+        _ => {
+            cfg!(windows)
+                && std::env::var_os("WT_SESSION").is_none()
+                && std::env::var_os("WT_PROFILE_ID").is_none()
+                && std::env::var("TERM_PROGRAM").ok().as_deref() != Some("vscode")
+        }
+    };
+    UI_ASCII.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+/// Sanitize a UI string for legacy ASCII terminals: replace ONLY true emoji-presentation
+/// (width-2-in-font, width-1-in-unicode-width) glyphs that smear layout on old conhost.
+/// v0.33.2: width-1 BMP symbols (● ○ ✓ → ▲ ▼ █ ░ ▌ ◆ Δ Ε ≈ box-drawing) render AND align
+/// fine even on legacy conhost — keeping them is what restores "rich text + icons". Modern
+/// terminals (Windows Terminal, VS Code, any *nix) skip this entirely (ui_ascii=false).
+fn sa<S: Into<String>>(s: S) -> String {
+    let s = s.into();
+    if !ui_ascii() { return s; }
+    // v0.33.5: CP437 raster consoles (classic conhost) LACK heavy/rounded/diagonal box-
+    // drawing, geometric icons, arrows and emoji → they render as `?`. Map every such glyph
+    // to a CP437-safe ASCII stand-in. KEEP (fall through `other`): light box-drawing
+    // (─│┌┐└┘├┤┬┴┼) + block elements (█▓▒░▌▐) + · µ — those ARE in CP437 and render fine.
+    s.chars().map(|c| match c {
+        '◆' | '✦' | '✶' | '★' | '◇' | '⬣' | '⬢' | '⬡' | '🏆' => '*',
+        '◈' | '▦' | '⛓' | '▩' | '▣' => '#',
+        '●' | '◐' => 'o', '○' | '◦' | '∙' => '.',
+        '✓' | '✔' => 'v', '✗' | '✘' | '✕' | '×' | '╳' => 'x',
+        '→' | '➜' | '↩' | '⟳' | '➤' => '>', '←' => '<',
+        '⬆' | '↑' | '▲' => '^', '⬇' | '↓' | '▼' => 'v',
+        '≈' => '~', '…' => '.', '⚡' | '⚠' | '⛏' => '!',
+        '‹' | '«' => '<', '›' | '»' => '>',
+        '╱' => '/', '╲' => '\\', '▕' | '▏' | '▎' | '▍' => '|',
+        '━' => '-', '┃' => '|',
+        '┏' | '┓' | '┗' | '┛' | '╭' | '╮' | '╰' | '╯' => '+',
+        'Δ' => 'D', 'Ε' => 'E',
+        other => other,
+    }).collect()
+}
+
 fn main() {
+    enable_rich_console(); // UTF-8 + VT so icons/colours render (fixes the `?` glyphs)
+    init_ui_ascii();       // decide ASCII vs rich glyphs (Windows-safe layout)
     // subcommands: login / logout (handled before the render loop)
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(|s| s.as_str()) {
+        // v0.25: updater PRE-FLIGHT probe. Print the version and exit 0 — touch NOTHING else
+        // (no network, no TUI, no DB, no splash) — so `relaunch_new_binary` can confirm a
+        // freshly-swapped binary actually STARTS and reports the expected version BEFORE it
+        // tears down the running app to hand off. This is what stops a bad/corrupt/ABI-
+        // mismatched update from making the app vanish on the restart-after-sync.
+        Some("--selfcheck") => { println!("{VERSION}"); return; }
+        // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
+        // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
+        Some("revert") => { do_revert(); return; }
         Some("login") => {
             let seed = argv.iter().position(|a| a == "--seed").and_then(|i| argv.get(i + 1)).cloned();
             do_login(seed);
@@ -797,7 +1038,19 @@ fn main() {
                 .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
             let port: u16 = argv.iter().position(|a| a == "--port")
                 .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(9800);
-            match serve::start(&serve_dir, port) {
+            // v0.11.0: local-first explorer API in headless serve too. No live sync here,
+            // so status/recent/search proxy to SIGIL_NODE_URL (the real node) and only the
+            // cortex panel + any persisted-spine content-verify answer locally. Best-effort:
+            // if the store is locked by another instance, fall back to pure proxy (None).
+            let local_api = block_store::BlockStore::open(&sigil_top_db_path()).ok().map(|st| {
+                std::sync::Arc::new(local_api::LocalApi {
+                    reader: st.reader(),
+                    sync: None,
+                    cortex: std::sync::Arc::new(std::sync::Mutex::new(local_api::CortexSnapshot::default())),
+                    network: "sigil-g0".into(),
+                })
+            });
+            match serve::start_with_api(&serve_dir, port, local_api) {
                 Ok(_stop) => {
                     let _ = flux_register_scheme(); // flux:// works after a single run
                     let node = std::env::var("SIGIL_NODE_URL")
@@ -844,12 +1097,105 @@ fn main() {
                 Ok(rel) if version_gt(&rel.version, VERSION) => {
                     println!("  {GOLD}↑ v{VERSION} → v{}{RESET} ({SELF_TARGET}) — downloading + BLAKE3-verifying…", rel.version);
                     match self_update(&rel) {
-                        Ok(msg) => { println!("  {GREEN}{msg}{RESET}\n"); std::process::exit(0); }
+                        Ok(msg) => {
+                            println!("  {GREEN}{msg}{RESET}\n  {DIM}relaunching v{}…{RESET}", rel.version);
+                            relaunch_new_binary(&rel.version); // re-exec/spawn the new binary instead of just exiting
+                            std::process::exit(0); // only reached if the exe path can't be resolved
+                        }
                         Err(e)  => { eprintln!("  {RED}✗ {e}{RESET}\n"); std::process::exit(1); }
                     }
                 }
                 Ok(rel) => { println!("  {GREEN}✓ already on the latest (v{VERSION}; channel: v{}){RESET}\n", rel.version); return; }
                 Err(e) => { eprintln!("  {RED}✗ update check: {e}{RESET}\n"); std::process::exit(1); }
+            }
+        }
+        // v0.9.0: re-verify the LOCAL block store as a connected spine (precheck +
+        // parent linkage), genesis→tip. No network. Exit 0 = clean chain to genesis,
+        // 1 = a real integrity break, 2 = couldn't open the store.
+        Some("verify-chain") => {
+            let json = argv.iter().any(|a| a == "--json");
+            let path = sigil_top_db_path();
+            let mut store = match block_store::BlockStore::open(&path) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
+            };
+            let synced = store.synced_to();
+            let t0 = Instant::now();
+            let report = chain_verify::verify_to(&mut store, u64::MAX);
+            let dt = t0.elapsed();
+            // A `Missing` at/after the download frontier is the clean terminator, not a break.
+            let real_break = match &report.first_break {
+                Some((h, chain_verify::BreakReason::Missing)) if *h >= synced => None,
+                Some((h, r)) => Some((*h, r.to_string())),
+                None => None,
+            };
+            if json {
+                let brk = real_break.as_ref()
+                    .map(|(h, r)| format!("{{\"height\":{h},\"reason\":{}}}", serde_json::Value::String(r.clone())))
+                    .unwrap_or_else(|| "null".into());
+                println!("{{\"verified_to\":{},\"synced_to\":{},\"checked\":{},\"clean\":{},\"break\":{brk},\"ms\":{}}}",
+                    report.verified_to, synced, report.checked, real_break.is_none(), dt.as_millis());
+            } else {
+                println!("\n  {VBRIGHT}{BOLD}◆ SIGIL chain verification{RESET}  {DIM}(local store · {path}){RESET}");
+                println!("  {DIM}downloaded:{RESET} {GOLD}{}{RESET} blocks   {DIM}verified spine:{RESET} {GREEN}{}{RESET} blocks   {DIM}checked:{RESET} {} in {} ms",
+                    synced, report.verified_to, report.checked, dt.as_millis());
+                match &real_break {
+                    None => println!("  {GREEN}✓ clean connected spine to genesis — every header prechecks and links to its parent{RESET}\n"),
+                    Some((h, r)) => println!("  {RED}✗ integrity break at height {h}: {r}{RESET}\n"),
+                }
+            }
+            std::process::exit(if real_break.is_some() { 1 } else { 0 });
+        }
+        // v0.9.0: headless FULL VERIFYING SYNC — launch the P2P backfill + the spine
+        // verifier, stream progress, exit 0 only when the verified spine reaches the
+        // network tip (or --target). Exit 1 on a verification break, 3 on timeout,
+        // 2 on setup failure. Scriptable / CI ("did this node fully + verifiably sync?").
+        Some("full-sync") => {
+            let target_arg: Option<u64> = argv.iter().position(|a| a == "--target")
+                .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok());
+            let timeout_s: u64 = argv.iter().position(|a| a == "--timeout")
+                .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1800);
+            let path = sigil_top_db_path();
+            let store = match block_store::BlockStore::open(&path) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
+            };
+            println!("\n  {VBRIGHT}{BOLD}◆ SIGIL full verifying sync{RESET}  {DIM}(store {path}){RESET}");
+            println!("  {DIM}connecting to the sigil-g0 mesh — downloading + verifying genesis→tip…{RESET}");
+            if let Some(t) = target_arg { println!("  {DIM}target height pinned to {t}{RESET}"); }
+            println!("  {DIM}timeout {timeout_s}s · Ctrl-C to stop{RESET}\n");
+            let sync = block_sync::P2PBlockSync::launch(store, false);
+            // v0.15.1: a pinned --target also SEEDS the backfill tip so the refill
+            // fires immediately (the gate is peer_best>0, not target_arg). Without
+            // this, a quiet mesh left peer_best=0 and full-sync --target never pulled.
+            if let Some(t) = target_arg { sync.set_known_tip(t); }
+            let start = Instant::now();
+            let mut last_print = instant_ago(10);
+            loop {
+                let st = sync.poll_state();
+                if let Some(b) = &st.verify_break {
+                    eprintln!("  {RED}✗ verification break — {b}{RESET}");
+                    eprintln!("  {RED}  the downloaded chain does NOT form one connected spine. Aborting.{RESET}\n");
+                    std::process::exit(1);
+                }
+                let target = target_arg.unwrap_or(st.peer_best_height);
+                if last_print.elapsed() >= Duration::from_secs(2) {
+                    last_print = Instant::now();
+                    let pct = if target > 0 { (st.verified as f64 / target as f64 * 100.0).min(100.0) } else { 0.0 };
+                    println!("  {CYAN}⬇{RESET} verified {GREEN}{}{RESET} / synced {GOLD}{}{RESET} / tip {} · {VBRIGHT}{:.1}%{RESET} · {} peers · {}s",
+                        group(st.verified), group(st.blocks_synced), if target > 0 { group(target) } else { "?".into() },
+                        pct, st.peer_count, start.elapsed().as_secs());
+                }
+                if target > 0 && st.verified >= target {
+                    println!("\n  {GREEN}{BOLD}✓ full verifying sync complete — {} blocks verified as one connected spine to genesis{RESET}\n", group(st.verified));
+                    std::process::exit(0);
+                }
+                if start.elapsed() > Duration::from_secs(timeout_s) {
+                    eprintln!("\n  {RED}✗ timeout after {timeout_s}s — verified {} / target {} (peers={}){RESET}\n",
+                        group(st.verified), if target > 0 { group(target) } else { "?".into() }, st.peer_count);
+                    std::process::exit(3);
+                }
+                std::thread::sleep(Duration::from_millis(250));
             }
         }
         _ => {}
@@ -906,6 +1252,13 @@ const C_DIM: Color = Color::Rgb(0x74, 0x74, 0x92);      // labels / subtle
 const C_CYAN: Color = Color::Rgb(0x4f, 0xd6, 0xe0);     // titles / links
 #[allow(dead_code)]
 const C_INK: Color = Color::Rgb(0x4a, 0x4a, 0x66);      // faintest (separators)
+// v0.33.2 BOLD NEON redesign — high-contrast neon-on-black accents for banners + bars.
+const C_NEON_CYAN: Color = Color::Rgb(0x22, 0xf5, 0xff);   // neon edge / live tip
+const C_NEON_GREEN: Color = Color::Rgb(0x4b, 0xff, 0x7a);  // neon synced / healthy
+const C_NEON_PINK: Color = Color::Rgb(0xff, 0x4d, 0xa6);   // neon alarm / brand pop
+const C_NEON_GOLD: Color = Color::Rgb(0xff, 0xd8, 0x52);   // neon value
+const C_BG: Color = Color::Rgb(0x07, 0x07, 0x12);          // obsidian card bg
+const C_BG_HEAD: Color = Color::Rgb(0x0c, 0x0a, 0x1f);     // header band bg
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Flux-way self-update — read the release channel, BLAKE3-verify, hot-swap in place.
@@ -1211,35 +1564,20 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
     };
     match self_update(&rel) {
         Ok(_) => {
-            // Re-exec the freshly-swapped binary with the original args (minus argv[0]).
-            if let Ok(exe) = std::env::current_exe() {
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    let _ = std::process::Command::new(&exe).args(&args).exec(); // replaces this process
-                }
-                #[cfg(windows)]
-                {
-                    // Spawn the NEWLY SAVED binary, not this one (avoids infinite loop)
-                    if let Ok(beside) = std::env::current_exe() {
-                        let new_exe = beside.with_file_name(format!("sigil-top-v{}.exe", rel.version));
-                        if new_exe.exists() {
-                            let _ = std::process::Command::new(&new_exe).args(&args).spawn();
-                            std::process::exit(0);
-                        }
-                    }
-                    // Fallback: just exit, user runs the new binary manually
-                    std::process::exit(0);
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new(&exe).args(&args).spawn();
-                    std::process::exit(0);
-                }
-            }
-            None // unreachable — exec replaces this process
+            // Relaunch into the new binary. self_replace installed the new version AT THE
+            // CURRENT EXE PATH, so that's the canonical relaunch target; a versioned copy
+            // beside us (if one survived) is only a fallback. The previous Windows branch
+            // spawned ONLY the versioned file and, when it was absent, hit a bare exit(0) —
+            // so the app updated in place but never restarted ("just exits"). Now every
+            // platform relaunches the in-place exe. The new process re-runs this check,
+            // sees its version == the channel, and proceeds — no update loop.
+            // relaunch_new_binary replaces this process (unix exec) / spawns+exits
+            // (win/mac) on success and only RETURNS on failure — it never spawns a
+            // detached child that would fight the terminal. On success this line is
+            // never reached; on failure the new binary is already swapped in place, so
+            // we keep running the current process this time and pick it up next launch.
+            relaunch_new_binary(&rel.version);
+            Some(format!("↑ updated to v{} — restart to run it", rel.version))
         }
         Err(e) => Some(format!("auto-update skipped: {e}")),
     }
@@ -1282,12 +1620,138 @@ fn self_update(rel: &Release) -> Result<String, String> {
     // Windows "rename the running .exe out of the way" trick, so the launched
     // sigil-top(.exe) actually becomes the new version (was unix-only → Windows kept
     // relaunching the old exe = "doesn't update").
+    // v0.27.5: keep the CURRENT binary as the rollback image BEFORE swapping. If the new
+    // version passes pre-flight but then crash-loops in real operation, `crashloop_guard()`
+    // reverts to this on the next boot (self-healing updater). Best-effort.
+    if let (Ok(cur), Some(prev)) = (std::env::current_exe(), prev_binary_path()) {
+        let _ = std::fs::copy(&cur, &prev);
+    }
     if self_replace::self_replace(&beside).is_ok() {
         let _ = std::fs::remove_file(&beside);
         return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
             rel.version, bytes.len() as f64 / 1.048576e6));
     }
     Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
+}
+
+/// v0.25: pre-flight a freshly-swapped binary BEFORE handing off to it. `exec`/`spawn+exit`
+/// destroys the running app; if the new binary is corrupt (truncated download), ABI/GLIBC-
+/// incompatible, or hangs on start, the app would simply VANISH on the restart-after-sync —
+/// the exact bug this fixes. Spawn `target --selfcheck` (a no-op that prints the version and
+/// exits 0) with a short timeout; return Ok(version) only if it runs cleanly AND prints a
+/// non-empty version. Anything else → don't hand off, keep the running app alive.
+fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    let mut child = Command::new(target)
+        .arg("--selfcheck")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn failed: {e}"))?;
+    // v0.26 (DeepSeek-hardened): poll on THIS thread so we keep the Child handle and can KILL
+    // it on timeout — a binary that HANGS on start must not leak a thread + zombie child (the
+    // old wait_with_output-on-a-thread design couldn't reach the child to kill it). --selfcheck
+    // prints ~7 bytes then exits immediately, so the stdout pipe never fills → no try_wait
+    // deadlock. A hung child is itself a strong "don't hand off" signal.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap the zombie
+                    return Err("--selfcheck timed out (binary hangs on start)".into());
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Err(e) => { let _ = child.kill(); let _ = child.wait(); return Err(format!("wait failed: {e}")); }
+        }
+    };
+    let mut buf = String::new();
+    if let Some(mut out) = child.stdout.take() { let _ = out.read_to_string(&mut buf); }
+    if !status.success() {
+        return Err(format!("--selfcheck exited {:?}", status.code()));
+    }
+    let v = buf.trim().to_string();
+    if v.is_empty() { Err("empty --selfcheck output".into()) } else { Ok(v) }
+}
+
+/// Relaunch into the just-installed binary after a successful `self_update`. `self_replace`
+/// put the new version at the current exe path, so that's the canonical target; a versioned
+/// copy beside us (if any) is a fallback.
+///
+/// v0.25 FAIL-SAFE: we PRE-FLIGHT the target (`--selfcheck`) before any handoff. `exec`
+/// destroys this process, so we only ever do it for a binary we've CONFIRMED starts and
+/// reports a sane version. If the pre-flight fails (corrupt swap, ABI mismatch, hang) we
+/// return `false` WITHOUT tearing anything down — the caller restores its TUI and tells the
+/// user to restart manually, and the app keeps running on the current image. No more
+/// "app vanishes when it tries to restart after sync". Returns `false` on any non-handoff
+/// path; on unix a successful pre-flight + `exec` never returns.
+fn relaunch_new_binary(version: &str) -> bool {
+    let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return false };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let ver_exe = exe.with_file_name(format!(
+        "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
+    let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
+
+    // GATE: never hand off to an unverified binary. A failed pre-flight means the swapped
+    // binary can't start — abort the relaunch and stay alive on the current (working) image.
+    match preflight_binary(&target) {
+        Ok(reported) => {
+            // Sanity: the new binary should report the version we just installed. A mismatch
+            // (e.g. self_replace silently no-op'd) isn't fatal — it still STARTS — but log it.
+            if !reported.is_empty() && reported != version {
+                eprintln!("  [update] pre-flight: new binary reports v{reported}, expected v{version} — relaunching anyway");
+            }
+        }
+        Err(e) => {
+            eprintln!("  [update] relaunch ABORTED — new binary failed pre-flight ({e}); staying on the current version, restart manually to apply.");
+            return false;
+        }
+    }
+
+    // Pre-flight passed → commit to the handoff.
+    std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec REPLACES this process — it only returns on FAILURE. Pre-flight already proved
+        // the binary runs, so a failure here is exotic (e.g. ETXTBSY). Don't detach a child
+        // that fights the foreground terminal; return false so the caller restores its TUI.
+        let _err = std::process::Command::new(&target).args(&args).exec();
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows/macOS can't replace a running image — spawn the (pre-flighted) new one,
+        // then exit, but ONLY if the spawn succeeded (else return false, don't exit on the user).
+        if std::process::Command::new(&target).args(&args).spawn().is_ok() {
+            std::process::exit(0);
+        }
+        false
+    }
+}
+
+/// v0.33.3: a tiny 1D Kalman filter that smooths the noisy 10s-window blk/s into a stable
+/// rate estimate, used for a steady time-to-sync ETA (raw rate jitters too much to divide by).
+/// Constant-value model: predict adds process noise q; update blends the measurement with
+/// gain k = p/(p+r). Larger r = trust the model more = smoother. Tuned for block rates.
+#[derive(Clone)]
+struct Kalman1D { x: f64, p: f64, q: f64, r: f64, init: bool }
+impl Kalman1D {
+    fn new() -> Self { Self { x: 0.0, p: 1.0, q: 6.0, r: 180.0, init: false } }
+    fn update(&mut self, z: f64) -> f64 {
+        if !z.is_finite() { return self.x; }
+        if !self.init { self.x = z; self.init = true; return self.x; }
+        self.p += self.q;                       // predict
+        let k = self.p / (self.p + self.r);     // Kalman gain
+        self.x += k * (z - self.x);             // correct
+        self.p *= 1.0 - k;
+        self.x
+    }
 }
 
 struct App {
@@ -1332,6 +1796,9 @@ struct App {
     cortex_loops: u64,
     last_cortex_gain: f64,
     cortex_summary: String,
+    /// v0.11.0: cortex snapshot shared with the embedded HTTP server so the explorer's
+    /// `/api/v1/cortex` panel reflects the live optimization-engine state.
+    cortex_shared: std::sync::Arc<std::sync::Mutex<local_api::CortexSnapshot>>,
     mcp_combo_tool: String,     // active MCP combo verb being executed
     mcp_combo_result: String,   // last MCP combo result
     // v0.6.5: Real P2P block sync via flux-p2p mesh (Delta + Epsilon)
@@ -1340,6 +1807,7 @@ struct App {
     p2p_blocks_synced: u64,
     p2p_rate: f64,                            // backfill blocks/sec (10s trailing window = current speed)
     p2p_rate_samples: std::collections::VecDeque<(std::time::Instant, u64)>, // (t, blocks_synced)
+    sync_kf: Kalman1D,                         // v0.33.3: Kalman-smoothed sync rate (→ stable ETA)
     // v0.7.0: AI fleet monitoring — AIs worry about their nodes' uptime and version compliance
     fleet_nodes: Vec<FleetNode>,
     fleet_last_check: Instant,
@@ -1347,6 +1815,18 @@ struct App {
     serve_status: String,
     // v0.7.0: embedded HTTP serve shutdown signal (no external process)
     serve_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    // v0.10.5 "smooth cruise": refresh runs off the render thread. The worker's
+    // result lands on refresh_rx; refresh_inflight stops duplicate workers piling up.
+    refresh_rx: Option<mpsc::Receiver<RefreshOutcome>>,
+    refresh_inflight: bool,
+    // v0.10.5.1: graceful offline handling + embedded-serve watchdog.
+    offline_since: Option<Instant>,  // when the node first stopped answering
+    offline_streak: u32,             // consecutive offline refreshes → backoff
+    last_serve_check: Instant,       // throttle the :9800 liveness probe
+    // v0.13: tabbed cockpit
+    tab: Tab,
+    swarm: SwarmView,
+    last_swarm_load: Instant,
 }
 
 impl App {
@@ -1356,7 +1836,7 @@ impl App {
               verify: None, toast, toast_sticky: false,
               latest: LATEST.to_string(),
               // v0.7.5: Trigger first check immediately (now - 300s = overdue)
-              last_update_check: Instant::now() - Duration::from_secs(301),
+              last_update_check: instant_ago(301),
               update_rx: None,
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
@@ -1364,7 +1844,7 @@ impl App {
               mine_hashrate: 0.0, mine_hashes: 0, wallet_balance: 0,
               full_sync: false, full_sync_height: 0, full_sync_target: 0, full_sync_active: false, sync_us: 0,
               eclipse_k: 0, eclipse_sources: Vec::new(),
-              last_eclipse: Instant::now() - Duration::from_secs(60),
+              last_eclipse: instant_ago(60),
               splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
                   let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
                   Some(Instant::now() + Duration::from_millis(1800))
@@ -1376,6 +1856,7 @@ impl App {
               cortex_loops: 0,
               last_cortex_gain: 0.0,
               cortex_summary: String::new(),
+              cortex_shared: std::sync::Arc::new(std::sync::Mutex::new(local_api::CortexSnapshot::default())),
               mcp_combo_tool: String::new(),
               mcp_combo_result: String::new(),
               // v0.6.5: P2P block sync starts lazy — launched in run_tui after terminal is ready
@@ -1384,6 +1865,7 @@ impl App {
               p2p_blocks_synced: 0,
               p2p_rate: 0.0,
               p2p_rate_samples: std::collections::VecDeque::new(),
+              sync_kf: Kalman1D::new(),
               serve_status: String::new(),
               serve_stop: None,
               // v0.7.0: Fleet starts with known bootstrap peers
@@ -1391,7 +1873,29 @@ impl App {
                   FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
                   FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
               ],
-              fleet_last_check: Instant::now() - Duration::from_secs(3600),
+              fleet_last_check: instant_ago(3600),
+              refresh_rx: None,
+              refresh_inflight: false,
+              offline_since: None,
+              offline_streak: 0,
+              last_serve_check: Instant::now(),
+              tab: Tab::Node,
+              swarm: SwarmView::default(),
+              last_swarm_load: instant_ago(10),
+        }
+    }
+
+    /// v0.10.5.1: adaptive refresh cadence. Base interval while the node answers;
+    /// a gentle backoff (cap 15s) while it's offline so we don't hammer a dead
+    /// endpoint; instant snap-back the moment it reconnects. Cruise control: ease
+    /// off when the road's empty, accelerate the instant traffic returns.
+    fn refresh_delay(&self) -> Duration {
+        let base = self.cfg.interval.max(1);
+        if self.offline_streak == 0 {
+            Duration::from_secs(base)
+        } else {
+            let mult = 1u64 << self.offline_streak.saturating_sub(1).min(4); // 1,2,4,8,16
+            Duration::from_secs((base * mult).min(15))
         }
     }
     fn resync(&mut self) {
@@ -1403,44 +1907,77 @@ impl App {
         self.toast_sticky = false;
         self.refresh();
     }
-    fn refresh(&mut self) {
-        // Live testnet sync: pull {status, tip, blocks} over HTTPS; fall back to a local node.
-        let got = fetch_feed(&self.cfg.feed)
-            .map(|(s, b)| { self.blocks = b; (s, true) })
-            .or_else(|| fetch(&self.cfg.api).ok().map(|s| (s, true)))
-            .unwrap_or((NodeStatus::default(), false));
-        self.st = got.0; self.online = got.1;
-        // v0.4.0: if feed returned empty blocks, try fallback API for recent blocks
-        if self.blocks.is_empty() && self.online {
-            if let Ok(client) = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(8))
-                .danger_accept_invalid_certs(true)
-                .build()
-            {
-                let api_base = self.cfg.api.trim_end_matches('/');
-                if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
-                    if let Ok(json) = resp.json::<serde_json::Value>() {
-                        if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
-                            let fallback: Vec<FeedBlock> = arr.iter().filter_map(|b| {
-                                let h = b.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                                if h == 0 { return None; }
-                                Some(FeedBlock {
-                                    height: h,
-                                    hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
-                                    producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
-                                    txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
-                                    tip_ms: 0,
-                                })
-                            }).collect();
-                            if !fallback.is_empty() {
-                                self.blocks = fallback;
-                                self.toast = "📡 Blocks fetched from API fallback".into();
-        }
-                        }
-                    }
-                }
+    /// Back-compat shim: callers that used to block now kick off an async refresh.
+    fn refresh(&mut self) { self.request_refresh(); }
+
+    /// v0.13: reload the swarm coordination snapshot for the [2]/[3] tabs.
+    fn load_swarm(&mut self) {
+        self.swarm = load_swarm_view();
+        self.last_swarm_load = Instant::now();
+    }
+
+    /// v0.10.5: spawn the network refresh on a worker thread (if none in flight).
+    /// Returns immediately — the render loop keeps drawing while the socket work
+    /// happens elsewhere. Result is drained by `poll_refresh`.
+    fn request_refresh(&mut self) {
+        if self.refresh_inflight { return; }
+        self.refresh_inflight = true;
+        // Decide here (UI thread) whether this cycle re-measures eclipse-K, so the
+        // 30s throttle stays honest even though the DoH probe runs off-thread.
+        let want_eclipse = self.last_eclipse.elapsed() >= Duration::from_secs(30);
+        if want_eclipse { self.last_eclipse = Instant::now(); }
+        let feed = self.cfg.feed.clone();
+        let api = self.cfg.api.clone();
+        let prior_synced = self.synced_height;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(fetch_refresh(feed, api, want_eclipse, prior_synced));
+        });
+        self.refresh_rx = Some(rx);
+    }
+
+    /// v0.10.5: drain a completed refresh without ever blocking. Called once per
+    /// render-loop iteration.
+    fn poll_refresh(&mut self) {
+        let Some(rx) = self.refresh_rx.as_ref() else { return };
+        match rx.try_recv() {
+            Ok(out) => { self.refresh_rx = None; self.apply_refresh(out); }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // Worker died (panic / drop) — clear in-flight so the next interval retries.
+                self.refresh_rx = None;
+                self.refresh_inflight = false;
+                self.last_fetch = Instant::now();
             }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
+    }
+
+    /// v0.10.5: merge a worker result into App state. Cheap (no I/O) → safe on the
+    /// UI thread. This is the non-network tail of the old `refresh`.
+    fn apply_refresh(&mut self, out: RefreshOutcome) {
+        self.st = out.st;
+        self.online = out.online;
+        // v0.10.5.1: track offline → online transitions for backoff + banner.
+        if out.online {
+            if self.offline_streak > 0 && !self.toast_sticky {
+                let was = self.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_default();
+                self.toast = format!("✓ reconnected after {} offline", was);
+            }
+            self.offline_streak = 0;
+            self.offline_since = None;
+        } else {
+            self.offline_streak = self.offline_streak.saturating_add(1);
+            if self.offline_since.is_none() { self.offline_since = Some(Instant::now()); }
+        }
+        if let Some(b) = out.blocks { self.blocks = b; }
+        if out.fallback_note && !self.toast_sticky {
+            self.toast = "📡 Blocks fetched from API fallback".into();
+        }
+        if let Some((k, srcs)) = out.eclipse {
+            self.eclipse_k = k;
+            self.eclipse_sources = srcs;
+        }
+        self.refresh_inflight = false;
         // v0.7.8 (HONEST full sync): the old [F] equated full_sync_height with the
         // tip height and printed "complete: N verified" while storing ZERO blocks —
         // a false claim (the DB stayed empty). Full sync now reports the REAL number
@@ -1491,14 +2028,8 @@ impl App {
                 self.streak = 0; // a bad tip breaks the streak
             }
         }
-        // L2-B: re-measure eclipse-K (real, throttled to 30s — DoH queries cost RTT).
-        if self.last_eclipse.elapsed() >= Duration::from_secs(30) {
-            let tip_ok = self.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-            let (k, srcs) = measure_eclipse_k(self.synced_height, tip_ok);
-            self.eclipse_k = k;
-            self.eclipse_sources = srcs;
-            self.last_eclipse = Instant::now();
-        }
+        // eclipse-K is now measured off-thread in fetch_refresh and applied above
+        // via out.eclipse — no blocking DoH probe on the render thread anymore.
         self.last_fetch = Instant::now();
     }
 }
@@ -1509,6 +2040,93 @@ impl App {
 /// only if its answer carries the current tip height (so a single lying resolver can't fake the tip —
 /// DNS-level eclipse resistance). HONEST: until the anchor is published (L2-C), the DoH paths return
 /// nothing → K reflects only what was really verified, never a simulated climb.
+// ── v0.27.5: self-healing crash-loop rollback (the updater's third layer) ────────────────
+// `--selfcheck` pre-flight (v0.25) catches binaries that can't START; the fail-safe relaunch
+// (v0.25) keeps the app alive if a handoff fails. THIS catches the last case: a new version
+// that passes pre-flight, starts, but then CRASHES in real operation. Every dashboard boot
+// records an attempt for the running VERSION; a detached timer clears it once the process has
+// survived HEAL_SECS ("healthy"). If a boot instead finds the SAME version already failed to
+// heal CRASH_STRIKES times in a row, it reverts to the binary the last update backed up and
+// relaunches — no operator intervention. A high-value 24/7 node self-heals from a bad update.
+const HEAL_SECS: u64 = 12;
+const CRASH_STRIKES: u32 = 3;
+
+fn prev_binary_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.with_file_name(if cfg!(windows) { "sigil-top-prev.exe" } else { "sigil-top-prev" }))
+}
+fn boot_marker_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.with_file_name(".sigil-top-boot"))
+}
+/// Record a boot attempt for the running VERSION; return the consecutive-unhealed strike count
+/// (1 on a fresh version). Best-effort — any IO failure returns 1 (proceed, just no rollback).
+fn record_boot_attempt() -> u32 {
+    let path = match boot_marker_path() { Some(p) => p, None => return 1 };
+    let strikes = match std::fs::read_to_string(&path).ok()
+        .as_deref().map(str::trim).and_then(|s| s.split_once(':'))
+    {
+        Some((ver, n)) if ver == VERSION => n.parse::<u32>().unwrap_or(0) + 1,
+        _ => 1, // fresh version / no marker / garbage → reset the counter
+    };
+    let _ = std::fs::write(&path, format!("{VERSION}:{strikes}"));
+    strikes
+}
+/// Clear the boot marker = "this version reached a healthy run".
+fn mark_boot_healthy() {
+    if let Some(p) = boot_marker_path() { let _ = std::fs::remove_file(p); }
+}
+/// Arm the detached "survived HEAL_SECS → healthy" timer (decoupled from the UI loop, so a
+/// normal long run clears the strike without any render-loop hook; a crash before HEAL_SECS
+/// leaves the strike for the next boot to count).
+fn arm_heal_timer() {
+    std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(HEAL_SECS)); mark_boot_healthy(); });
+}
+/// At dashboard startup: detect a crash-loop of THIS version and auto-revert to the backed-up
+/// previous binary. Returns true if it reverted+relaunched (caller should return); false to run.
+fn crashloop_guard() -> bool {
+    let strikes = record_boot_attempt();
+    if strikes < CRASH_STRIKES { arm_heal_timer(); return false; }
+    let prev = match prev_binary_path() { Some(p) if p.exists() => p, _ => {
+        mark_boot_healthy(); arm_heal_timer(); return false; // nothing to revert to — just run
+    }};
+    eprintln!("\n  {GOLD}↩ sigil-top v{VERSION} crash-looped {strikes}× — reverting to the last working binary{RESET}");
+    if let Err(e) = preflight_binary(&prev) {
+        eprintln!("  {RED}revert target failed pre-flight ({e}) — staying on current{RESET}");
+        mark_boot_healthy(); arm_heal_timer(); return false;
+    }
+    if self_replace::self_replace(&prev).is_err() { mark_boot_healthy(); return false; }
+    mark_boot_healthy(); // the reverted binary boots fresh under its own version counter
+    let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return true };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    { use std::os::unix::process::CommandExt; let _ = std::process::Command::new(&exe).args(&args).exec(); }
+    #[cfg(not(unix))]
+    { let _ = std::process::Command::new(&exe).args(&args).spawn(); }
+    true
+}
+/// `sigil-top revert` — operator's "undo a bad update" button. Pre-flights the backed-up
+/// previous binary, swaps to it, and relaunches.
+fn do_revert() {
+    let prev = match prev_binary_path() {
+        Some(p) if p.exists() => p,
+        _ => { println!("\n  {DIM}no previous binary to revert to (no update has run yet){RESET}\n"); return; }
+    };
+    println!("\n  {GOLD}↩ reverting to the previous binary{RESET} — pre-flighting…");
+    match preflight_binary(&prev) {
+        Ok(v) => {
+            if self_replace::self_replace(&prev).is_ok() {
+                println!("  {GREEN}✓ reverted → v{v}{RESET}\n  {DIM}relaunching…{RESET}");
+                mark_boot_healthy();
+                relaunch_new_binary(&v);
+            } else {
+                println!("  {RED}✗ swap failed{RESET}\n");
+            }
+        }
+        Err(e) => println!("  {RED}✗ previous binary failed pre-flight ({e}) — NOT reverting{RESET}\n"),
+    }
+}
+
 fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>) {
     const ANCHOR: &str = "_sigil-tip.sigilgraph.quillon.xyz";
     let resolvers = [
@@ -1538,17 +2156,20 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
 }
 
 fn run_tui(cfg: Config) -> std::io::Result<()> {
-    enable_raw_mode()?;
-    // From here ratatui owns the screen — divert background eprintln to the logfile
-    // (was smearing the dashboard with [p2p-sync]/[aether] lines).
-    IN_TUI.store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut term = Terminal::new(backend)?;
+    // v0.27.5: self-healing crash-loop guard — long-running dashboard only (`--once` renders
+    // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
+    // has crash-looped, this reverts to the last working binary and relaunches.
+    if !cfg.once && crashloop_guard() { return Ok(()); }
 
+    // ── v0.35 (sync-starts-earlier, DeepSeek audit S4): the ENTIRE sync bootstrap runs
+    // BEFORE the terminal is touched. It used to sit after raw-mode + alt-screen + panic-
+    // hook + Terminal::new, so the store open (formerly a full-db scan!), the aether
+    // bootstrap and the P2P launch all waited on UI plumbing. Now the mesh is dialing and
+    // the first probe is in flight while crossterm sets up; pre-TUI prints go to stderr
+    // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
-    app.refresh();
+    // v0.10.5: async — kicks off the first fetch without blocking the first paint.
+    app.request_refresh();
 
     // v0.7.22: cross-platform PERSISTENT store path. The old /tmp + /dev/shm paths
     // don't exist on Windows → the store never persisted → re-sync from 0 every launch
@@ -1568,16 +2189,85 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         _ => {}
     }
 
-    // Launch P2P block sync for live blocks (pass ownership of store)
-    app.p2p_sync = Some(block_sync::P2PBlockSync::launch(block_store));
-    if app.toast.is_empty() {
-        app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+    // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved
+    // into the sync thread. The embedded HTTP server uses it to answer the explorer's
+    // /api/v1/{recent,search,aether} from the local verified spine.
+    let block_reader = block_store.reader();
+
+    // v0.26 hardening #8 (DeepSeek-reviewed): graceful SIGTERM/SIGINT — restore the
+    // terminal (harmless no-op if Ctrl-C lands before raw mode) and exit cleanly; the
+    // sync thread's BlockStore persists watermarks on every advance, so state is durable.
+    {
+        let _ = ctrlc::set_handler(move || {
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            std::process::exit(0);
+        });
     }
+
+    // v0.12.1: sync is ON BY DEFAULT. Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1.
+    let want_sync = !(std::env::args().any(|a| a == "--no-sync")
+        || std::env::var("SIGIL_TOP_NO_SYNC").is_ok());
+    let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
+    if want_sync {
+        // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
+        // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
+        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true);
+        let p2p = block_sync::P2PBlockSync::launch(block_store, recent_only);
+        sync_handle = Some(p2p.state_handle());
+        app.p2p_sync = Some(p2p);
+        if app.toast.is_empty() {
+            app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+        }
+    } else if app.toast.is_empty() {
+        app.toast = "◆ light monitor · fold-proof verified — [--sync] for live blocks".into();
+    }
+
+    enable_raw_mode()?;
+    // From here ratatui owns the screen — divert background eprintln to the logfile
+    // (was smearing the dashboard with [p2p-sync]/[aether] lines).
+    IN_TUI.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+
+    // v0.10.5 "stable uptime": a panic anywhere below would otherwise leave the
+    // user's terminal in raw mode + alternate screen = a bricked, unusable shell.
+    // Install a hook that ALWAYS restores the terminal first, then runs the
+    // default panic printer. Graceful recovery instead of a wedged terminal.
+    {
+        let default_hook = std::panic::take_hook();
+        let _ = &default_hook; // kept for reference; v0.27 hook is LOG-ONLY (see below)
+        std::panic::set_hook(Box::new(move |info| {
+            // v0.27: LOG ONLY — do NOT tear down the terminal here. A background-thread panic
+            // must not break the still-running TUI, and a render panic is CAUGHT by catch_unwind
+            // around term.draw (which re-inits + continues). Terminal restore happens on normal
+            // exit (run_tui cleanup) or in the catch handler — never from this hook.
+            let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic>".into());
+            let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            log_line(format!("[PANIC] {msg} @ {loc}"));
+        }));
+    }
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut term = Terminal::new(backend)?;
+    // (v0.35: app/store/aether/ctrlc/sync-launch all moved ABOVE terminal init — see the
+    // sync-starts-earlier block after crashloop_guard. block_reader/sync_handle/app are in
+    // scope from there.)
+
+    // v0.11.0: local-first explorer API over the verified spine + cortex snapshot.
+    let local_api = std::sync::Arc::new(local_api::LocalApi {
+        reader: block_reader,
+        sync: sync_handle,
+        cortex: app.cortex_shared.clone(),
+        network: "sigil-g0".into(),
+    });
 
     // v0.7.0: Start embedded HTTP server (no external process needed)
     let serve_dir = std::env::var("FLUX_STATIC_DIR")
         .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
-    match serve::start(&serve_dir, 9800) {
+    match serve::start_with_api(&serve_dir, 9800, Some(local_api)) {
         Ok(stop) => {
             app.serve_stop = Some(stop);
             app.serve_status = "serve :9800 ✓ embedded".into();
@@ -1593,13 +2283,57 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
                 app.splash_frame = app.splash_frame.wrapping_add(1);
             }
-            term.draw(|f| draw_ui(f, &app))?;
-            if event::poll(Duration::from_millis(250))? {
+            // v0.10.5: drain any completed async refresh (never blocks).
+            app.poll_refresh();
+            // v0.27 CRASH-PROOF: a panic inside rendering (bad slice, unwrap on odd data, etc.)
+            // used to unwind out of run_tui and EXIT the app ("crashes after 20s"). Catch it —
+            // the panic hook logs [PANIC] with file:line — re-init the terminal and keep running;
+            // the next frame redraws. The monitor must never die on a single bad render frame.
+            term.draw(|f| {
+                // Catch the panic AROUND draw_ui (the render code, which is the panic source) —
+                // term.draw itself still owns the closure so there's no borrow-escape. A render
+                // panic leaves a partial frame (harmless; the next frame redraws) instead of
+                // unwinding out of run_tui and killing the app.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw_ui(f, &app))).is_err() {
+                    log_line("[render] frame panicked — caught, continuing".into());
+                }
+                // v0.33 GLOBAL ASCII pass: on Windows (or SIGIL_ASCII=1) rewrite any remaining
+                // wide/emoji cell symbol to width-1 ASCII. Done on the buffer AFTER layout but
+                // BEFORE flush: ratatui already reserved 2 cells for a wide glyph, so emitting a
+                // width-1 symbol makes the backend emit a corrective MoveTo for the next cell →
+                // exact alignment on consoles that draw emoji at the wrong width. Catches every
+                // glyph everywhere in one place (belt-and-suspenders with the source sa() wraps).
+                if ui_ascii() {
+                    let buf = f.buffer_mut();
+                    for cell in buf.content.iter_mut() {
+                        let sym = cell.symbol().to_string();
+                        if !sym.is_ascii() {
+                            let repl = sa(sym.as_str());
+                            if repl != sym { cell.set_symbol(&repl); }
+                        }
+                    }
+                }
+            })?;
+            // v0.10.5 "smooth cruise": adaptive frame pacing. When something is
+            // moving — splash animation, an in-flight refresh, or live mining — poll
+            // at ~30 fps so motion is buttery. When parked, fall back to a calm 200 ms
+            // so an idle cockpit barely touches the CPU. Keys stay responsive either way.
+            let animating = app.splash_until.map(|u| Instant::now() < u).unwrap_or(false)
+                || app.refresh_inflight
+                || app.mining;
+            let poll_ms = if animating { 33 } else { 200 };
+            if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
+                            // v0.13: tab switching — Tab cycles, 1/2/3 jump
+                            KeyCode::Tab | KeyCode::BackTab => { app.tab = app.tab.next(); app.load_swarm(); }
+                            KeyCode::Char('1') => { app.tab = Tab::Node; }
+                            KeyCode::Char('2') => { app.tab = Tab::SwarmAi; app.load_swarm(); }
+                            KeyCode::Char('3') => { app.tab = Tab::Results; app.load_swarm(); }
+                            KeyCode::Char('4') => { app.tab = Tab::SyncLog; }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mining = !app.mining;
@@ -1730,6 +2464,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                         app.cortex_loops += 1;
                                         app.last_cortex_gain = s.actual_total_gain_pct.unwrap_or(0.0);
                                         app.cortex_summary = s.summary_text.clone();
+                                        // v0.11.0: publish to the shared snapshot so the explorer's
+                                        // /api/v1/cortex panel reflects the engine live.
+                                        if let Ok(mut cx) = app.cortex_shared.lock() {
+                                            cx.loops = app.cortex_loops;
+                                            cx.last_gain_pct = app.last_cortex_gain;
+                                            cx.summary = app.cortex_summary.clone();
+                                            cx.last_tool = "flux_cortex_loop".into();
+                                        }
                                         // flux-rev: content-addressed snapshot for p2p sync
                                         let rev_note = match rev_snapshot(&std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil")) {
                                             Ok(id) => format!(" rev:{}", &id[..12]),
@@ -1773,18 +2515,67 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     }
                 }
             }
-            if app.last_fetch.elapsed() >= Duration::from_secs(app.cfg.interval) {
-                app.refresh();
+            // v0.10.5.1: adaptive cadence — fast when online, gentle backoff when offline.
+            if !app.refresh_inflight && app.last_fetch.elapsed() >= app.refresh_delay() {
+                app.request_refresh();
+            }
+            // v0.13: keep the Swarm AI / Results board live (2s) while it's on screen.
+            if matches!(app.tab, Tab::SwarmAi | Tab::Results)
+                && app.last_swarm_load.elapsed() >= Duration::from_secs(2)
+            {
+                app.load_swarm();
+            }
+            // v0.10.5.1: embedded-serve watchdog — if the :9800 wallet server died,
+            // restart it so the local wallet/[W] never silently goes dark. Probe is
+            // throttled to 15s and only blocks (briefly) in the rare dead case.
+            if app.serve_stop.is_some() && app.last_serve_check.elapsed() >= Duration::from_secs(15) {
+                app.last_serve_check = Instant::now();
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9800));
+                let alive = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
+                if !alive {
+                    if let Some(old) = app.serve_stop.take() {
+                        old.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let serve_dir = std::env::var("FLUX_STATIC_DIR")
+                        .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
+                    match serve::start(&serve_dir, 9800) {
+                        Ok(stop) => { app.serve_stop = Some(stop); app.serve_status = "serve :9800 ✓ restarted by watchdog".into(); }
+                        Err(e) => { app.serve_status = format!("serve restart failed: {e}"); }
+                    }
+                }
             }
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
                 app.p2p_state = p2p.poll_state();
+                // v0.13.1: feed the HTTP status height into the P2P backfill so the
+                // refill starts requesting chunks even when gossip/probe are silent —
+                // fixes the sync sitting forever on "connecting" with peer_best=0.
+                p2p.set_known_tip(app.target_height);
                 // Backfill rate (blocks/s) = 10s TRAILING window — the CURRENT speed, not
                 // a lifetime average. A cumulative avg decayed after the catch-up burst
                 // (huge start → ~production rate → looked like it was "slowing to 19/s").
                 // The 10s window absorbs the per-cycle chunk bursts yet tracks real speed.
+                // v0.23: rate = advance of the SYNC HEIGHT (blocks_synced), not the contiguous
+                // download counter (fetched_total). For a light monitor blocks_synced tracks the
+                // verified live tip (peer_best), so the rate shows the real network block rate
+                // (~prod rate) and reads >0 even when gossip mesh isn't grafted / backfill parks
+                // on the gappy head — the "0 blk/s" cause. (full-sync: blocks_synced = contiguous,
+                // so it still shows true download speed.)
                 let now = std::time::Instant::now();
-                app.p2p_rate_samples.push_back((now, app.p2p_state.fetched_total));
+                let rate_metric = app.p2p_state.blocks_synced.max(app.p2p_state.fetched_total);
+                // v0.31: a one-time CATCH-UP jump (synced snaps 0→~tip the instant the monitor
+                // reaches the head, or after a re-snap over a big gap) is NOT a sustained rate —
+                // it spiked the readout to ~1M blk/s then craters to 0 as the jump scrolls out of
+                // the 10s window (the "1M → 0" the user saw). If the metric leaps > CATCHUP_JUMP in
+                // one sample, reset the window so the rate reflects STEADY tip advance, never the
+                // snap. chronos confirmed delivery is fine — this was purely a display artifact.
+                const CATCHUP_JUMP: u64 = 50_000;
+                if let Some(&(_, last_b)) = app.p2p_rate_samples.back() {
+                    if rate_metric.saturating_sub(last_b) > CATCHUP_JUMP {
+                        app.p2p_rate_samples.clear();
+                    }
+                }
+                app.p2p_rate_samples.push_back((now, rate_metric));
                 while app.p2p_rate_samples.len() > 1
                     && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 10.0
                 {
@@ -1796,6 +2587,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     let dt = t1.duration_since(t0).as_secs_f64();
                     if dt >= 1.0 {
                         app.p2p_rate = b1.saturating_sub(b0) as f64 / dt;
+                        // v0.33.3: feed the measured rate into the Kalman filter for a stable ETA.
+                        app.sync_kf.update(app.p2p_rate);
                     }
                 }
                 for block in p2p.drain_new_blocks() {
@@ -1835,34 +2628,22 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // The user pressed [U] to upgrade — they expect to be running the new version.
                         // We re-exec the new binary immediately so the fleet stays current without
                         // manual intervention. AI fleet operators depend on this.
-                        let is_update_ok = msg.contains("swapped")
-                            || msg.contains("saved v")
-                            || msg.starts_with("✓");
+                        // ONLY relaunch on a REAL update. The old gate also matched
+                        // "✓ up to date" (the already-current message) → it relaunched when
+                        // NOTHING changed, and on exec-failure the spawn-fallback detached a
+                        // TUI child that fought the terminal = the "animation appears then it
+                        // crashes/exits" bug. Now: relaunch only on swap/save, and if the
+                        // relaunch fails, restore the TUI instead of crashing.
+                        let is_update_ok = msg.contains("swapped") || msg.contains("saved v");
                         if is_update_ok {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-                            // Try the versioned binary beside us first (v0.7.0 rename trick)
-                            if let Ok(exe) = std::env::current_exe() {
-                                let args: Vec<String> = std::env::args().skip(1).collect();
-                                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
-                                // On Unix: exec replaces this process with the new binary.
-                                // On Windows: spawn + exit (can't replace running .exe).
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::process::CommandExt;
-                                    // Try the versioned binary self_update just saved
-                                    // (named for the FETCHED version, not a stale const).
-                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}", app.latest));
-                                    let target = if ver_exe.exists() { &ver_exe } else { &exe };
-                                    let _ = std::process::Command::new(target).args(&args).exec();
-                                }
-                                #[cfg(not(unix))]
-                                {
-                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}.exe", app.latest));
-                                    let target = if ver_exe.exists() { &ver_exe } else { &exe };
-                                    let _ = std::process::Command::new(target).args(&args).spawn();
-                                    std::process::exit(0);
-                                }
+                            if !relaunch_new_binary(&app.latest) {
+                                // relaunch failed — re-enter the TUI, don't crash out
+                                let _ = enable_raw_mode();
+                                let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+                                app.toast = "↑ update saved — couldn't auto-restart; relaunch sigil-top manually".into();
+                                app.toast_sticky = true;
                             }
                         }
                         app.toast = msg; app.toast_sticky = false; app.update_rx = None;
@@ -1908,6 +2689,25 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 }
 
 fn dim(s: impl Into<String>) -> Span<'static> { Span::styled(s.into(), Style::default().fg(C_DIM)) }
+
+// ── v0.33.2 BOLD NEON helpers ──────────────────────────────────────────
+/// A filled "banner" pill: bright text on a saturated neon background — used for the
+/// loud status verdicts (LIGHT-SYNCED, SPINE BREAK, LIVE). ASCII-safe (text only).
+fn banner(text: impl Into<String>, bg: Color) -> Span<'static> {
+    Span::styled(format!(" {} ", text.into()),
+        Style::default().bg(bg).fg(Color::Rgb(0x05, 0x05, 0x0d)).add_modifier(Modifier::BOLD))
+}
+/// A neon block-bar `█████░░░` sized to `frac` over `width` cells. Rich (uses █/░ — both
+/// width-1, conhost-safe). Returns a styled Span in the given neon color.
+fn neon_bar(frac: f64, width: usize, color: Color) -> Span<'static> {
+    let f = (frac.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let s = "█".repeat(f.min(width)) + &"░".repeat(width.saturating_sub(f));
+    Span::styled(s, Style::default().fg(color))
+}
+/// Bright value span (neon gold, bold) — the headline numbers.
+fn val(s: impl Into<String>) -> Span<'static> {
+    Span::styled(s.into(), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
+}
 /// thousands-grouped integer (1135287 → "1,135,287")
 fn group(n: u64) -> String {
     let s = n.to_string(); let b = s.as_bytes(); let mut o = String::new();
@@ -2000,6 +2800,422 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
         .style(Style::default().bg(Color::Rgb(5, 5, 15)))
 }
 
+// ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tab { Node, SwarmAi, Results, SyncLog }
+
+impl Tab {
+    fn next(self) -> Tab {
+        match self {
+            Tab::Node => Tab::SwarmAi,
+            Tab::SwarmAi => Tab::Results,
+            Tab::Results => Tab::SyncLog,
+            Tab::SyncLog => Tab::Node,
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct SwarmAgent { id: String, status: String, qug: f64 }
+#[derive(Default, Clone)]
+struct SwarmClaim { agent: String, path: String, note: String }
+#[derive(Default, Clone)]
+struct SwarmActivity { agent: String, kind: String, detail: String, at: u64 }
+#[derive(Default, Clone)]
+struct SwarmResult { agent: String, task_id: String, qug: f64, crates: String, success: bool, at: u64 }
+#[derive(Default, Clone)]
+struct SwarmTask { task_id: String, agent: String, crates: String, priority: i64, est_qug: f64 }
+#[derive(Default, Clone)]
+struct SwarmMsg { from: String, text: String, at: u64 }
+
+/// A snapshot of the swarm coordination files written by the Claude Code sessions
+/// (/tmp/flux-swarm*.json|jsonl). Drives the [2] Swarm AI + [3] Results tabs.
+#[derive(Default, Clone)]
+struct SwarmView {
+    agents: Vec<SwarmAgent>,
+    claims: Vec<SwarmClaim>,
+    tasks: Vec<SwarmTask>,        // v0.14: swarm task board (priority + QUG bounty)
+    feed: Vec<SwarmMsg>,          // v0.14: recent broadcast coordination, newest-first
+    activity: Vec<SwarmActivity>, // newest-first
+    results: Vec<SwarmResult>,    // newest-first
+    completed_count: u64,
+    qug_paid: f64,
+    err: Option<String>,
+}
+
+fn swarm_dir() -> String { std::env::var("SIGIL_SWARM_DIR").unwrap_or_else(|_| "/tmp".into()) }
+
+fn trunc(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() }
+    else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
+
+/// Read + parse the swarm coordination files into a SwarmView. Cheap local file
+/// reads; tolerant of missing/partial files (off-box → shows a hint).
+fn load_swarm_view() -> SwarmView {
+    let dir = swarm_dir();
+    let mut v = SwarmView::default();
+    let mut any = false;
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm.json")) {
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
+            any = true;
+            v.completed_count = j.get("completed_count").and_then(|x| x.as_u64()).unwrap_or(0);
+            v.qug_paid = j.get("qug_paid").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            if let Some(ags) = j.get("agents").and_then(|x| x.as_object()) {
+                for (id, a) in ags {
+                    v.agents.push(SwarmAgent {
+                        id: id.clone(),
+                        status: a.get("status").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        qug: a.get("total_earned_qug").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    });
+                }
+                v.agents.sort_by(|a, b| b.qug.partial_cmp(&a.qug).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            // v0.14: swarm task board — claims[] carry priority + QUG bounty.
+            if let Some(cl) = j.get("claims").and_then(|x| x.as_array()) {
+                for c in cl {
+                    let agent = c.get("agent").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if agent.starts_with("test_") { continue; }
+                    v.tasks.push(SwarmTask {
+                        task_id: c.get("task_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        agent,
+                        crates: c.get("crates").and_then(|x| x.as_array())
+                            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                            .unwrap_or_default(),
+                        priority: c.get("priority").and_then(|x| x.as_i64()).unwrap_or(9),
+                        est_qug: c.get("estimated_qug").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    });
+                }
+                // Highest priority first (lower number = higher), then bigger bounty.
+                v.tasks.sort_by(|a, b| a.priority.cmp(&b.priority)
+                    .then(b.est_qug.partial_cmp(&a.est_qug).unwrap_or(std::cmp::Ordering::Equal)));
+            }
+        }
+    }
+    // v0.14: broadcast coordination feed (the human-readable "board" chatter).
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-messages.jsonl")) {
+        any = true;
+        for line in s.lines().rev() {
+            if v.feed.len() >= 6 { break; }
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            if j.get("to").and_then(|x| x.as_str()) != Some("*") { continue; }
+            let from = j.get("from").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if from.starts_with("test_") || from.is_empty() { continue; }
+            // ts_ms may be a number or a stringified number; normalize to secs.
+            let at = j.get("ts_ms").and_then(|x| x.as_u64())
+                .or_else(|| j.get("ts_ms").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()))
+                .map(|ms| ms / 1000).unwrap_or(0);
+            let raw = j.get("payload").and_then(|x| x.as_str()).unwrap_or("");
+            let text = raw.lines().next().unwrap_or(raw).to_string();
+            v.feed.push(SwarmMsg { from, text, at });
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-files.json")) {
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
+            any = true;
+            if let Some(cl) = j.get("claims").and_then(|x| x.as_object()) {
+                for (_p, c) in cl {
+                    v.claims.push(SwarmClaim {
+                        agent: c.get("agent").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        path: c.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        note: c.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    });
+                }
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-activity.jsonl")) {
+        any = true;
+        for line in s.lines().rev().take(60) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(line) {
+                v.activity.push(SwarmActivity {
+                    agent: j.get("agent").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    kind: j.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    detail: j.get("detail").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    at: j.get("at").and_then(|x| x.as_u64()).unwrap_or(0),
+                });
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-completed.jsonl")) {
+        any = true;
+        for line in s.lines().rev().take(80) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(line) {
+                v.results.push(SwarmResult {
+                    agent: j.get("agent_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    task_id: j.get("task_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    qug: j.get("qug_earned").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    crates: j.get("crates").and_then(|x| x.as_array())
+                        .map(|a| a.iter().filter_map(|c| c.as_str()).collect::<Vec<_>>().join(","))
+                        .unwrap_or_default(),
+                    success: j.get("success").and_then(|x| x.as_bool()).unwrap_or(false),
+                    at: j.get("completed_at").and_then(|x| x.as_u64()).unwrap_or(0),
+                });
+            }
+        }
+    }
+    if !any {
+        v.err = Some(format!("no swarm data under {dir} — set SIGIL_SWARM_DIR to the dev box's swarm dir"));
+    }
+    v
+}
+
+// ── v0.13 enrichment helpers (DeepSeek-consulted: color-hash, mini-bars, medals, rel-time, heat) ──
+
+/// Stable per-agent color from an id hash — premium control-panel feel, same agent always same hue.
+fn agent_color(id: &str) -> Color {
+    let pal = [C_CYAN, C_VBRIGHT, C_GREEN, C_GOLD, Color::Magenta, Color::LightBlue];
+    let mut h: u32 = 2166136261;
+    for b in id.bytes() { h = (h ^ b as u32).wrapping_mul(16777619); }
+    pal[(h as usize) % pal.len()]
+}
+
+/// Inline unicode mini-bar: `value` normalized to `max` across `width` cells.
+fn qug_bar(value: f64, max: f64, width: usize) -> String {
+    if max <= 0.0 || width == 0 { return " ".repeat(width); }
+    let filled = (((value / max) * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Medal glyph for a 0-based rank.
+fn medal(rank: usize) -> &'static str {
+    match rank { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "  " }
+}
+
+/// Relative "Nm ago" from a unix-secs timestamp.
+fn rel_time(at: u64) -> String {
+    if at == 0 { return "—".into(); }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(at);
+    let d = now.saturating_sub(at);
+    if d < 60 { format!("{}s", d) }
+    else if d < 3600 { format!("{}m", d / 60) }
+    else if d < 86400 { format!("{}h", d / 3600) }
+    else { format!("{}d", d / 86400) }
+}
+
+/// Status dot + color for an agent status string.
+fn status_glyph(status: &str) -> Span<'static> {
+    let (g, c) = match status.to_lowercase().as_str() {
+        "working" | "busy" | "active" | "claimed" => ("●", C_GREEN),
+        "idle" => ("○", C_DIM),
+        "error" | "failed" => ("●", C_RED),
+        _ => ("◦", C_DIM),
+    };
+    Span::styled(g, Style::default().fg(c))
+}
+
+fn render_tab_bar(app: &App) -> Paragraph<'static> {
+    let tab = |label: &'static str, key: &'static str, t: Tab| -> Vec<Span<'static>> {
+        let active = app.tab == t;
+        let style = if active {
+            Style::default().fg(C_BG).bg(C_NEON_CYAN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(" ")]
+    };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(tab("Node", "1", Tab::Node));
+    spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
+    spans.extend(tab("Results", "3", Tab::Results));
+    spans.extend(tab("Sync Log", "4", Tab::SyncLog));
+    spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
+    Paragraph::new(Line::from(spans))
+}
+
+/// [2] MCP Swarm AI — the live job-index board from the Claude Code sessions.
+fn render_swarm_ai(app: &App) -> Paragraph<'static> {
+    let sw = &app.swarm;
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(e) = &sw.err {
+        lines.push(Line::from(Span::styled(format!(" ⚠ {e}"), Style::default().fg(C_GOLD))));
+        lines.push(Line::from(""));
+    }
+    let real: Vec<&SwarmAgent> = sw.agents.iter().filter(|a| !a.id.starts_with("test_")).collect();
+    lines.push(Line::from(vec![
+        Span::styled("  AGENTS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", real.len()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   TASKS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.tasks.len()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   FILES ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.claims.len()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   DONE ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.completed_count), Style::default().fg(C_GREEN)),
+        Span::styled("   QUG PAID ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:.1}", sw.qug_paid), Style::default().fg(C_GOLD)),
+    ]));
+    lines.push(Line::from(""));
+    // ── TASK BOARD: claimed jobs with priority + QUG bounty (the index board) ──
+    let max_b = sw.tasks.iter().map(|t| t.est_qug).fold(0.0f64, f64::max);
+    lines.push(Line::from(Span::styled(" ▸ TASK BOARD — claimed jobs · priority · bounty", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for t in sw.tasks.iter().take(7) {
+        let (ptxt, pcol) = match t.priority {
+            0 | 1 => (format!("P{}", t.priority), C_GOLD),
+            2 => ("P2".to_string(), C_CYAN),
+            _ => (format!("P{}", t.priority), C_DIM),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<3}", ptxt), Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<15}", trunc(&t.agent, 15)), Style::default().fg(agent_color(&t.agent)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<18}", trunc(&t.crates, 18)), Style::default().fg(C_CYAN)),
+            Span::styled(qug_bar(t.est_qug, max_b, 8), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:>5.1} QUG", t.est_qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    // ── AGENTS leaderboard ──
+    let max_q = real.iter().map(|a| a.qug).fold(0.0f64, f64::max);
+    lines.push(Line::from(Span::styled(" ▸ AGENTS — leaderboard by QUG earned", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for (i, a) in real.iter().take(5).enumerate() {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", medal(i))),
+            status_glyph(&a.status),
+            Span::styled(format!(" {:<20}", trunc(&a.id, 20)), Style::default().fg(agent_color(&a.id)).add_modifier(Modifier::BOLD)),
+            Span::styled(qug_bar(a.qug, max_q, 10), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:>8.1} QUG", a.qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    // ── BROADCAST FEED: the human-readable coordination board ──
+    lines.push(Line::from(Span::styled(" ▸ 📢 BROADCAST FEED", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for m in sw.feed.iter().take(5) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:>4} ", rel_time(m.at)), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<16}", trunc(&m.from, 16)), Style::default().fg(agent_color(&m.from)).add_modifier(Modifier::BOLD)),
+            Span::styled(trunc(&m.text, 56), Style::default().fg(C_DIM)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    // ── LIVE ACTIVITY (compact) ──
+    lines.push(Line::from(Span::styled(" ▸ LIVE ACTIVITY", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for ev in sw.activity.iter().filter(|e| !e.agent.starts_with("test_")).take(6) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:>4} ", rel_time(ev.at)), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<16}", trunc(&ev.agent, 16)), Style::default().fg(agent_color(&ev.agent))),
+            Span::styled(format!("{:<14}", trunc(&ev.kind, 14)), Style::default().fg(C_GOLD)),
+            Span::styled(trunc(&ev.detail, 44), Style::default().fg(C_DIM)),
+        ]));
+    }
+    Paragraph::new(lines).block(card_block(" ✦ MCP SWARM AI — JOB INDEX BOARD", C_NEON_PINK))
+}
+
+/// v0.26: read at most the last `max_bytes` of a (possibly huge) log file — seek to the
+/// tail instead of slurping the whole thing, so the Sync Log tab stays O(1) per frame.
+fn read_log_tail(path: &str, max_bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return String::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(max_bytes);
+    if f.seek(SeekFrom::Start(start)).is_err() { return String::new(); }
+    let mut buf = Vec::with_capacity(max_bytes as usize);
+    let _ = f.take(max_bytes).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// [3] Results — settled work + QUG payouts from the swarm.
+/// v0.25.5: the Sync Log tab — a live sync-state header + a tail of the sync events
+/// (peer connects, fast-snap/track-tip, tip-fetch, backfill chunks, timeouts) read from
+/// ~/.sigil-top.log, so the operator can SEE what sync is doing, not just a bar.
+fn render_sync_log(app: &App) -> Paragraph<'static> {
+    let s = &app.p2p_state;
+    let tip = s.peer_best_height.max(app.target_height);
+    let gap = tip.saturating_sub(s.blocks_synced);
+    let mut lines: Vec<Line> = Vec::new();
+    // v0.26: LIVE/STALE badge — if the tip-poller hasn't gotten a fresh tip in >12s
+    // (oracle down / partition), say so instead of a falsely confident "AT TIP".
+    let stale = s.last_tip_at.map(|t| t.elapsed().as_secs() > 12).unwrap_or(true);
+    let (badge, bcol) = if stale {
+        (sa(format!(" (STALE){}", s.last_tip_at.map(|t| format!(" ({}s)", t.elapsed().as_secs())).unwrap_or_default())), C_RED)
+    } else { (sa(" ● LIVE"), C_GREEN) };
+    lines.push(Line::from(vec![
+        Span::styled(sa(" ▸ SYNC STATE"), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        Span::styled(badge, Style::default().fg(bcol).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw(sa("  height ")), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+        Span::raw(sa("  tip ")), Span::styled(group(tip), Style::default().fg(C_CYAN)),
+        Span::raw(sa("  gap ")), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
+        Span::raw(sa("  rate ")), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw(sa("  ⛓ verified spine ")), Span::styled(group(s.verified), Style::default().fg(C_GREEN)),
+        Span::raw(sa("   peers ")), Span::styled(format!("{}", s.peer_count), Style::default().fg(C_CYAN)),
+        Span::raw(sa("   ")), Span::styled(sa(if s.connected_delta { "Δ" } else { "·" }), Style::default().fg(C_GOLD)),
+        Span::styled(sa(if s.connected_epsilon { "Ε" } else { "·" }), Style::default().fg(C_GOLD)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());
+    // v0.26: read only the LAST 16 KB (not the whole file) — O(1) per frame, never
+    // O(log-size), which would freeze the UI as the log grows over a 24/7 run.
+    let body = read_log_tail(&path, 16 * 1024);
+    let recent: Vec<String> = body.lines().rev()
+        .filter(|l| l.contains("[DBG]") || l.contains("[PANIC]") || l.contains("[sync]")
+            || l.contains("[tipfetch]") || l.contains("[D]") || l.contains("[p2p-sync]")
+            || l.contains("[tip]") || l.contains("[render]"))
+        .take(26)
+        .map(|l| l.to_string())
+        .collect();
+    if recent.is_empty() {
+        lines.push(Line::from(Span::styled("  (no sync activity logged yet — connecting to the mesh…)", Style::default().fg(C_DIM))));
+    }
+    for l in recent.iter().rev() {
+        let t = l.trim();
+        let col = if t.contains("[PANIC]") { C_RED }
+            else if t.contains("[DBG]") { C_VBRIGHT }
+            else if t.contains("track tip") || t.contains("fast-snap") || t.contains("[sync]") { C_GOLD }
+            else if t.contains("[tipfetch]") { C_CYAN }
+            else if t.contains("TIMEOUT") || t.contains("err") { C_RED }
+            else if t.contains("peer +") { C_GREEN }
+            else { C_DIM };
+        lines.push(Line::from(Span::styled(format!("  {}", trunc(t, 116)), Style::default().fg(col))));
+    }
+    Paragraph::new(lines)
+}
+
+fn render_results(app: &App) -> Paragraph<'static> {
+    let sw = &app.swarm;
+    let mut lines: Vec<Line> = Vec::new();
+    let mut totals: std::collections::HashMap<String, (f64, u32)> = std::collections::HashMap::new();
+    for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")) {
+        let e = totals.entry(r.agent.clone()).or_insert((0.0, 0));
+        e.0 += r.qug; e.1 += 1;
+    }
+    let mut tv: Vec<(String, (f64, u32))> = totals.into_iter().collect();
+    tv.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+    let max_e = tv.iter().map(|(_, (q, _))| *q).fold(0.0f64, f64::max);
+    lines.push(Line::from(Span::styled(" ▸ EARNINGS — leaderboard", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for (i, (ag, (qug, n))) in tv.iter().take(7).enumerate() {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", medal(i))),
+            Span::styled(format!("{:<22}", trunc(ag, 22)), Style::default().fg(agent_color(ag)).add_modifier(Modifier::BOLD)),
+            Span::styled(qug_bar(*qug, max_e, 12), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:>3}t", n), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:>10.2} QUG", qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ▸ COMPLETED TASKS (newest first)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")).take(13) {
+        let mark = if r.success { Span::styled("✓", Style::default().fg(C_GREEN)) } else { Span::styled("✗", Style::default().fg(C_RED)) };
+        lines.push(Line::from(vec![
+            Span::raw(sa("  ")), mark, Span::raw(sa(" ")),
+            Span::styled(format!("{:>4} ", rel_time(r.at)), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<14}", trunc(&r.agent, 14)), Style::default().fg(agent_color(&r.agent))),
+            Span::styled(format!("{:<18}", trunc(&r.crates, 18)), Style::default().fg(C_CYAN)),
+            Span::styled(format!("{:>7.2} QUG", r.qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  TOTAL SETTLED: ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:.1} QUG", sw.qug_paid), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  ·  {} tasks completed", sw.completed_count), Style::default().fg(C_DIM)),
+    ]));
+    Paragraph::new(lines).block(card_block("🏆 RESULTS — SETTLED WORK", C_GOLD))
+}
+
 fn draw_ui(f: &mut Frame, app: &App) {
     let area = f.area();
     if let Some(until) = app.splash_until {
@@ -2008,28 +3224,50 @@ fn draw_ui(f: &mut Frame, app: &App) {
             return;
         }
     }
-    let [header_area, body_area, footer_area] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0), Constraint::Length(2)]).areas(area);
+    // v0.13: tab bar between header and body — [1] Node · [2] Swarm AI · [3] Results.
+    let [header_area, tab_area, body_area, footer_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)]).areas(area);
 
     f.render_widget(render_header(app), header_area);
+    f.render_widget(render_tab_bar(app), tab_area);
 
-    let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(body_area);
+    match app.tab {
+        Tab::Node => {
+            // v0.33.3: SYNC is now a full-width HERO band on top of the Node tab, with a big
+            // progress bar + Kalman-ETA telemetry + starship; the other cards flow beneath it.
+            let [hero_area, cards_area] =
+                Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+            draw_sync_hero(f, app, hero_area);
+            draw_node_body(f, app, cards_area);
+        }
+        Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
+        Tab::Results => f.render_widget(render_results(app), body_area),
+        Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
+    }
+
+    f.render_widget(render_footer(app), footer_area);
+}
+
+/// The original node dashboard, now the [1] Node tab body.
+fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
+    let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .spacing(1)  // v0.33.2: breathing room so the two columns don't fuse at the border
+        .split(body_area);
     let (left_area, right_area) = (body_h[0], body_h[1]);
 
     let left_v = Layout::vertical([
         Constraint::Length(6), // Node
         Constraint::Length(6), // StateRoots
         Constraint::Length(4), // Supply
-        Constraint::Length(5), // SyncStatus (v0.7.21: 3 lines, robust on short terminals)
         Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
+        Constraint::Min(0),    // spacer
     ])
     .split(left_area);
 
     f.render_widget(render_node_card(app), left_v[0]);
     f.render_widget(render_state_roots(app), left_v[1]);
     f.render_widget(render_supply(app), left_v[2]);
-    f.render_widget(render_sync_status(app), left_v[3]);
-    f.render_widget(render_mining(app), left_v[4]);
+    f.render_widget(render_mining(app), left_v[3]); // v0.33.3: SYNC moved to the top hero band
 
     let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
         .spacing(1)
@@ -2038,47 +3276,49 @@ fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(render_fleet_card(app), right_v[1]);
     f.render_widget(render_cortex_card(app), right_v[2]);
     f.render_widget(render_block_stream(app), right_v[3]);
-
-    f.render_widget(render_footer(app), footer_area);
 }
 
-fn accent_stripe(color: Color) -> Span<'static> {
-    Span::styled(" ▌ ", Style::default().fg(color))
-}
-
+/// v0.33.2 BOLD NEON card: rounded obsidian card with a bright neon title chip glowing in
+/// the accent color, and a border tinted toward the accent instead of flat grey. The title
+/// is a filled chip (` ◆ NODE `) so it reads as a label, not glued to the corner.
 fn card_block(title: &'static str, color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        // v0.33.5: light box-drawing (┌─┐│└┘) IS in CP437 → renders on classic raster conhost;
+        // heavy/rounded corners are NOT and showed as `?`. Use Plain on ascii consoles, Rounded
+        // on rich terminals (Windows Terminal / VS Code / *nix) where it's prettier.
+        .border_type(if ui_ascii() { BorderType::Plain } else { BorderType::Rounded })
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
-            accent_stripe(color),
-            Span::styled(title, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
+            Span::styled(format!("{} ", title.trim_start()),
+                Style::default().bg(color).fg(C_BG).add_modifier(Modifier::BOLD)),
         ]))
-        .border_style(Style::default().fg(C_DIM))
-        .style(Style::default().bg(Color::Rgb(10, 10, 20)))
+        .border_style(Style::default().fg(color))
+        .style(Style::default().bg(C_BG))
 }
 
 fn render_header(app: &App) -> Paragraph<'static> {
     let live = app.online;
-    let status_symbol = Span::styled(" █ ", Style::default().fg(if live { C_GREEN } else { C_RED }));
-    let live_span = Span::styled(if live { "LIVE" } else { "OFFLINE" },
-        Style::default().fg(if live { C_GREEN } else { C_RED }).add_modifier(Modifier::BOLD));
+    // v0.33.2: loud neon brand block + a filled status banner pill.
+    let status = if live { banner("◆ LIVE", C_NEON_GREEN) } else { banner("✕ OFFLINE", C_NEON_PINK) };
     let update = if version_gt(&app.latest, VERSION) {
-        Span::styled(format!("  ·  Update v{} [U]", app.latest), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD))
+        Span::styled(format!("   ⬆ UPDATE v{} [U]", app.latest),
+            Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
     } else {
         Span::raw("")
     };
     let line = Line::from(vec![
-        Span::styled(" SIGIL", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" · v{} · {} · ", VERSION, app.st.network), Style::default().fg(C_DIM)),
-        status_symbol,
-        live_span,
-        Span::styled(format!("  ·  uptime {}  ·  net height {}", fmt_uptime(app.st.uptime_secs), group(app.target_height)), Style::default().fg(C_DIM)),
+        Span::styled(" ◇ SIGIL ", Style::default().bg(C_NEON_CYAN).fg(C_BG_HEAD).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" v{}", VERSION), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" · {} ", app.st.network), Style::default().fg(C_DIM)),
+        status,
+        Span::styled("  uptime ", Style::default().fg(C_DIM)),
+        Span::styled(fmt_uptime(app.st.uptime_secs), Style::default().fg(C_CYAN)),
+        Span::styled("  ·  net height ", Style::default().fg(C_DIM)),
+        val(group(app.target_height)),
         update,
     ]);
-    Paragraph::new(line).style(Style::default().bg(Color::Rgb(5, 5, 15)))
+    Paragraph::new(line).style(Style::default().bg(C_BG_HEAD))
 }
 
 fn render_node_card(app: &App) -> Paragraph<'static> {
@@ -2095,7 +3335,7 @@ fn render_node_card(app: &App) -> Paragraph<'static> {
             dim("   uptime "), Span::raw(fmt_uptime(st.uptime_secs)),
         ]),
     ];
-    Paragraph::new(lines).block(card_block(" NODE", C_GREEN))
+    Paragraph::new(lines).block(card_block(" ◆ NODE", C_NEON_GREEN))
 }
 
 fn render_state_roots(app: &App) -> Paragraph<'static> {
@@ -2116,24 +3356,21 @@ fn render_state_roots(app: &App) -> Paragraph<'static> {
         Line::from(vec![ dim("wallet "), Span::raw(wallet), dim("  dex "), Span::raw(dex) ]),
         Line::from(vec![ dim("events "), Span::raw(event), dim("  contract "), Span::raw(contract) ]),
     ];
-    Paragraph::new(lines).block(card_block(" STATE ROOTS", C_GOLD))
+    Paragraph::new(lines).block(card_block(" ◈ STATE ROOTS", C_GOLD))
 }
 
 fn render_supply(app: &App) -> Paragraph<'static> {
     let supply = app.st.native_supply;
     let frac = if MAX_SUPPLY_BASE > 0 { (supply as f64 / MAX_SUPPLY_BASE as f64).clamp(0.0, 1.0) } else { 0.0 };
-    let bar_w = 34usize;
-    let filled = (frac * bar_w as f64).round() as usize;
-    let bar: String = "█".repeat(filled) + &"░".repeat(bar_w.saturating_sub(filled));
     let lines = vec![
         Line::from(vec![
-            Span::styled(fmt_supply(supply), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            val(fmt_supply(supply)),
             dim(" / 21,000,000   "),
-            Span::styled(format!("{:.2}%", frac * 100.0), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:.2}%", frac * 100.0), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(Span::styled(bar, Style::default().fg(C_GOLD))),
+        Line::from(neon_bar(frac, 34, C_NEON_GOLD)),
     ];
-    Paragraph::new(lines).block(card_block(" SUPPLY", C_CYAN))
+    Paragraph::new(lines).block(card_block(" ⬣ SUPPLY", C_NEON_GOLD))
 }
 
 /// Cross-platform persistent path for the light client's block store. Windows has no
@@ -2150,71 +3387,106 @@ fn sigil_top_db_path() -> String {
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
 }
 
-fn render_sync_status(app: &App) -> Paragraph<'static> {
+/// v0.33.3: the SYNC HERO — a full-width band with a BIG progress bar, Kalman-smoothed rate
+/// + ETA, in-flight chunk / fleet / mesh / PID telemetry, and a static starship motif. The
+/// whole frame is themed by the sync verdict color. Progress = s.verified (the honest spine),
+/// NOT s.blocks_synced (faked to the tip in light-monitor mode — see memory/render note).
+fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = &app.p2p_state;
-    let verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-    let synced = s.blocks_synced;
-    let tip = s.peer_best_height.max(app.target_height);
-    let gap = tip.saturating_sub(synced);
-    let at_tip = tip > 0 && gap < 8;
-    let d = if s.connected_delta { "Δ" } else { "·" };
-    let e = if s.connected_epsilon { "Ε" } else { "·" };
+    let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
+    let net_tip = s.peer_best_height.max(app.target_height);
+    let spine = s.verified;
+    let gap = net_tip.saturating_sub(spine);
+    let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
+    let following = net_tip > 0;
+    let caught = following && gap < 16_384;
+    let synced = caught && fold_ok && s.verify_break.is_none();
+    let connecting = s.fetched_total == 0 && spine == 0 && !following;
+    let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
+    let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
 
-    // 1) DB-fill bar + gap
-    let pct = if tip > 0 { (synced as f64 / tip as f64 * 100.0).min(100.0) } else { 100.0 };
-    let bw = 14usize;
-    let fill = ((pct / 100.0) * bw as f64).round() as usize;
-    let bar = "█".repeat(fill.min(bw)) + &"░".repeat(bw.saturating_sub(fill));
-    let (bcol, tail) = if at_tip {
-        (C_GREEN, Span::styled(" AT TIP".to_string(), Style::default().fg(C_GREEN)))
-    } else {
-        (C_CYAN, Span::styled(format!(" {} behind", group(gap)), Style::default().fg(C_GOLD)))
-    };
-    let l1 = Line::from(vec![dim("sync  "), Span::styled(bar, Style::default().fg(bcol)), dim(format!(" {:.0}%", pct)), tail]);
+    let (vtext, vcol) = if s.verify_break.is_some() { ("⚠ SPINE BREAK", C_NEON_PINK) }
+        else if synced { ("◆ SYNCED", C_NEON_GREEN) }
+        else if connecting { ("… CONNECTING", C_DIM) }
+        else if caught { ("≈ TRACKING HEAD", C_NEON_CYAN) }
+        else { ("⬇ SYNCING", C_NEON_GOLD) };
 
-    // 2) rate + ETA + synced. Rate is the 10s trailing window over fetched_total
-    // (smooth) — once blocks flow we show the number (even 0 = momentarily idle),
-    // not a perpetual "starting…".
-    let l2 = if at_tip {
-        Line::from(vec![dim("rate  "), Span::styled("tracking live", Style::default().fg(C_GREEN)), dim(format!("  ⬇{}", group(synced)))])
-    } else if s.fetched_total == 0 {
-        Line::from(vec![dim("rate  "), Span::styled("connecting…", Style::default().fg(C_DIM)), dim(format!("  ⬇{}", group(synced)))])
-    } else {
-        let r = app.p2p_rate.max(0.0);
-        let eta = if r > 0.5 {
-            let x = (gap as f64 / r) as u64;
-            if x >= 3600 { format!("{}h{}m", x / 3600, (x % 3600) / 60) }
-            else if x >= 60 { format!("{}m{:02}s", x / 60, x % 60) } else { format!("{}s", x) }
-        } else { "—".to_string() };
+    // state-themed border; title chip stays neon-cyan
+    let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
+        .border_style(Style::default().fg(vcol));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // [ big bar (full width) ] over [ telemetry | starship ]
+    let [bar_row, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
+
+    // ── BIG progress bar ─────────────────────────────────────────────────
+    let label = format!(" {:>5.1}%  {}", frac * 100.0, vtext);
+    let total = bar_row.width as usize;
+    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let fill = (frac * barw as f64).round() as usize;
+    let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(bar_str, Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
+        Span::styled(label, Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
+    ])), bar_row);
+
+    // ── telemetry (left) ─────────────────────────────────────────────────
+    let chunk = if s.sync_cursor > 0 {
+        format!("[{}…{}]", group(s.sync_cursor), group(s.sync_cursor.saturating_add(2048)))
+    } else { "—".into() };
+    let fleet_total = app.fleet_nodes.len();
+    let fleet_on = app.fleet_nodes.iter().filter(|n| n.online).count();
+    let mesh = s.mesh_peer_count;
+    let pid = std::process::id();
+    let proof = if s.verify_break.is_some() { Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)) }
+        else if fold_ok { Span::styled("fold ✓ attests rest".to_string(), Style::default().fg(C_NEON_GREEN)) }
+        else { Span::styled("fold … verifying".to_string(), Style::default().fg(C_GOLD)) };
+    let pos = if s.pos_rate > 0.0 {
+        Span::styled(format!("   ⛏{} blk/s verify", group(s.pos_rate.round() as u64)), Style::default().fg(C_GOLD))
+    } else { Span::raw("") };
+
+    let tlines = vec![
         Line::from(vec![
-            dim("rate  "), Span::styled(format!("{} blk/s", group(r.round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-            dim("  ETA "), Span::styled(eta, Style::default().fg(C_VBRIGHT)),
-            dim("  ⬇"), Span::styled(group(synced), Style::default().fg(C_GREEN)),
-        ])
-    };
-
-    // 3) in-flight chunk range + tip-verify + peers
-    let vmark = if !app.online { Span::styled("offline".to_string(), Style::default().fg(C_RED)) }
-        else if verified { Span::styled(format!("✓{}", group(synced)), Style::default().fg(C_GREEN)) }
-        else { Span::styled("✗tip".to_string(), Style::default().fg(C_GOLD)) };
-    let l3 = if !at_tip && s.running {
-        let from = synced; let to = from.saturating_add(8192);
+            dim("tip "), val(group(net_tip)),
+            dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
+        ]),
         Line::from(vec![
-            dim("chunk "), Span::styled(format!("[{}..{}]", group(from), group(to)), Style::default().fg(C_VBRIGHT)),
-            dim("  "), vmark, dim(" "),
-            Span::styled(d, Style::default().fg(if s.connected_delta { C_GREEN } else { C_DIM })),
-            Span::styled(e, Style::default().fg(if s.connected_epsilon { C_GREEN } else { C_DIM })),
-        ])
-    } else {
+            dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
+        ]),
         Line::from(vec![
-            dim("node  "), vmark, dim("  "),
-            Span::styled(d, Style::default().fg(if s.connected_delta { C_GREEN } else { C_DIM })),
-            Span::styled(e, Style::default().fg(if s.connected_epsilon { C_GREEN } else { C_DIM })),
-            dim(format!(" {} peers", s.peer_count)),
-        ])
-    };
+            dim("fleet "), Span::styled(format!("{}/{}", fleet_on, fleet_total), Style::default().fg(if fleet_total > 0 && fleet_on == fleet_total { C_NEON_GREEN } else { C_GOLD })),
+            dim("   mesh "), Span::styled(format!("{} peers", mesh), Style::default().fg(if mesh >= 4 { C_NEON_GREEN } else if mesh >= 1 { C_GOLD } else { C_RED })),
+            dim("   "),
+            Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+            Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+            dim(format!("   pid {}", pid)),
+        ]),
+        Line::from(vec![
+            dim("proof "), proof,
+            dim("   fetched "), Span::styled(group(s.fetched_total), Style::default().fg(C_GREEN)),
+            pos,
+        ]),
+    ];
+    f.render_widget(Paragraph::new(tlines), tele);
 
-    Paragraph::new(vec![l1, l2, l3]).block(card_block(" SYNC", C_VBRIGHT))
+    // ── static starship (right) ──────────────────────────────────────────
+    let (dtxt, dcol) = if synced { ("DOCKED", C_NEON_GREEN) }
+        else if connecting { ("OFFLINE", C_RED) }
+        else { ("ENGAGED", vcol) };
+    let ship_lines = vec![
+        Line::from(Span::styled("    ╱╲    ", Style::default().fg(C_NEON_CYAN))),
+        Line::from(Span::styled("   ╱██╲   ", Style::default().fg(C_NEON_CYAN))),
+        Line::from(Span::styled("  ▕████▏  ", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("  ▕◆◆◆▏  ", Style::default().fg(dcol))),
+        Line::from(Span::styled("  ╱╲██╱╲  ", Style::default().fg(C_NEON_PINK))),
+        Line::from(vec![dim(" drive "), Span::styled(dtxt, Style::default().fg(dcol).add_modifier(Modifier::BOLD))]),
+    ];
+    f.render_widget(Paragraph::new(ship_lines), ship);
 }
 
 fn render_mining(app: &App) -> Paragraph<'static> {
@@ -2260,7 +3532,7 @@ fn render_mining(app: &App) -> Paragraph<'static> {
         rate_line,
         bal_line,
     ];
-    Paragraph::new(lines).block(card_block(" MINING", C_CYAN))
+    Paragraph::new(lines).block(card_block(" ✦ MINING", C_NEON_PINK))
 }
 
 fn render_security(app: &App) -> Paragraph<'static> {
@@ -2314,7 +3586,7 @@ fn render_security(app: &App) -> Paragraph<'static> {
             dim(if sig_verified { "  ✓ tip proven" } else { "  awaiting proof" }),
         ]),
     ];
-    Paragraph::new(lines).block(card_block(" SECURITY", C_VIOLET))
+    Paragraph::new(lines).block(card_block(" ✶ SECURITY", C_VBRIGHT))
 }
 
 // ── v0.7.0: AI Fleet Monitoring ─────────────────────────────────────────
@@ -2349,7 +3621,7 @@ fn render_fleet_card(app: &App) -> Paragraph<'static> {
         if outdated > 0 {
             Span::styled(format!("  {} behind", outdated),
                 Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-        } else { Span::raw("") },
+        } else { Span::raw(sa("")) },
     ]);
     // v0.8: Mesh health line
     let mesh_line = Line::from(vec![
@@ -2371,10 +3643,10 @@ fn render_fleet_card(app: &App) -> Paragraph<'static> {
             else { C_GREEN };
         Line::from(vec![
             dot,
-            Span::raw(" "),
+            Span::raw(sa(" ")),
             Span::styled(name.clone(), Style::default().fg(C_CYAN)),
             dim(format!("  h{}", group(*height))),
-            Span::raw("  "),
+            Span::raw(sa("  ")),
             Span::styled(ver.clone(), Style::default().fg(ver_color).add_modifier(Modifier::BOLD)),
         ])
     }).collect();
@@ -2382,7 +3654,7 @@ fn render_fleet_card(app: &App) -> Paragraph<'static> {
     let mut lines = vec![status_line, mesh_line];
     lines.extend(node_lines);
 
-    Paragraph::new(lines).block(card_block(" FLEET · MESH", C_CYAN))
+    Paragraph::new(lines).block(card_block(" ● FLEET · MESH", C_NEON_CYAN))
 }
 
 fn render_block_stream(app: &App) -> Paragraph<'static> {
@@ -2491,7 +3763,7 @@ fn render_cortex_card(app: &App) -> Paragraph<'static> {
         cortex_line,
         mcp_line,
     ];
-    Paragraph::new(lines).block(card_block(" CORTEX MCP", C_GOLD))
+    Paragraph::new(lines).block(card_block(" ◆ CORTEX MCP", C_NEON_GOLD))
 }
 
 // ── v0.3.5: Browser shortcuts ────────────────────────────────────────────
@@ -2670,9 +3942,9 @@ fn flux_unregister_scheme() -> Result<(), String> {
 fn render_footer(app: &App) -> Paragraph<'static> {
     let toast = if app.toast.is_empty() { String::new() } else { format!(" › {}", app.toast) };
     let keys = |c: &'static str, rest: &'static str, col: Color| -> Vec<Span<'static>> {
-        vec![Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD)), dim(rest), Span::raw("  ")]
+        vec![Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD)), dim(rest), Span::raw(sa("  "))]
     };
-    let mut kb = vec![Span::raw(" ")];
+    let mut kb = vec![Span::raw(sa(" "))];
     kb.extend(keys("[M]", "ine", C_GOLD));
     kb.extend(keys("[F]", "ull", C_GREEN));
     kb.extend(keys("[V]", "erify", C_GREEN));
@@ -2692,8 +3964,23 @@ fn render_footer(app: &App) -> Paragraph<'static> {
     } else {
         Line::from(Span::styled(" ⚡ fluxc serve :9800 · local wallet [W]", Style::default().fg(C_DIM)))
     };
+    // v0.10.5.1: when offline, the top line becomes a calm status banner with a
+    // live "offline for X · retry in Ns" countdown instead of a stale gold toast —
+    // the operator always knows the cockpit is reconnecting, not frozen.
+    let top_line = if !app.online {
+        let dur = app.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_else(|| "0s".into());
+        let txt = if app.refresh_inflight {
+            format!(" ⚠ offline {} · reconnecting…", dur)
+        } else {
+            let next = app.refresh_delay().as_secs().saturating_sub(app.last_fetch.elapsed().as_secs());
+            format!(" ⚠ offline {} · retry in {}s", dur, next)
+        };
+        Line::from(Span::styled(txt, Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
+    } else {
+        Line::from(Span::styled(toast, Style::default().fg(C_GOLD)))
+    };
     Paragraph::new(vec![
-        Line::from(Span::styled(toast, Style::default().fg(C_GOLD))),
+        top_line,
         Line::from(kb),
         serve_line,
     ])

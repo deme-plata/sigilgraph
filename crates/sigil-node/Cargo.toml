@@ -19,9 +19,14 @@ arti = ["sigil-net/arti"]
 serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = { workspace = true }
+hex        = { workspace = true }
 anyhow     = { workspace = true }
 tokio      = { workspace = true }
 bincode    = "1"
+# v0.33 zstd wire (encode side): codec=1 backfill replies as 'Z'+zstd-1. Measured 14.0×
+# on real header chunks. Server is linux-only, so the C-backed zstd crate is fine here
+# (the Windows-cross client decodes with pure-Rust ruzstd).
+zstd       = "0.13"
 rmp-serde  = "1"   # MessagePack — compact AND self-describing, so it round-trips
                    # SIGIL's internally-tagged enums (SigilEvent/SigilTx tag="kind")
                    # that bincode cannot decode. The store codec.

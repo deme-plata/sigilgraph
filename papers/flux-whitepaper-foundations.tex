@@ -1,0 +1,161 @@
+% ============================================================================
+%  flux-whitepaper-foundations.tex
+%  Cryptographic Foundations & Related Work — an includable addendum to
+%  flux-whitepaper.tex (which currently carries no citations).
+%
+%  Usage: \input{flux-whitepaper-foundations} immediately before \end{document}
+%  in flux-whitepaper.tex. It provides one \section plus a thebibliography block.
+%  (The main whitepaper has no bibliography of its own, so this file supplies it;
+%  if you later add one, merge these entries instead of double-declaring.)
+%
+%  Research path: arxiv.org / eprint.iacr.org, 2026-06-10. Every reference below
+%  was located and title-verified; eprint IDs are the canonical IACR archive
+%  numbers. Each subsection ties a SIGIL mechanism to its literature AND states,
+%  per the Variational-Flow Honest Checklist, where the *current implementation*
+%  diverges from the sound construction (the "still pretend" column).
+% ============================================================================
+
+\section{Cryptographic Foundations and Related Work}
+
+SIGIL is an engineering composition of well-studied primitives. This section
+anchors each load-bearing mechanism in the literature and is deliberately
+honest about the gap between the cited construction and what the v0.35 code
+actually enforces — the same discipline the protocol applies to its own state
+roots.
+
+\subsection{Time lane: verifiable delay functions}
+The dual-lane miner pairs a BLAKE-family proof-of-work ($\Phi$, ``power'') with a
+Wesolowski verifiable delay function ($\Omega$, ``time''). A VDF is a function
+whose evaluation requires a prescribed number of \emph{sequential} squarings yet
+whose output admits a constant-size proof verifiable in two exponentiations
+\cite{wesolowski2019,boneh2018vdf}; Pietrzak gives an alternative proof system
+with the same asymptotics \cite{pietrzak2019}. Soundness is contingent on the
+evaluation group having \emph{unknown order} — an RSA modulus from a trusted
+ceremony, or, with \emph{no} trusted setup, the class group of an imaginary
+quadratic field \cite{wesolowski2019,classgrouphash2024}.
+
+\paragraph{Honest gap (0.37 / C10).} The shipped evaluator uses a fixed,
+deterministically-constructed $\sim$2048-bit modulus (\texttt{flux-vdf}'s
+\texttt{ModSquaring::bench\_2048}). Its structure — hence a path to its order — is
+public, so the unknown-order assumption fails and the time lane is, as deployed,
+forgeable: a party who recovers $\varphi(N)$ reduces $2^{t}\bmod\varphi(N)$ and
+skips the sequential work. The correct replacement is a class group of an
+imaginary quadratic field (no ceremony) or a ceremony RSA modulus; this is
+tracked as a height-gated wire-format change, not a point-release patch.
+
+\subsection{Post-quantum authorship: isogeny signatures}
+Provenance (every binary is \texttt{.proof}-signed at build time), the producer
+block signature, and the SQIsign-flavoured tip proof use SQISign, the most
+compact post-quantum signature known — NIST-1 signatures of $\sim$200 bytes with
+64-byte public keys, derived from the Deuring correspondence on supersingular
+isogeny graphs \cite{sqisign2020}; SQIsignHD lifts the degree restriction via
+higher-dimensional isogenies \cite{sqisignhd2023}. SIGIL targets NIST Level 5
+(292-byte signatures).
+
+\paragraph{Honest gap (H1).} The signing/verification primitive is sound, but the
+Phase-0 block-apply path checks only the signature \emph{length}; producer
+signatures are presently zero placeholders and are not cryptographically
+verified on ingest. Wiring real \texttt{flux\_sqisign::verify} into the apply
+path is the consensus-track item (\S\,0.37).
+
+\subsection{Consensus: from longest-chain to BlockDAG}
+SIGIL's consensus target is DAG-KNIGHT, the parameterless generalisation of
+Nakamoto consensus that assumes \emph{no} a-priori bound on network latency and
+instead solves a dual min--max optimisation for the smallest $k$-cluster
+covering a majority of the DAG \cite{dagknight2022}. It descends from
+PHANTOM/GHOSTDAG, which impose a robust total order on a BlockDAG via a greedy
+$k$-cluster heuristic \cite{ghostdag2018}; the broader design space is surveyed
+in \cite{sokdag2024}.
+
+\paragraph{Honest gap.} The running prototype is single-producer longest-chain
+(Phase-0); the BlockDAG fork-choice above is the consensus milestone, gated
+behind the apply-path verification of \S\,4.2.
+
+\subsection{State commitments: incremental multiset hashing}
+The four committed state roots (wallet, DEX, event, contract) are maintained by
+an additive multiset accumulator updated in $O(1)$ per touched leaf
+(sub-old-leaf, add-new-leaf), replacing an $O(n)$ whole-map rehash. This is the
+randomize-then-combine / homomorphic-hash paradigm: LtHash gives set-homomorphic
+digests whose update cost is linear in the modification, not the database
+\cite{lthash2019}, and the elliptic-curve multiset hash (ECMH) gives the same
+property with discrete-log collision resistance \cite{ecmh2016}.
+
+\paragraph{Design consequence (audit H2).} Multiset homomorphism is
+\emph{order-independent} — exactly right for the wallet/DEX/contract roots, but a
+\emph{liability} for the event log, whose inclusion proofs were written against a
+positional binary Merkle tree. An order-independent accumulator does not commit
+event ordering; the two must be reconciled (commit the event root as a Merkle
+root, or drop positional event proofs).
+
+\subsection{Cross-chain: from SPV to succinct proofs}
+The bridge mints a wrapped asset only against a verified source-chain proof,
+never a custodial attestation. Today that proof is Bitcoin SPV
+\cite{nakamoto2008}: the deposit transaction is bound to a Merkle root inside a
+header buried under verified proof-of-work, with the wrapped amount and recipient
+parsed \emph{from} the proven transaction bytes (closing the unbound-mint hole)
+and a per-deposit spent-set committed into the supply root. The trust-minimised
+evolution is zkBridge, which replaces header-relay trust with a succinct
+zk-SNARK over the source chain's consensus, verifiable on-chain in constant cost
+\cite{zkbridge2022}.
+
+\paragraph{Honest gap.} SPV difficulty now has a floor and verification is gated
+to Bitcoin only (no validating non-PoW chains against Bitcoin headers); a
+per-chain verifier and the zk-proof relay are future work, and the bridge must
+not custody real value until then.
+
+\subsection{Light-client verification: recursion and folding}
+The ``10\,ms tip verify in a browser'' goal rests on recursive proof systems.
+Nova realises incrementally verifiable computation through \emph{folding
+schemes} — reducing the check of two NP instances to one, without a SNARK in the
+recursive step \cite{nova2021}; HyperNova generalises this to customisable
+constraint systems \cite{hypernova2023}. Composing per-block light-client steps
+into a single succinct proof is what lets a client verify a chain's tip in
+constant work, the same idea SIGIL's constant-size fold-proof late-join uses.
+
+\paragraph{Honest gap.} The shipped tip proof is a keyless BLAKE3 fingerprint
+(typo-resistance only, self-labelled non-adversarial); the SQIsign-anchored and
+recursive-STARK flavours are scaffolded but not yet the default wire path.
+
+% ----------------------------------------------------------------------------
+\begin{thebibliography}{99}
+\bibitem{wesolowski2019} B.~Wesolowski. \emph{Efficient Verifiable Delay
+  Functions.} EUROCRYPT 2019. IACR ePrint 2018/623.
+  \url{https://eprint.iacr.org/2018/623}
+\bibitem{boneh2018vdf} D.~Boneh, J.~Bonneau, B.~B\"unz, B.~Fisch.
+  \emph{Verifiable Delay Functions.} CRYPTO 2018. IACR ePrint 2018/601.
+  \url{https://eprint.iacr.org/2018/601}
+\bibitem{pietrzak2019} K.~Pietrzak. \emph{Simple Verifiable Delay Functions.}
+  ITCS 2019. IACR ePrint 2018/627. \url{https://eprint.iacr.org/2018/627}
+\bibitem{classgrouphash2024} \emph{An Efficient Hash Function for Imaginary
+  Class Groups.} IACR ePrint 2024/295. \url{https://eprint.iacr.org/2024/295}
+\bibitem{sqisign2020} L.~De~Feo, D.~Kohel, A.~Leroux, C.~Petit, B.~Wesolowski.
+  \emph{SQISign: Compact Post-Quantum Signatures from Quaternions and
+  Isogenies.} ASIACRYPT 2020. IACR ePrint 2020/1240.
+  \url{https://eprint.iacr.org/2020/1240}
+\bibitem{sqisignhd2023} \emph{SQIsignHD: New Dimensions in Cryptography.}
+  IACR ePrint 2023/436. \url{https://eprint.iacr.org/2023/436}
+\bibitem{dagknight2022} Y.~Sompolinsky, M.~Sutton. \emph{The DAG-KNIGHT
+  Protocol: A Parameterless Generalization of Nakamoto Consensus.}
+  IACR ePrint 2022/1494. \url{https://eprint.iacr.org/2022/1494}
+\bibitem{ghostdag2018} Y.~Sompolinsky, S.~Wyborski, A.~Zohar.
+  \emph{PHANTOM GHOSTDAG: A Scalable Generalization of Nakamoto Consensus.}
+  AFT 2021. IACR ePrint 2018/104. \url{https://eprint.iacr.org/2018/104}
+\bibitem{sokdag2024} \emph{SoK: DAG-based Consensus Protocols.}
+  arXiv:2411.10026. \url{https://arxiv.org/abs/2411.10026}
+\bibitem{lthash2019} K.~Lewi, W.~Kim, I.~Maykov, S.~Weis. \emph{Securing Update
+  Propagation with Homomorphic Hashing.} IACR ePrint 2019/227.
+  \url{https://eprint.iacr.org/2019/227}
+\bibitem{ecmh2016} J.~Maitin-Shepard, M.~Tibouchi, D.~Aranha. \emph{Elliptic
+  Curve Multiset Hash.} arXiv:1601.06502. \url{https://arxiv.org/abs/1601.06502}
+\bibitem{nakamoto2008} S.~Nakamoto. \emph{Bitcoin: A Peer-to-Peer Electronic
+  Cash System.} 2008. (Simplified Payment Verification, \S 8.)
+\bibitem{zkbridge2022} T.~Xie et al. \emph{zkBridge: Trustless Cross-chain
+  Bridges Made Practical.} ACM CCS 2022. arXiv:2210.00264.
+  \url{https://arxiv.org/abs/2210.00264}
+\bibitem{nova2021} A.~Kothapalli, S.~Setty, I.~Tzialla. \emph{Nova: Recursive
+  Zero-Knowledge Arguments from Folding Schemes.} CRYPTO 2022. IACR ePrint
+  2021/370. \url{https://eprint.iacr.org/2021/370}
+\bibitem{hypernova2023} A.~Kothapalli, S.~Setty. \emph{HyperNova: Recursive
+  Arguments for Customizable Constraint Systems.} IACR ePrint 2023/573.
+  \url{https://eprint.iacr.org/2023/573}
+\end{thebibliography}

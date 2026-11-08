@@ -2,10 +2,10 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.7.27"
+version = "0.35.0"
 edition.workspace = true
 license.workspace = true
-description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. v0.3.5 adds Chronos benchmark card, archive storage gauge, gossip health, pipeline status, --export json mode, and multi-Epsilon peer tracking."
+description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
 
 [dependencies]
 serde      = { workspace = true }
@@ -20,6 +20,9 @@ futures    = "0.3"
 # interactive keys. ratatui owns the box-drawing so alignment can't regress.
 ratatui    = "0.28"
 crossterm  = "0.28"
+# v0.26 hardening #8: graceful SIGTERM/SIGINT — flush the verified-spine watermark +
+# restore the terminal before exit, so a supervisor restart never orphans the DB state.
+ctrlc      = "3.4"
 # L4-A: verify the REAL chain tip — reconstruct the canonical v0 tip-proof from the
 # node's live roots and verify it for sigil-g0 (~µs, 0 bytes downloaded).
 sigil-tip-proof = { path = "../sigil-tip-proof" }
@@ -33,6 +36,9 @@ sigil-oauth     = { path = "../sigil-oauth" }
 blake3       = "1"
 hex          = "0.4"
 bincode      = "1"
+# v0.33 zstd wire (decode side): PURE-RUST zstd decompressor — no C code, so the
+# Windows cross-build stays mingw-clean. Server compresses with the zstd crate.
+ruzstd       = "0.7"
 rmp-serde    = "1"
 self-replace = "1"
 sigil-dns-anchor = { path = "../sigil-dns-anchor" }
@@ -53,6 +59,11 @@ flux-rev = { path = "../../../flux/crates/flux-rev" }
 flux-sync = { path = "../../../flux/crates/flux-sync" }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
+[dev-dependencies]
+# Interop test only: encode with the SAME C-backed zstd the server uses, decode with
+# our pure-Rust ruzstd — proves the exact cross-implementation wire roundtrip.
+zstd = "0.13"
+
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]

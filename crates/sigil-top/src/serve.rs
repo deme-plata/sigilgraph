@@ -465,12 +465,17 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     let _ = stream.flush();
 }
 
-/// Remote host publishing the live DAG-chain feeds (recent-blocks, tip, tip-live). Override with
-/// `SIGIL_FEED_URL`. Used only for the feed-less-host fallback in `handle_conn`.
-/// 2026-11-09: sigilgraph.org — the SIGIL home (operator ruling 2026-08-26). The feed writer copies the
-/// same file there; the fluxapp domain it pointed at before is a retired dead end.
-fn feed_host() -> String {
-    std::env::var("SIGIL_FEED_URL").unwrap_or_else(|_| "https://sigilgraph.org".into())
+/// Hosts publishing the live DAG-chain feeds (recent-blocks, tip, tip-live, anchor key), tried in order.
+/// `SIGIL_FEED_URL` names one host and nothing else is tried. Used only for the feed-less-host fallback
+/// in `handle_conn`.
+/// 2026-11-09: sigilgraph.org first — the SIGIL home (operator ruling 2026-08-26); the fluxapp root
+/// second, because two of the four files (sigil-tip-live.json, sigil-anchor-key.json) are still written
+/// only there. A host that answers an unknown path with its SPA page (HTTP 200, text/html) is skipped.
+fn feed_hosts() -> Vec<String> {
+    match std::env::var("SIGIL_FEED_URL") {
+        Ok(u) if !u.trim().is_empty() => vec![u],
+        _ => vec!["https://sigilgraph.org".into(), "https://sigilgraph.fluxapp.xyz".into()],
+    }
 }
 
 /// The static feed files a feed-less client may request but won't have on disk. Restricted to this
@@ -482,20 +487,33 @@ fn is_feed_path(safe: &str) -> bool {
     )
 }
 
-/// Fetch a feed file from `feed_host()` over HTTPS. Blocking (we run per-connection in a thread);
-/// `None` on any error so the caller falls back to the original 404.
+/// Fetch a feed file from the first host in `feed_hosts()` that answers it as JSON. Blocking (we run
+/// per-connection in a thread); `None` when no host does, so the caller falls back to the original 404.
 fn proxy_feed(safe: &str) -> Option<(Vec<u8>, &'static str)> {
-    let url = format!("{}/{}", feed_host().trim_end_matches('/'), safe);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(6))
         .build()
         .ok()?;
-    let resp = client.get(&url).send().ok()?;
-    if !resp.status().is_success() {
-        return None;
+    for host in feed_hosts() {
+        let url = format!("{}/{}", host.trim_end_matches('/'), safe);
+        let resp = match client.get(&url).send() {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+        let is_json = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("json"))
+            .unwrap_or(false);
+        if !is_json {
+            continue; // the host's SPA fallback page, not the feed
+        }
+        if let Ok(b) = resp.bytes() {
+            return Some((b.to_vec(), "application/json; charset=utf-8"));
+        }
     }
-    let body = resp.bytes().ok()?.to_vec();
-    Some((body, "application/json; charset=utf-8"))
+    None
 }
 
 /// True when `safe` is exactly `name`, or a path whose last segment is `name`.

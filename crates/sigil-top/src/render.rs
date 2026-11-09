@@ -153,20 +153,26 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
         o.push_str(&row("verify", &v));
     }
 
-    // flux-fold succinct sync capability
-    o.push_str(&mid_title("SUCCINCT SYNC  (flux-fold · light node)"));
-    o.push_str(&row("fold proof", &format!("{GREEN}2,568 B{RESET} {DIM}constant ∀ chain len{RESET}")));
-    o.push_str(&row("whole-chain", &format!("{GREEN}1 check{RESET} {DIM}· 342 ms @ 100k blocks{RESET}")));
-    // v0.26.0: EFFECTIVE sync throughput. The fold-proof verifies the WHOLE chain in a
-    // constant ~342ms (DeepSeek's #1 lever for 1M blk/s) — so the effective verification
-    // rate is chain_height/0.342s and GROWS with the chain. This is the real sync speed:
-    // we do not download the 11M-block middle, we prove it.
-    let fold_h = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
-    let fold_bps = (fold_h as f64 / 0.342) as u64;
-    o.push_str(&row("throughput", &format!("{GOLD}⚡ {} blk/s{RESET} {DIM}derived: height ÷ 0.342 s (a constant), not measured{RESET}", group(fold_bps))));
-    // CATHEDRAL DAGKNIGHT (wired 2026-06-17) — module live, full vault ingest + tab in next slice
-    o.push_str(&row("cathedral", "vaults:0 (first wire) · divergence not measured on this screen"));
-    o.push_str(&row("crypto", &format!("{DIM}Ajtai/SIS · post-quantum · no trusted setup{RESET}")));
+    // 2026-11-09 (lane sigil-netstats-1109): the "SUCCINCT SYNC (flux-fold · light node)" block that stood
+    // here printed a 2,568-byte fold proof, a 342 ms whole-chain check, a "throughput" of height ÷ a
+    // constant, a cathedral vault count and an Ajtai/SIS post-quantum line. Nothing in sigil-top or
+    // sigil-node produces any of them — no flux-fold dependency exists in this workspace. The frame now
+    // shows only what the integrity monitor has actually read, and says so while it has read nothing.
+    o.push_str(&mid_title("FINALITY & AGREEMENT  (read, not assumed)"));
+    let integ = crate::integrity_ui::snapshot();
+    if integ.certified > 0 {
+        o.push_str(&row("certified", &format!("{GREEN}#{}{RESET} {DIM}· /v1/finality/certificate on the network node{RESET}", group(integ.certified))));
+    } else {
+        o.push_str(&row("certified", &format!("{DIM}— not read yet (the monitor polls in the background){RESET}")));
+    }
+    match &integ.network {
+        Some(n) => o.push_str(&row("agreement", &format!("{GREEN}{} of {}{RESET} {DIM}nodes hold the producer's hash at #{}{RESET}", n.agree, n.of, group(n.height)))),
+        None => o.push_str(&row("agreement", &format!("{DIM}— no network comparison read yet{RESET}"))),
+    }
+    if integ.bps > 0.0 {
+        o.push_str(&row("blocks/s", &format!("{GOLD}{:.2}{RESET} {DIM}measured: the network node's applied height over time{RESET}", integ.bps)));
+    }
+    o.push_str(&row("sync", &format!("{DIM}full blocks over P2P · no succinct / fold proof exists in this build{RESET}")));
 
     o.push_str(&bottom());
     if !online {

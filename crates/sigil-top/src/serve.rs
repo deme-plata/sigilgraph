@@ -467,8 +467,10 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
 
 /// Remote host publishing the live DAG-chain feeds (recent-blocks, tip, tip-live). Override with
 /// `SIGIL_FEED_URL`. Used only for the feed-less-host fallback in `handle_conn`.
+/// 2026-11-09: sigilgraph.org — the SIGIL home (operator ruling 2026-08-26). The feed writer copies the
+/// same file there; the fluxapp domain it pointed at before is a retired dead end.
 fn feed_host() -> String {
-    std::env::var("SIGIL_FEED_URL").unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz".into())
+    std::env::var("SIGIL_FEED_URL").unwrap_or_else(|_| "https://sigilgraph.org".into())
 }
 
 /// The static feed files a feed-less client may request but won't have on disk. Restricted to this

@@ -6932,7 +6932,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     </div>
     <div style="flex:none;display:flex;gap:1px;background:rgba(33,212,253,.12);border-bottom:1px solid rgba(33,212,253,.14)">
       <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsHeight" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#21d4fd">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Current Height</div></div>
-      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsPeers" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#00e0c6">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Active Peers</div></div>
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsPeers" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#00e0c6">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Connected Peers</div></div>
       <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsBps" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#a78bfa">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Blocks / s</div></div>
     </div>
     <div id="nsBody" style="flex:1;overflow-y:auto;padding:14px 18px"></div>
@@ -6942,71 +6942,137 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 (function(){
   'use strict';
   var modal=document.getElementById('stats-modal');
-  var poll=null, lastH=null, lastT=0, bps='—';
+  // 2026-11-09 (Rocky, lane sigil-netstats-1109): every figure on this panel is one of
+  //   LIVE     read from the named node route (hover the chip for the route and field),
+  //   DERIVED  computed from such reads by the formula in the tooltip,
+  //   STATIC   a description from this client's code that the node did not report,
+  //   NOT LOADED  the route did not answer — shown with the reason, never as 0.
+  // The network name is what the node DECLARES (/v1/shielded/anchor) checked against the gossip
+  // topics it SPEAKS (/v1/network/topology); it is never a fallback string.
+  var poll=null, samples=[];   // [{t,h}] applied-height samples for the measured blocks/s
+  var C={live:'#00e0c6',derived:'#a78bfa',static:'#5a93a8',missing:'#ff8a8a',val:'#d7f4ff'};
+  var counts={};
   function fmtInt(n){ n=Number(n); return isFinite(n)?n.toLocaleString('en-US'):'—'; }
-  function shortHex(h){ return (h&&h.length>18)?(h.slice(0,10)+'…'+h.slice(-6)):(h||'—'); }
-  function row(label,val,color){
-    return '<div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.07)">'
-      +'<span style="color:#5a93a8;font-size:13px">'+label+'</span>'
-      +'<span style="font-family:\'JetBrains Mono\';font-size:12px;color:'+(color||'#d7f4ff')+';text-align:right;overflow-wrap:anywhere">'+val+'</span></div>';
+  function shortHex(h){ h=(h==null)?'':String(h); return h.length>18?(h.slice(0,10)+'…'+h.slice(-6)):(h||'—'); }
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function chip(kind,src){
+    counts[kind]=(counts[kind]||0)+1;
+    var txt={live:'LIVE',derived:'DERIVED',static:'STATIC',missing:'NOT LOADED'}[kind];
+    return '<span title="'+esc(src)+'" style="font-family:\'JetBrains Mono\';font-size:8.5px;letter-spacing:.6px;padding:1px 5px;border-radius:4px;margin-right:7px;color:'+C[kind]+';border:1px solid '+C[kind]+'55;background:'+C[kind]+'14;vertical-align:middle;cursor:help">'+txt+'</span>';
   }
+  function row(label,val,kind,src,color){
+    return '<div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.07)">'
+      +'<span style="color:#5a93a8;font-size:13px;white-space:nowrap">'+label+'</span>'
+      +'<span style="font-family:\'JetBrains Mono\';font-size:12px;color:'+(color||C.val)+';text-align:right;overflow-wrap:anywhere">'+chip(kind,src)+val+'</span></div>';
+  }
+  function miss(label,r){ return row(label,'not loaded — '+esc(r&&r.err||'no answer'),'missing',(r&&r.url)||'',C.missing); }
   function section(title,color,rows){
     return '<div style="margin-bottom:16px"><div style="font-family:\'JetBrains Mono\';font-size:11px;color:'+color+';text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">'+title+'</div>'+rows.join('')+'</div>';
   }
   function prettyRoot(k){ return k.replace(/_?(state_)?root$/,'').replace(/_/g,' ').trim()||k; }
-  async function j(url){ try{ var r=await fetch(url,{cache:'no-store'}); return r.ok?await r.json():null; }catch(e){ return null; } }
+  // One read = one named route. ok:false carries WHY: HTTP status, "not JSON" (the SPA page), or the error.
+  async function get(url){
+    try{
+      var r=await fetch(url,{cache:'no-store'});
+      if(!r.ok) return {ok:false,url:url,err:'HTTP '+r.status};
+      var ct=(r.headers.get('content-type')||'').split(';')[0];
+      if(ct.indexOf('json')<0) return {ok:false,url:url,err:'answered '+(ct||'no content-type')+', not JSON'};
+      return {ok:true,url:url,data:await r.json(),node:r.headers.get('x-sigil-node')||''};
+    }catch(e){ return {ok:false,url:url,err:String(e&&e.message||e).slice(0,70)}; }
+  }
+  // glyph strings (10 decimals) -> "70,878.8818" without rounding past 2^53.
+  function sigil(glyphs,dp){
+    var s=String(glyphs==null?'':glyphs).replace(/\D/g,''); if(!s) return '—';
+    var whole=s.length>10?s.slice(0,-10):'0', frac=('0000000000'+s).slice(-10);
+    var w=whole.replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    return dp>0?(w+'.'+frac.slice(0,dp)):w;
+  }
+  function hps(n){ n=Number(n); if(!isFinite(n)) return '—'; var u=['H/s','kH/s','MH/s','GH/s','TH/s'],i=0; while(n>=1000&&i<u.length-1){n/=1000;i++;} return n.toFixed(n<10?2:1)+' '+u[i]; }
+  function age(ms,nowMs){ var s=Math.max(0,Math.round((nowMs-ms)/1000)); return s<90?(s+' s ago'):(s<5400?(Math.round(s/60)+' min ago'):(Math.round(s/3600)+' h ago')); }
+  function wireNet(topics){ var c={}; (topics||[]).forEach(function(t){ var m=/^\/sigil\/(g\d+)\//.exec(String(t)); if(m) c[m[1]]=(c[m[1]]||0)+1; }); var best=Object.keys(c).sort(function(a,b){return c[b]-c[a];})[0]; return best?{id:'sigil-'+best,n:c[best]}:null; }
   async function refresh(){
-    var feed=await j('/sigil-recent-blocks.json');
-    var st=(feed&&feed.status)||await j('/api/v1/status')||{};
-    var tip=(feed&&feed.tip)||{};
-    var peersApi=await j('/api/v1/peers');
-    var mw=await j('/api/v1/mine-wallet');
-    var height=st.height||tip.height||0;
-    var peers=(peersApi&&peersApi.peer_count!=null)?peersApi.peer_count:(st.peers||0);
-    var mesh=(peersApi&&peersApi.mesh_peers!=null)?peersApi.mesh_peers:(st.mesh_peers!=null?st.mesh_peers:'—');
+    counts={};
+    var R=await Promise.all([get('/v1/integrity'),get('/v1/finality/certificate'),get('/v1/network/topology'),get('/v1/supply'),get('/v1/shielded/anchor'),get('/v1/mining/miners'),get('/sigil-recent-blocks.json'),get('/api/v1/mine-wallet')]);
+    var integ=R[0],cert=R[1],topo=R[2],sup=R[3],anch=R[4],min=R[5],feed=R[6],mw=R[7];
+    var core=R.slice(0,7);   // mine-wallet exists only on sigil-top's own server, so it is not a "route live" count
+    var I=integ.ok?integ.data:null, Cf=(cert.ok&&cert.data&&cert.data.certificate)||null, T=(topo.ok&&topo.data&&topo.data.data)||null,
+        S=(sup.ok&&sup.data&&sup.data.data)||null, A=anch.ok?anch.data:null, M=(min.ok&&min.data&&min.data.data)||null, F=feed.ok?feed.data:null;
     var now=Date.now();
-    if(lastH!=null&&height>lastH&&now>lastT){ bps=((height-lastH)/((now-lastT)/1000)).toFixed(1); }
-    lastH=height; lastT=now;
-    document.getElementById('nsHeight').textContent=fmtInt(height);
-    document.getElementById('nsPeers').textContent=fmtInt(peers);
-    document.getElementById('nsBps').textContent=bps;
-    document.getElementById('nsSub').textContent='network '+(st.network_id||st.network||'sigil-g0')+' · verified live feed · '+new Date().toLocaleTimeString();
-    var supply=Number(st.supply||0), maxs=Number(st.max_supply||21000000);
-    var mintedPct=maxs>0?(supply/maxs*100):0;
-    var roots=tip.roots||{};
+    var height=(I&&I.applied_height!=null)?Number(I.applied_height):(Cf&&Cf.height!=null?Number(Cf.height):null);
+    // blocks/s is MEASURED here: applied height now vs. the oldest sample taken within the last 60 s.
+    if(height!=null){ samples.push({t:now,h:height}); samples=samples.filter(function(s){return now-s.t<=60000;}); }
+    var bps=null, span=0;
+    if(samples.length>=2){ var a=samples[0],b=samples[samples.length-1]; span=Math.round((b.t-a.t)/1000); if(b.t>a.t&&b.h>=a.h) bps=(b.h-a.h)/((b.t-a.t)/1000); }
+    var peers=T?Number(T.peer_count):null;
+    var tsrv=(topo.ok&&topo.data.ts)||now;
+    var fresh=(T&&T.peers)?T.peers.filter(function(p){return tsrv-Number(p.last_seen_ms||0)<60000;}).length:null;
+    var declared=(A&&A.network)?String(A.network):null;      // what the node SAYS it runs
+    var wire=T?wireNet(T.topics):null;                        // what its gossip topics SHOW
+    var feedNet=(F&&F.network)?String(F.network):null;        // how the feed file is labelled
+    var netLabel=declared||(wire&&wire.id)||'unknown (anchor + topology not loaded)';
+    var netOk=(declared&&wire)?(declared===wire.id):null;
+    document.getElementById('nsHeight').textContent=height!=null?fmtInt(height):'—';
+    document.getElementById('nsPeers').textContent=peers!=null?fmtInt(peers):'—';
+    document.getElementById('nsBps').textContent=bps!=null?bps.toFixed(1):'…';
+    var okN=core.filter(function(r){return r.ok;}).length;
+    var src=(integ.node||topo.node||'');
+    var srcTxt=src==='your-node'?'answered by your node':(src==='network'?'answered by the network node':'answered by this host');
+    document.getElementById('nsSub').textContent='network '+netLabel+(netOk===false?' ⚠ wire says '+wire.id:'')+' · '+okN+'/'+core.length+' routes live · '+srcTxt+' · '+new Date().toLocaleTimeString();
+    var roots=(I&&I.roots)||{};
     var rootRows=Object.keys(roots).length
-      ? Object.entries(roots).map(function(e){ return row(prettyRoot(e[0])+' root', shortHex(String(e[1])), '#c084fc'); })
-      : [row('state roots','— (tip not loaded)','#5a93a8')];
-    var blocks=(feed&&feed.blocks)||[];
-    var txs=blocks.reduce(function(a,b){ return a+(b.tx_count||0); },0);
+      ? Object.keys(roots).map(function(k){ var v=String(roots[k]); var empty=/^0+$/.test(v); return row(prettyRoot(k)+' root', empty?'0000… (empty)':shortHex(v),'live','/v1/integrity roots.'+k, empty?C.static:'#c084fc'); })
+      : [miss('state roots',integ)];
+    var blocks=(F&&F.results)||[];
+    var prods={}; blocks.forEach(function(b){ var p=String(b.prod||'?'); prods[p]=(prods[p]||0)+1; });
+    var prodTxt=Object.keys(prods).map(function(k){return esc(k)+'×'+prods[k];}).join(' ');
+    var certAge=Cf?age(Number(Cf.certified_at_ms),Number(cert.data.ts_ms)||now):null;
+    var gap=(I&&I.unapplied_finalized_gap!=null)?Number(I.unapplied_finalized_gap):null;
+    var behind=(I&&Cf)?Number(I.applied_height)-Number(Cf.height):null;
+    var syncTxt=(I&&Cf)?((gap===0&&behind>=0&&behind<=2)?'applied = finalized (gap '+gap+')':(gap>0?gap+' finalized blocks not yet applied':'applied '+behind+' ahead of the certificate')):null;
+    var rem=(S&&typeof BigInt==='function')?String(BigInt(String(S.max_supply))-BigInt(String(S.native_supply))):null;
     document.getElementById('nsBody').innerHTML=
-      section('Core Network Metrics','#6df3ff',[
-        row('Current Height',fmtInt(height),'#21d4fd'),
-        row('Tip Hash',shortHex(tip.hash)),
-        row('Network',(st.network_id||st.network||'sigil-g0')),
-        row('Recent Blocks · Txs',fmtInt(blocks.length)+' · '+fmtInt(txs)),
+      section('Chain','#6df3ff',[
+        I?row('Applied height',fmtInt(I.applied_height),'live','/v1/integrity applied_height','#21d4fd'):miss('Applied height',integ),
+        I?row('Finalized height',fmtInt(I.finalized_height),'live','/v1/integrity finalized_height'):miss('Finalized height',integ),
+        Cf?row('Spine block (finalized)',shortHex(Cf.spine_block_hash),'live','/v1/finality/certificate spine_block_hash'):miss('Spine block (finalized)',cert),
+        Cf?row('Order hash',shortHex(Cf.order_hash),'live','/v1/finality/certificate order_hash'):miss('Order hash',cert),
+        declared?row('Network',declared,'live','/v1/shielded/anchor network',netOk===false?C.missing:C.val):miss('Network',anch),
+        wire?row('Wire topics',wire.id+' ('+wire.n+' gossip topics)','derived','the network id every /v1/network/topology topic carries, e.g. /sigil/g3/blocks',netOk===false?C.missing:C.val):miss('Wire topics',topo),
+        (feedNet&&declared&&feedNet!==declared)?row('Feed label',esc(feedNet)+' ≠ '+esc(declared)+' — the feed writer\'s label, not the chain','live','/sigil-recent-blocks.json network',C.missing):'',
+        F?row('Recent blocks',fmtInt(blocks.length)+' · newest #'+fmtInt(F.height)+(prodTxt?' · producers '+prodTxt:''),'live','/sigil-recent-blocks.json results, height, prod'):miss('Recent blocks',feed),
+        row('Blocks / s',bps!=null?(bps.toFixed(2)+' (measured over '+span+' s)'):('… needs two reads ('+samples.length+'/2, polls every 4 s)'),'derived','(applied height now − applied height at the oldest sample ≤ 60 s ago) ÷ seconds between those two reads of /v1/integrity'),
       ])+
-      section('Network Health & Peers','#00e0c6',[
-        row('Active Peers',fmtInt(peers),peers>0?'#00e0c6':'#ff8a8a'),
-        row('Mesh Peers',String(mesh)),
-        row('Network Health',peers>0?'● Healthy':'● Isolated',peers>0?'#00e0c6':'#ff8a8a'),
-        row('Sync Status',st.status||(height>0?'synced from verified feed':'—')),
+      section('Peers & Health','#00e0c6',[
+        T?row('Connected peers',fmtInt(peers),'live','/v1/network/topology peer_count (libp2p connections)',peers>0?C.live:C.missing):miss('Connected peers',topo),
+        T?row('Seen in last 60 s',fmtInt(fresh)+' of '+fmtInt(peers),'derived','peers whose last_seen_ms is within 60 s of the node\'s own clock (the reply\'s ts)'):miss('Seen in last 60 s',topo),
+        T?row('Mesh quality',esc(T.mesh_quality||'—'),'live','/v1/network/topology mesh_quality'):miss('Mesh quality',topo),
+        T?row('Health',(peers>0&&fresh>0)?'● connected':'● no live peers reported','derived','connected peers > 0 and at least one seen in the last 60 s',(peers>0&&fresh>0)?C.live:C.missing):miss('Health',topo),
+        syncTxt!=null?row('Sync',syncTxt,'derived','/v1/integrity unapplied_finalized_gap, and applied_height − the certificate\'s height'):miss('Sync',I?cert:integ),
       ])+
-      section('Quantum & Security','#c084fc',
-        rootRows.concat([
-          row('Fold Proof','2,568 B constant ∀ chain len','#c084fc'),
-          row('Post-Quantum','Ajtai/SIS · no trusted setup','#c084fc'),
-        ]))+
-      section('Supply & Economics','#fbbf24',[
-        row('Total Supply',fmtInt(supply)+' SIGIL','#fbbf24'),
-        row('Max Supply',fmtInt(maxs)+' SIGIL (hard cap)'),
-        row('Minted',mintedPct.toFixed(4)+' %','#fbbf24'),
-        row('Remaining',fmtInt(Math.max(0,maxs-supply))+' SIGIL'),
+      section('State & Finality','#c084fc',rootRows.concat([
+        Cf?row('Finality gate',esc(Cf.gate)+' · committee of '+fmtInt(Cf.committee_size)+' · quorum '+fmtInt(Cf.quorum)+' · BFT '+(Cf.bft?'yes':'no'),'live','/v1/finality/certificate gate, committee_size, quorum, bft',Cf.bft?C.live:'#fbbf24'):miss('Finality gate',cert),
+        Cf?row('Certificate','#'+fmtInt(Cf.height)+' · '+certAge,'live','/v1/finality/certificate height, certified_at_ms (against the node\'s ts_ms)'):miss('Certificate',cert),
+        A?row('Shielded pool',fmtInt(A.notes)+' / '+fmtInt(A.capacity)+' notes · epoch '+fmtInt(A.epoch)+' · '+fmtInt(A.nullifiers)+' spent · '+fmtInt(A.registered)+' keys','live','/v1/shielded/anchor notes, capacity, epoch, nullifiers, registered'):miss('Shielded pool',anch),
+      ]))+
+      section('Supply','#fbbf24',[
+        S?row('Total supply',sigil(S.native_supply,4)+' SIGIL','live','/v1/supply native_supply (glyphs ÷ 10^10)','#fbbf24'):miss('Total supply',sup),
+        S?row('Max supply',sigil(S.max_supply,0)+' SIGIL (hard cap)','live','/v1/supply max_supply'):miss('Max supply',sup),
+        S?row('Minted',Number(S.minted_pct).toFixed(4)+' %','live','/v1/supply minted_pct','#fbbf24'):miss('Minted',sup),
+        S?row('Remaining',(rem!=null?sigil(rem,0):'—')+' SIGIL','derived','max_supply − native_supply'):miss('Remaining',sup),
       ])+
-      section('Mining & Hashpower','#21d4fd',[
-        row('Mining Lane','BLAKE4 Φ + VDF Ω (dual-lane)'),
-        row('Mining Wallet',shortHex(mw&&mw.mining_wallet),'#00e0c6'),
-      ]);
+      section('Mining','#21d4fd',[
+        M?row('Network hashrate',hps(M.net_hps),'live','/v1/mining/miners net_hps'):miss('Network hashrate',min),
+        M?row('Live miners',fmtInt(M.live_miners)+(M.shielded_hps_pct!=null?(' · '+Number(M.shielded_hps_pct).toFixed(0)+' % of hashrate to shielded keys'):''),'live','/v1/mining/miners live_miners, shielded_hps_pct'):miss('Live miners',min),
+        M?row('Accepted',fmtInt(M.blocks_accepted)+' blocks · '+fmtInt(M.shares_accepted)+' shares','live','/v1/mining/miners blocks_accepted, shares_accepted'):miss('Accepted',min),
+        M?row('Rejects',(M.rejects&&M.rejects.length)?M.rejects.map(function(r){return esc(r[0])+'×'+fmtInt(r[1]);}).join(' · '):'none','live','/v1/mining/miners rejects'):miss('Rejects',min),
+        row('Mining lane','BLAKE4 Φ + VDF Ω (dual-lane)','static','a description from this client\'s code — the node does not report it'),
+        mw.ok?row('Mining wallet',shortHex(mw.data&&mw.data.mining_wallet),'live','/api/v1/mine-wallet (sigil-top\'s own server)',C.live):row('Mining wallet','— (only sigil-top\'s [W] knows it)','static','/api/v1/mine-wallet exists only on sigil-top\'s local server'),
+      ])+
+      '<div style="font-family:\'JetBrains Mono\';font-size:10px;color:#5a93a8;line-height:1.7;padding-top:4px">'
+        +'<span style="color:'+C.live+'">'+(counts.live||0)+' live</span> · <span style="color:'+C.derived+'">'+(counts.derived||0)+' derived</span> · <span style="color:'+C.static+'">'+(counts.static||0)+' static</span> · <span style="color:'+C.missing+'">'+(counts.missing||0)+' not loaded</span>'
+        +' — hover a chip for the route or formula behind the number.'
+        +(okN<core.length?'<br>Not answering: '+core.filter(function(r){return !r.ok;}).map(function(r){return esc(r.url)+' ('+esc(r.err)+')';}).join(' · '):'')
+      +'</div>';
   }
   window.openStats=function(){
     modal.style.display='flex';

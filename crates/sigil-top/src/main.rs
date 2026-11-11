@@ -70,6 +70,7 @@ mod mine_local_api;
 // lived in `producer/` (its own sync + produce loop) is gone. See own_node.rs.
 #[cfg(feature = "producer")]
 mod own_node;
+mod disk_guard; // the node never fills the disk it lives on (start floor + clean stop); also the AI tab's free-space read
 
 // `mine-rig --seed`'s auto-registration for shielded mining. Default-on (see the
 // crate's Cargo.toml `shield-register` feature comment).

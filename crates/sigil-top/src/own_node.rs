@@ -457,6 +457,8 @@ pub const EXIT_FOLDER_IN_USE: u8 = 75;
 /// A headless node stopped to update, but the new binary could not be started in place: exit so the service manager
 /// starts the program again (the new binary is in place, or the old one was put back).
 pub const EXIT_UPDATE_RESTART: u8 = 76;
+/// The node did not start, or stopped itself, because the disk holding its data is nearly full (see disk_guard.rs).
+pub const EXIT_DISK_LOW: u8 = 77;
 const LOCK_FILE: &str = "sigil-top-node.lock";
 const API_FILE: &str = "sigil-top-node.api";
 
@@ -529,12 +531,26 @@ fn run_here() -> ExitCode {
             return ExitCode::from(EXIT_FOLDER_IN_USE);
         }
     };
+    // The disk guard: no start on a nearly full disk, and a clean stop before a running node fills it. A user's
+    // node (settings filled in by sigil-top) always; an operator-configured one only when SIGIL_MIN_FREE_GB is set.
+    let user_mode = std::env::var_os(FILLED_ENV).is_some();
+    if let Err(why) = crate::disk_guard::check_start(&dir, user_mode) {
+        eprintln!("⏸ sigil-top node: {why}");
+        return ExitCode::from(EXIT_DISK_LOW);
+    }
+    static DISK_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    crate::disk_guard::watch(dir.clone(), user_mode, || {
+        DISK_STOP.store(true, Ordering::Relaxed);
+        request_own_stop();
+    });
     // Where this node answers, for a second sigil-top window on the same folder (it shows this node).
     let api = api_url(&std::env::var("SIGIL_MONEY_API").unwrap_or_default());
     if !api.is_empty() {
         let _ = std::fs::write(dir.join(API_FILE), &api);
     }
-    sigil_node::node_main(vec!["sigil-node".into(), "start".into()])
+    let code = sigil_node::node_main(vec!["sigil-node".into(), "start".into()]);
+    // A stop the disk guard asked for is reported as such, so a screen (or a service manager) can tell it from a crash.
+    if DISK_STOP.load(Ordering::Relaxed) { ExitCode::from(EXIT_DISK_LOW) } else { code }
 }
 
 /// No terminal: the node in this process, like `sigil-node start` — for systemd units, containers, servers.
@@ -1230,6 +1246,24 @@ pub fn start_for_screen() -> Option<NodeHost> {
                         .map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     status::set_log(format!("{own_log} · this node runs from another sigil-top window"));
                     spawn_after = Instant::now() + Duration::from_secs(if attached.is_some() { 60 } else { 5 });
+                    continue;
+                }
+                if st.code() == Some(EXIT_DISK_LOW as i32) {
+                    // Not a crash: the disk is nearly full. Say so with the numbers and look again in a minute —
+                    // the node starts by itself once there is room (nothing is written while it waits).
+                    attached = None;
+                    status::set_log(own_log.clone());
+                    status::set_height(0);
+                    status::set_peers(0);
+                    status::set_phase(status::STOPPED);
+                    let floor = crate::disk_guard::start_floor(std::env::var(crate::disk_guard::ENV).ok().as_deref())
+                        .unwrap_or(crate::disk_guard::DEFAULT_START_FLOOR);
+                    status::set_message(match crate::disk_guard::free_bytes(&plan2.data_dir) {
+                        Some(free) => crate::disk_guard::refusal(free, floor, &plan2.data_dir),
+                        None => "the node stopped: the disk that holds its data is nearly full".to_string(),
+                    });
+                    failures = 0;
+                    spawn_after = Instant::now() + Duration::from_secs(60);
                     continue;
                 }
                 attached = None;

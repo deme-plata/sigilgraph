@@ -143,6 +143,7 @@ ENVIRONMENT
 
   Storage
     SIGIL_TOP_DB                    local block store location
+    SIGIL_MIN_FREE_GB               your node needs this much free disk to start (default 4; it stops itself below 1; 0 = off)
     SIGIL_AETHER_DIR                aether artifact store
     SIGIL_SWARM_DIR                 swarm coordination directory
     SIGIL_TOP_BOOT_STORE_LIMIT_MB   cap the store read at boot

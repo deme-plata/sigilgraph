@@ -262,14 +262,7 @@ fn dirs_home() -> PathBuf {
 /// Free bytes on the filesystem holding `path` (or its nearest existing ancestor).
 /// `None` when it cannot be determined — callers must treat that as "do not act".
 fn free_bytes(path: &std::path::Path) -> Option<u64> {
-    let mut p = path;
-    while !p.exists() {
-        p = p.parent()?;
-    }
-    let out = std::process::Command::new("df").arg("-Pk").arg(p).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().nth(1)?;
-    line.split_whitespace().nth(3)?.parse::<u64>().ok().map(|kb| kb * 1024)
+    crate::disk_guard::free_bytes(path) // one reader for the whole program; it also answers on Windows
 }
 
 /// Make ollama reachable, starting it if it is merely installed-and-stopped. Returns

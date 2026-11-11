@@ -471,6 +471,7 @@ impl App {
         // cycle costs one atomic and cannot produce a second sampling thread.
         crate::kgauge_ui::spawn(crate::kgauge_ui::api_base_of(&api));
         crate::integrity_ui::spawn(crate::kgauge_ui::api_base_of(&api), self.block_reader.clone());
+        crate::netmap_ui::spawn(crate::kgauge_ui::api_base_of(&api));
         let prior_synced = self.synced_height;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {

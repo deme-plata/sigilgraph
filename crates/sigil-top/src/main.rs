@@ -43,6 +43,7 @@ mod forge_ui;   // 10.4.27: the seal + block belt card · 10.6.0: ◆ YOUR NODE,
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
+mod netmap_ui;  // ◈ NETWORK MAP tab 6 — which nodes are connected, and whether each holds our state
 mod integrity_ui; // ◈ DATA INTEGRITY card — our block hash vs every network node's at equal height
 mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
 mod mining_relay; // miners point at THIS node (127.0.0.1:18186); balanced failover across upstream nodes

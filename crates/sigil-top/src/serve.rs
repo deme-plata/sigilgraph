@@ -1014,6 +1014,18 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     if names(safe, "sigil-exchange.js") {
         return Some((include_str!("../../../gui/sigil-exchange.js").as_bytes().to_vec(), JS));
     }
+    // 2026-11-11: the ◈ NETWORK STATS 3D map. The page imports /sigil-netmap.js, which imports three.js from
+    // /three/ — all three files ride in the binary, so [W] never loads script from another host (this origin
+    // holds the local signer). Exact paths only: `names` would also match these under any folder.
+    if safe == "sigil-netmap.js" {
+        return Some((include_str!("../../../gui/sigil-netmap.js").as_bytes().to_vec(), JS));
+    }
+    if safe == "three/three.module.min.js" {
+        return Some((include_str!("../../../gui/three/three.module.min.js").as_bytes().to_vec(), JS));
+    }
+    if safe == "three/three.core.min.js" {
+        return Some((include_str!("../../../gui/three/three.core.min.js").as_bytes().to_vec(), JS));
+    }
     if names(safe, "wsigil-market.js") {        // the wSIGIL/USDC ribbon; absent = ribbon shows nothing
         return Some((include_str!("../../../gui/wsigil-market.js").as_bytes().to_vec(), JS));
     }
@@ -2457,6 +2469,9 @@ mod tests {
             "sigil-tron-p2p.js",
             "wasm/sigil_shield.js",
             "wasm/sigil_shield_bg.wasm",
+            "sigil-netmap.js",
+            "three/three.module.min.js",
+            "three/three.core.min.js",
             "sigil-wallet-phrase.mjs",
             "wasm/sigil_wallet_phrase.wasm",
         ] {

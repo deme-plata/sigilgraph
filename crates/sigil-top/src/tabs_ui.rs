@@ -119,6 +119,7 @@ pub(crate) fn render_tab_bar(app: &App) -> Paragraph<'static> {
     // ✓ once a local model answers — so nobody has to open it to learn whether it works.
     let ai_label: &'static str = if app.ai_setup_running { "AI ⏳" } else if app.ai_model.is_some() { "AI ✓" } else { "AI" };
     spans.extend(tab(ai_label, "5", Tab::Ai));
+    spans.extend(tab("Map", "6", Tab::Map));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
 }
@@ -547,6 +548,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
         Tab::Mining => draw_mining_tab(f, app, body_area),
         Tab::Queues => crate::sync_ui::draw_queues_tab(f, app, body_area),
         Tab::Ai => draw_ai_tab(f, app, body_area),
+        Tab::Map => crate::netmap_ui::draw_map_tab(f, app, body_area),
     }
 
     f.render_widget(render_footer(app, footer_area.width), footer_area);

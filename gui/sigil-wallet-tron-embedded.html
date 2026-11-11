@@ -6935,7 +6935,11 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsPeers" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#00e0c6">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Connected Peers</div></div>
       <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsBps" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#a78bfa">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Blocks / s</div></div>
     </div>
-    <div id="nsBody" style="flex:1;overflow-y:auto;padding:14px 18px"></div>
+    <div id="nsScroll" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch">
+      <div id="nsVerdict" style="padding:12px 18px 0;font-family:'JetBrains Mono';font-size:11.5px;line-height:1.55"></div>
+      <div id="nsMap" style="position:relative;height:clamp(270px,44vh,360px);margin:10px 18px 0;border:1px solid rgba(33,212,253,.18);border-radius:12px;overflow:hidden;background:radial-gradient(ellipse at 50% 46%,rgba(33,212,253,.10),rgba(4,8,12,0) 62%),#03070b"></div>
+      <div id="nsBody" style="padding:14px 18px"></div>
+    </div>
   </div>
 </div>
 <script>
@@ -6990,6 +6994,90 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function hps(n){ n=Number(n); if(!isFinite(n)) return '—'; var u=['H/s','kH/s','MH/s','GH/s','TH/s'],i=0; while(n>=1000&&i<u.length-1){n/=1000;i++;} return n.toFixed(n<10?2:1)+' '+u[i]; }
   function age(ms,nowMs){ var s=Math.max(0,Math.round((nowMs-ms)/1000)); return s<90?(s+' s ago'):(s<5400?(Math.round(s/60)+' min ago'):(Math.round(s/3600)+' h ago')); }
   function wireNet(topics){ var c={}; (topics||[]).forEach(function(t){ var m=/^\/sigil\/(g\d+)\//.exec(String(t)); if(m) c[m[1]]=(c[m[1]]||0)+1; }); var best=Object.keys(c).sort(function(a,b){return c[b]-c[a];})[0]; return best?{id:'sigil-'+best,n:c[best]}:null; }
+  // 2026-11-09 (Rocky, lane sigil-netstats-1109 part 2): WHICH nodes this node is connected to, and whether each
+  // one holds exactly this node's state at its own height (/v1/network/topology peer_views: its tip hash and state
+  // root vs. this node's OWN block at that height). Stated in words above the map, drawn as a 3D map
+  // (/sigil-netmap.js; three.js self-hosted under /three/, no outside script on a wallet page) and listed row by row.
+  // Peers' IP addresses are only COUNTED (= machines), never shown; peer names are escaped.
+  var streak={}, mapP=null;
+  function nodeLabel(name,id){
+    name=String(name||'');
+    var m=name.match(/epsilon0*(\d+)-docker/); if(m) return 'node-'+m[1];
+    if(/^sigil-g\d+-epsilon$/.test(name)) return 'Epsilon';
+    if(/cs30067\.seedhost\.eu/.test(name)) return 'Epsilon sigil-top';
+    m=name.match(/^sigil-top-(?:top-)?([0-9a-f]{6})/); if(m) return 'sigil-top '+m[1];
+    if(name) return name.replace(/^sigil-/,'').slice(0,22);
+    return 'peer …'+String(id||'').slice(-6);
+  }
+  function netView(T,Cf,F,src){
+    if(!T) return {model:null,section:'',verdict:'<div style="color:'+C.missing+'">'+chip('missing','/v1/network/topology')+'connected nodes unknown — /v1/network/topology did not answer</div>'};
+    var views=T.peer_views||{}, lv=T.local_view||{}, myH=Number(lv.height)||0, tnow=Number(lv.ts_ms)||Date.now(), remote={}, peers=[];
+    var ago=function(s){ return s<5400?Math.round(s/60)+' min':Math.round(s/3600)+' h'; };
+    (T.peers||[]).slice().sort(function(a,b){ return a.peer_id<b.peer_id?-1:1; }).forEach(function(p){
+      var ip=(String(p.multiaddr||'').match(/\/ip[46]\/([^/]+)/)||[])[1]||'?';
+      var local=/^127\./.test(ip)||ip==='::1';
+      if(!local) remote[ip]=1;   // counted, never shown: these are people's addresses
+      var vw=views[p.peer_id]||null, st='unknown', h=(vw&&vw.height!=null)?Number(vw.height):null, frac=null;
+      if(vw){
+        var a=vw.state_root_matches_local, b=vw.tip_matches_local;
+        if(a===true&&b!==false) st='agree';
+        else if(a===false||b===false) st='differ';
+        else if(myH>0&&h!=null&&h<myH-512){ st='syncing'; frac=h/myH; }
+      }
+      // one mismatching sample is inconclusive (the two reads are moments apart): 'differ' needs 3 refreshes in a row
+      if(st==='differ'){ streak[p.peer_id]=(streak[p.peer_id]||0)+1; if(streak[p.peer_id]<3) st='checking'; } else streak[p.peer_id]=0;
+      var ageS=(vw&&vw.seen_ms)?Math.max(0,Math.round((tnow-Number(vw.seen_ms))/1000)):null;
+      peers.push({id:String(p.peer_id),local:local,state:st,label:nodeLabel(vw&&vw.node,p.peer_id),height:h,frac:frac,ageS:ageS,stale:ageS!=null&&ageS>120});
+    });
+    var blocks=(F&&F.results)||[], prods={};
+    blocks.forEach(function(b){ if(b&&b.prod!=null){ var k=String(b.prod); prods[k]=(prods[k]||0)+1; } });
+    var makers=Object.keys(prods), committee=Cf?Number(Cf.committee_size):null, bft=Cf?Cf.bft===true:null;
+    var selfName=String(lv.node||T.self_node_id||'');
+    var isMaker=!!prods.E&&/^sigil-g\d+-epsilon$/.test(selfName);
+    var onBox=peers.filter(function(p){ return p.local; }).length, machines=1+Object.keys(remote).length;
+    var selfLabel=(src==='your-node'?'your node · ':'')+nodeLabel(selfName,'')+(isMaker?' · block-maker':'');
+    var model={self:{label:selfLabel,isMaker:isMaker},peers:peers,ghosts:Math.max(0,4-(committee||1)),
+               serverLabel:(isMaker?'Epsilon server':'this machine')+' · '+(1+onBox)+' nodes on one machine'};
+    var agree=peers.filter(function(p){ return p.state==='agree'; }), differ=peers.filter(function(p){ return p.state==='differ'; });
+    var cmp=peers.filter(function(p){ return p.state==='agree'||p.state==='differ'||p.state==='checking'; });
+    var sync=peers.filter(function(p){ return p.state==='syncing'; }), none=peers.filter(function(p){ return p.state==='unknown'; });
+    var decentral=makers.length>=2&&committee>=4&&bft===true&&machines>=4;
+    var dTxt=decentral
+      ? 'Decentralized: '+makers.length+' block-makers, a finality committee of '+committee+' with BFT, on '+machines+' machines.'
+      : 'Not decentralized yet: '+(makers.length?(makers.length+' block-maker'+(makers.length===1?' made all '+blocks.length+' recent blocks':'s')):'block-makers unknown')
+        +', '+(committee!=null?(committee+' key'+(committee===1?' signs':'s sign')+' finality ('+(Cf.gate||'?')+' gate, BFT '+(bft?'on':'off')+')'):'finality unknown')
+        +', and '+onBox+' of the '+peers.length+' connected nodes run on '+(isMaker?'this same machine':'the answering node’s machine')+'.';
+    var iTxt=cmp.length
+      ? 'Data integrity: '+agree.length+' of '+cmp.length+' comparable node'+(cmp.length===1?'':'s')+' hold exactly this node’s state at their own height'
+        +(sync.length?' · '+sync.length+' still syncing ('+sync.map(function(p){ return Math.floor(p.frac*100)+' %'+(p.stale?', last report '+ago(p.ageS)+' ago':''); }).join('; ')+')':'')
+        +(none.length?' · '+none.length+' not comparable yet':'')+'.'
+      : 'Data integrity: no connected node has reported a comparable state yet.';
+    var dCol=decentral?C.live:'#fbbf24', iCol=differ.length?C.missing:((cmp.length&&agree.length===cmp.length)?C.live:'#fbbf24');
+    var say=function(col,txt,why){ return '<div style="color:'+col+';margin-bottom:4px">'+chip('derived',why)+esc(txt)+'</div>'; };
+    var verdict=say(dCol,dTxt,'decentralized = ≥ 2 block-makers in /sigil-recent-blocks.json AND a /v1/finality/certificate committee ≥ 4 with BFT AND ≥ 4 machines (distinct peer addresses in /v1/network/topology, counted, never shown)')
+               +say(iCol,iTxt,'a node agrees when /v1/network/topology peer_views says its tip AND state root equal this node’s own block at that height; a mismatch counts only after 3 refreshes in a row');
+    var stTxt={agree:'✓ same state',checking:'… mismatch seen, re-checking',differ:'✕ DIFFERENT state',syncing:'◔ syncing',unknown:'— no comparable view yet'};
+    var stCol={agree:C.live,checking:'#fbbf24',differ:C.missing,syncing:'#9db4ff',unknown:C.static};
+    var order=peers.slice().sort(function(a,b){ return (a.local===b.local)?(a.label<b.label?-1:(a.label>b.label?1:0)):(a.local?-1:1); });
+    var rows=[row('This node (answering)',esc(selfLabel)+(myH?' · h '+fmtInt(myH):''),'live','/v1/network/topology local_view node, height',isMaker?'#fbbf24':C.val)].concat(order.map(function(p){
+      var val=stTxt[p.state]+(p.height!=null?' · h '+fmtInt(p.height):'')+(p.state==='syncing'?' · '+(p.frac*100).toFixed(1)+' % of '+fmtInt(myH):'')
+        +(p.stale?' · last report '+ago(p.ageS)+' ago':'');
+      return row(esc(p.label)+' <span style="color:#3d6b7d">· '+(p.local?'same machine':'own machine')+'</span>',val,p.state==='syncing'?'derived':'live',
+        p.state==='syncing'?'its height in /v1/network/topology peer_views ÷ this node’s height (local_view.height)'
+                           :'/v1/network/topology peer_views[…'+esc(p.id.slice(-6))+'] tip_matches_local + state_root_matches_local, vs. this node’s own block at that height',stCol[p.state]);
+    }));
+    rows.push(F?row('Block-makers','<span style="color:'+(makers.length>=2?C.live:'#fbbf24')+'">'+makers.length+'</span> in the last '+fmtInt(blocks.length)+' blocks ('+makers.map(function(k){ return esc(k)+'×'+prods[k]; }).join(' ')+')','live','/sigil-recent-blocks.json results[].prod'):'');
+    rows.push(row('Machines',fmtInt(machines)+' (this one + '+fmtInt(machines-1)+' other'+(machines-1===1?'':'s')+') · '+fmtInt(1+onBox)+' nodes on this one','derived','distinct peer IP addresses in /v1/network/topology (counted, never shown) + this machine'));
+    return {model:model,verdict:verdict,section:section('Nodes &amp; data integrity · each connected node vs. this node, at its own height','#00e0c6',rows)};
+  }
+  function ensureMap(){
+    if(mapP) return mapP;
+    var host=document.getElementById('nsMap');
+    if(!host) return (mapP=Promise.resolve(null));
+    mapP=import('/sigil-netmap.js?v=1109c').then(function(m){ return m.mountNetMap(host); })
+      .catch(function(e){ host.style.display='none'; try{ console.warn('network map unavailable:',e&&e.message); }catch(_){} return null; });
+    return mapP;
+  }
   async function refresh(){
     counts={};
     var R=await Promise.all([get('/v1/integrity'),get('/v1/finality/certificate'),get('/v1/network/topology'),get('/v1/supply'),get('/v1/shielded/anchor'),get('/v1/mining/miners'),get('/sigil-recent-blocks.json'),get('/api/v1/mine-wallet')]);
@@ -7030,8 +7118,10 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     var behind=(I&&Cf)?Number(I.applied_height)-Number(Cf.height):null;
     var syncTxt=(I&&Cf)?((gap===0&&behind>=0&&behind<=2)?'applied = finalized (gap '+gap+')':(gap>0?gap+' finalized blocks not yet applied':'applied '+behind+' ahead of the certificate')):null;
     var rem=(S&&typeof BigInt==='function')?String(BigInt(String(S.max_supply))-BigInt(String(S.native_supply))):null;
+    var NV=netView(T,Cf,F,src);
+    document.getElementById('nsVerdict').innerHTML=NV.verdict;
     document.getElementById('nsBody').innerHTML=
-      section('Chain','#6df3ff',[
+      NV.section+section('Chain','#6df3ff',[
         I?row('Applied height',fmtInt(I.applied_height),'live','/v1/integrity applied_height','#21d4fd'):miss('Applied height',integ),
         I?row('Finalized height',fmtInt(I.finalized_height),'live','/v1/integrity finalized_height'):miss('Finalized height',integ),
         Cf?row('Spine block (finalized)',shortHex(Cf.spine_block_hash),'live','/v1/finality/certificate spine_block_hash'):miss('Spine block (finalized)',cert),
@@ -7073,15 +7163,18 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
         +' — hover a chip for the route or formula behind the number.'
         +(okN<core.length?'<br>Not answering: '+core.filter(function(r){return !r.ok;}).map(function(r){return esc(r.url)+' ('+esc(r.err)+')';}).join(' · '):'')
       +'</div>';
+    if(NV.model) ensureMap().then(function(map){ if(map) map.update(NV.model); });
   }
   window.openStats=function(){
     modal.style.display='flex';
     refresh();
+    ensureMap().then(function(map){ if(map) map.resume(); });
     if(!poll) poll=setInterval(refresh,4000);
   };
   window.closeStats=function(){
     modal.style.display='none';
     if(poll){ clearInterval(poll); poll=null; }
+    if(mapP) mapP.then(function(map){ if(map) map.pause(); });
     if(location.hash==='#stats') history.replaceState(null,'',location.pathname+location.search);
   };
   document.getElementById('nsClose').addEventListener('click',window.closeStats);

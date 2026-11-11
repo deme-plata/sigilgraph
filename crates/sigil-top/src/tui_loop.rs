@@ -533,6 +533,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('3') => { app.tab = Tab::Mining; }
                             KeyCode::Char('4') => { app.tab = Tab::Queues; }
                             KeyCode::Char('5') => { app.tab = Tab::Ai; ai_enter_tab(&mut app); }
+                            KeyCode::Char('6') => { app.tab = Tab::Map; }
                             // 2026-09-02: a second `Char('w')` arm used to sit here, added ahead
                             // of the real [W] handler below and pointing at the HOSTED wallet.
                             // Rust takes the first matching arm, so [W] silently became [L] and
@@ -1176,7 +1177,7 @@ pub(crate) fn render_update_splash(frame: u8) -> Paragraph<'static> {
 // ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Tab { Node, SyncLog, Mining, Queues, Ai }
+pub(crate) enum Tab { Node, SyncLog, Mining, Queues, Ai, Map }
 
 impl Tab {
     pub(crate) fn next(self) -> Tab {
@@ -1185,7 +1186,8 @@ impl Tab {
             Tab::SyncLog => Tab::Mining,
             Tab::Mining => Tab::Queues,
             Tab::Queues => Tab::Ai,
-            Tab::Ai => Tab::Node,
+            Tab::Ai => Tab::Map,
+            Tab::Map => Tab::Node,
         }
     }
 }

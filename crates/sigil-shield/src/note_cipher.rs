@@ -89,6 +89,10 @@ pub enum CipherError {
     BadAddress(&'static str),
     #[error("memo is {got} bytes; the limit is {limit}")]
     MemoTooLong { got: usize, limit: usize },
+    /// 2026-11-17: the memo text carries a character honest payment software has no reason to
+    /// send (control code, direction override, invisible or tag character) — see `flux_memo::hazard`.
+    #[error("memo refused: {0}")]
+    MemoRefused(String),
     #[error(transparent)]
     Note(#[from] NoteError),
 }
@@ -124,8 +128,35 @@ impl Memo {
 
     /// A memo from UTF-8 text. Refused, not truncated, past `MEMO_LEN` bytes: silently
     /// cutting a message the sender wrote is worse than telling them it does not fit.
+    ///
+    /// 2026-11-17: through `flux_memo::Memo::text`, so honest wallets can no longer write a
+    /// control code, a direction override, an invisible or a tag character (the bytes of an
+    /// allowed text are unchanged — old and new wallets read each other's memos as before).
     pub fn from_text(text: &str) -> Result<Self, CipherError> {
-        Self::from_bytes(text.as_bytes())
+        Self::from_memo(&flux_memo::Memo::text(text).map_err(memo_error)?)
+    }
+
+    /// A typed memo (text, application data, …) — `flux_memo::Memo::encode` is the body.
+    pub fn from_memo(m: &flux_memo::Memo) -> Result<Self, CipherError> {
+        Self::from_bytes(&m.encode())
+    }
+
+    /// What this memo is: text, data, empty, … (the first byte decides; see `flux_memo`).
+    pub fn kind(&self) -> flux_memo::Memo {
+        // `len <= MEMO_LEN == flux_memo::MEMO_CAP`, checked on open, so decode cannot refuse.
+        flux_memo::Memo::decode(self.as_bytes()).unwrap_or_default()
+    }
+
+    /// What to SHOW a person or an agent: the text with any misleading character spelled out as
+    /// `⟦U+202E⟧`, or a description for a data memo. A memo is written by the payer — this, not
+    /// [`Memo::text`], is what a wallet should display.
+    pub fn display_text(&self) -> String {
+        self.kind().display()
+    }
+
+    /// 32-byte fingerprint of the memo, for the sender's receipt ("I sent this memo").
+    pub fn digest(&self) -> [u8; 32] {
+        self.kind().digest()
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self, CipherError> {
@@ -142,7 +173,7 @@ impl Memo {
         &self.bytes[..self.len as usize]
     }
 
-    /// The message as text (lossy for non-UTF-8 bytes, which no client of ours writes).
+    /// The message as raw text (lossy for non-UTF-8 bytes). For DISPLAY use [`Memo::display_text`].
     pub fn text(&self) -> String {
         String::from_utf8_lossy(self.as_bytes()).into_owned()
     }
@@ -153,6 +184,14 @@ impl Memo {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+}
+
+/// `flux_memo` refusals in this module's error type (a too-long memo keeps its old variant).
+fn memo_error(e: flux_memo::MemoError) -> CipherError {
+    match e {
+        flux_memo::MemoError::TooLong { got, limit } => CipherError::MemoTooLong { got, limit },
+        other => CipherError::MemoRefused(other.to_string()),
     }
 }
 
@@ -180,9 +219,15 @@ impl NotePlaintext {
         Self { value, blinding, memo: Memo::empty() }
     }
 
-    /// Attach a memo. Errors past [`MEMO_LEN`] bytes.
+    /// Attach a memo. Errors past [`MEMO_LEN`] bytes or on a misleading character.
     pub fn with_memo(mut self, text: &str) -> Result<Self, CipherError> {
         self.memo = Memo::from_text(text)?;
+        Ok(self)
+    }
+
+    /// Attach a typed memo (e.g. `flux_memo::Memo::data(flux_memo::kind::DIGEST32, &digest)`).
+    pub fn with_typed_memo(mut self, memo: &flux_memo::Memo) -> Result<Self, CipherError> {
+        self.memo = Memo::from_memo(memo)?;
         Ok(self)
     }
 
@@ -257,6 +302,11 @@ impl NotePlaintextV7 {
     }
     pub fn with_memo(mut self, text: &str) -> Result<Self, CipherError> {
         self.memo = Memo::from_text(text)?;
+        Ok(self)
+    }
+    /// Attach a typed memo (text, application data, …) — see `flux_memo`.
+    pub fn with_typed_memo(mut self, memo: &flux_memo::Memo) -> Result<Self, CipherError> {
+        self.memo = Memo::from_memo(memo)?;
         Ok(self)
     }
     fn encode(&self) -> Vec<u8> {
@@ -796,5 +846,78 @@ mod v7_view_tag_tests {
         let tagged = seal_note_v7(&NotePlaintextV7::new(5, blinding()), &bob.public_hex()).unwrap().0;
         let two_byte_tag = tagged.replacen("\"vt\":\"", "\"vt\":\"00", 1);
         assert!(!is_tagged_envelope(&two_byte_tag), "a tag must be exactly one byte");
+    }
+}
+
+/// 2026-11-17 (lane sigil-s19-1117): the memo, as `flux_memo` defines it, on the real sealing path.
+#[cfg(test)]
+mod flux_memo_tests {
+    use super::*;
+
+    fn blinding7() -> crate::note_v7::Digest4 {
+        let mut w = [0u8; 32];
+        w[0] = 3;
+        w[8] = 5;
+        w[16] = 7;
+        w[24] = 11;
+        crate::note_v7::Digest4::from_wire(&w).expect("canonical limbs")
+    }
+
+    /// The wire did not change: a text memo seals exactly the bytes it did before flux-memo
+    /// (`len ‖ UTF-8 ‖ zero padding`), so phones and sigil-top builds already in use read new
+    /// memos, and new wallets read every memo already on the chain.
+    #[test]
+    fn a_text_memo_seals_the_same_bytes_as_before() {
+        let s = "for the coffee ☕";
+        let enc = NotePlaintext::new(5, BaseElement::new(9)).with_memo(s).unwrap().encode();
+        assert_eq!(&enc[24..26], &(s.len() as u16).to_le_bytes());
+        assert_eq!(&enc[26..26 + s.len()], s.as_bytes());
+        assert!(enc[26 + s.len()..].iter().all(|&b| b == 0));
+    }
+
+    /// Every wallet writes memos through `with_memo` (sigil-top [W], the web wasm, the pipeline,
+    /// the MCP), so this one refusal covers all of them, on both note generations.
+    #[test]
+    fn honest_senders_cannot_seal_a_misleading_memo() {
+        for evil in ["refund \u{202E}cba", "a\u{1B}[2Jb", "pay\u{200B}me", "x\u{E0041}", "1 SIGIL\r1000 SIGIL"] {
+            assert!(
+                matches!(NotePlaintext::new(1, BaseElement::new(1)).with_memo(evil), Err(CipherError::MemoRefused(_))),
+                "v1 {evil:?}"
+            );
+            assert!(matches!(NotePlaintextV7::new(1, blinding7()).with_memo(evil), Err(CipherError::MemoRefused(_))), "v7 {evil:?}");
+        }
+        assert!(matches!(
+            NotePlaintext::new(1, BaseElement::new(1)).with_memo(&"y".repeat(MEMO_LEN + 1)),
+            Err(CipherError::MemoTooLong { .. })
+        ));
+        assert!(NotePlaintextV7::new(1, blinding7()).with_memo("tak for kaffen\nRocky ☕ 👨‍👩‍👧").is_ok());
+    }
+
+    /// Software that skipped the check can still seal anything (a payment is never refused on the
+    /// way IN); the recipient's wallet must show the trick, not perform it.
+    #[test]
+    fn a_misleading_memo_that_arrives_anyway_is_shown_spelled_out() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let mut pt = NotePlaintextV7::new(7, blinding7());
+        pt.memo = Memo::from_bytes("refund to qnk\u{202E}cba".as_bytes()).unwrap();
+        let got = try_open_note_v7(&seal_note_v7(&pt, &bob.public_hex()).unwrap(), &bob).unwrap();
+        assert_eq!(got.memo.text(), "refund to qnk\u{202E}cba", "raw bytes kept exactly");
+        assert_eq!(got.memo.display_text(), "refund to qnk⟦U+202E⟧cba");
+        assert_eq!(got.memo.kind().hazards().len(), 1);
+    }
+
+    /// A typed memo (here a 32-byte digest, what `flux_sigil_forge_anchor` puts in a memo as text
+    /// today) rides a v7 note, comes back typed, and costs nothing visible: same sealed size.
+    #[test]
+    fn a_data_memo_rides_a_v7_note_and_comes_back_typed() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let m = flux_memo::Memo::data(flux_memo::kind::DIGEST32, &[0xAB; 32]).unwrap();
+        let ct = seal_note_v7(&NotePlaintextV7::new(1, blinding7()).with_typed_memo(&m).unwrap(), &bob.public_hex()).unwrap();
+        let got = try_open_note_v7(&ct, &bob).unwrap();
+        assert_eq!(got.memo.kind(), m);
+        assert_eq!(got.memo.digest(), m.digest());
+        assert!(got.memo.display_text().starts_with("⟦data · kind 0x01 · 32 bytes · abab"));
+        let plain = seal_note_v7(&NotePlaintextV7::new(1, blinding7()), &bob.public_hex()).unwrap();
+        assert_eq!(ct.0.len(), plain.0.len(), "the memo's type and size leak nothing");
     }
 }

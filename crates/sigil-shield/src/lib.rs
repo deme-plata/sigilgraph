@@ -39,6 +39,10 @@ pub mod note_v7;
 /// Note ciphertexts — the side channel that makes RECEIVING a shielded payment
 /// possible. Safe only because notes are owner-bound; see the module docs.
 pub mod note_cipher;
+/// What a payment memo IS (2026-11-17): typed by its first byte, capped at 512 bytes, misleading
+/// characters refused on write and spelled out on display, a digest for receipts. Re-exported so
+/// every wallet (sigil-top, the MCP, wasm) names one definition: `sigil_shield::flux_memo::Memo`.
+pub use flux_memo;
 /// Viewing keys and selective disclosure: confidential by default, provable on demand —
 /// what regulated users actually need.
 pub mod viewing;

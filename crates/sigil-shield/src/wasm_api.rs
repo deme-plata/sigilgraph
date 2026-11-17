@@ -539,7 +539,7 @@ pub fn open_note_ciphertext(seed_hex: &str, ciphertext_json: &str) -> Result<Str
     Ok(serde_json::json!({
         "value": pt.value.to_string(),
         "blinding_hex": hex::encode(to_wire(pt.blinding)),
-        "memo": pt.memo.text(),
+        "memo": pt.memo.display_text(),
     })
     .to_string())
 }
@@ -614,7 +614,7 @@ pub fn open_note_ciphertext_v7(seed_hex: &str, ciphertext_json: &str) -> Result<
     Ok(serde_json::json!({
         "value": pt.value.to_string(),
         "blinding_hex": hex::encode(pt.blinding.to_wire()),
-        "memo": pt.memo.text(),
+        "memo": pt.memo.display_text(),
     })
     .to_string())
 }

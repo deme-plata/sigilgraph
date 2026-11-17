@@ -127,7 +127,7 @@ impl NoteStoreV7 {
                 if !self.seen_deliveries.insert(id) {
                     continue;
                 }
-                let memo = (!pt.memo.is_empty()).then(|| pt.memo.text());
+                let memo = (!pt.memo.is_empty()).then(|| pt.memo.display_text());
                 self.notes.push(OwnedNoteV7 { index: None, value: pt.value, blinding: pt.blinding.0, position: None, spent: false, memo });
                 found += 1;
             }

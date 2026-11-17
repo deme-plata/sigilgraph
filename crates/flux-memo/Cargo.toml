@@ -1,0 +1,9 @@
+[package]
+name = "flux-memo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-memo — one definition of a payment memo for SIGIL (and any Flux chain): typed by its first byte (Zcash ZIP-302 rule + Quillon's version byte), plain text byte-identical to the memos SIGIL wallets already seal, a hard 512-byte cap, honest senders cannot write direction-flipping / control / invisible characters, display makes any that arrive visible, and a BLAKE3 fingerprint for receipts. Pure: no I/O, no chain types, compiles for wasm."
+
+[dependencies]
+blake3 = { workspace = true }

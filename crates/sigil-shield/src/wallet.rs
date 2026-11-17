@@ -380,7 +380,7 @@ impl NoteStore {
                 if !self.seen_deliveries.insert(id) {
                     continue;
                 }
-                let memo = (!pt.memo.is_empty()).then(|| pt.memo.text());
+                let memo = (!pt.memo.is_empty()).then(|| pt.memo.display_text());
                 self.notes.push(OwnedNote {
                     index: None,
                     value: pt.value,

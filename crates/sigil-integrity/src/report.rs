@@ -61,11 +61,13 @@ pub struct Report {
     pub caveat: &'static str,
 }
 
-/// Live-roots mismatches at this many matched heights in a row, with no agreement between them, are a real
-/// disagreement (ROOTS-DIVERGED); fewer are read races, counted in `roots_races` only.
+/// Live-roots mismatches at this many matched states in a row (equal money supply — see ledger.rs), with no
+/// agreement between them, raise ROOTS-DIVERGED. Since 2026-11-11 a single one is already exact evidence; the
+/// count stays as a margin (a block without a reward would let two states share a supply). `roots_races` counts
+/// every mismatch.
 pub const ROOTS_PERSIST: usize = 3;
 
-pub const CAVEAT: &str = "Verdicts are drawn only at EQUAL height and only from BLOCK HASHES (exact; a hash commits to the header's state roots). Live roots from /v1/integrity are read racily against the height: a mismatch counts in `roots_races`, and only 3 matched heights in a row without an agreement between them count as a disagreement (ROOTS-DIVERGED) — never as a fork. A hash mismatch that persists across ≥3 distinct heights is a fork. `lag_blocks` is that node's applied height against the highest applied height seen; a follower syncing from genesis lags by design.";
+pub const CAVEAT: &str = "Verdicts are drawn only at EQUAL height and only from BLOCK HASHES (exact; a hash commits to the header's state roots). Live roots from /v1/integrity are compared at EQUAL MONEY SUPPLY, because a node reads its height and its state at different instants (often one block apart) while roots and supply are read together and the supply grows with every block. A mismatch at equal supply counts in `roots_races`; 3 such states in a row without an agreement between them count as a disagreement (ROOTS-DIVERGED) — never as a fork. A hash mismatch that persists across ≥3 distinct heights is a fork. `lag_blocks` is that node's applied height against the highest applied height seen; a follower syncing from genesis lags by design.";
 
 pub struct Tracker {
     pub nodes: BTreeMap<String, NodeStatus>,
@@ -111,7 +113,7 @@ impl Tracker {
                     if streak.len() >= ROOTS_PERSIST {
                         st.disagreements += 1;
                         st.last_disagree = Some(Disagreement { height, what: "roots".into(), against: against.clone(), ts_ms: now_ms() });
-                        diverged = Some(format!("live roots differ from {} at {} matched heights in a row (latest {height}) — not a read race", against.join(","), streak.len()));
+                        diverged = Some(format!("live roots differ from {} at {} states in a row with the same money supply (latest reported height {height}) — the same money, distributed differently", against.join(","), streak.len()));
                         streak.clear();
                     }
                 }

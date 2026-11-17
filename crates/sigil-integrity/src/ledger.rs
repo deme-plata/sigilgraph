@@ -6,9 +6,15 @@
 //! - `block`  — the block hash from `/v1/dagknight/recent` (every node; the last 200 blocks).
 //! - `roots`  — the four state roots + supply + shielded anchor from `/v1/integrity` at its applied height.
 //!
-//! A verdict is only ever drawn at EQUAL height. One mismatch is inconclusive (the caveat `/v1/integrity`
-//! itself prints: the applied height and the live roots can be a block apart under load); a mismatch that
-//! persists across several distinct heights is a fork.
+//! Block hashes are compared at EQUAL height (exact: a hash is tied to its height).
+//!
+//! Live roots are compared at EQUAL MONEY SUPPLY, not at equal reported height (2026-11-11). A node reads its
+//! height and its state at two different instants, so the pair is often one block apart — measured on g3: 128 of
+//! 321 reported heights showed two different states, on the block-maker itself as much as on followers. The roots
+//! and the supply, however, are read together from one state, and the supply grows with every block (the block
+//! reward), so it names the state exactly: 2,867 samples from three nodes, 321 supplies, each with exactly one
+//! state. Two nodes at the same supply with different roots hold the same amount of money distributed
+//! differently — a real disagreement, with no read race left to blame.
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -56,16 +62,28 @@ pub enum Verdict {
     Disagree { against: Vec<String> },
 }
 
+/// Two samples with the same money supply are compared only when their reported heights are this close: the
+/// height may lag or lead its state by a block or two, never by more. (Equal supply far apart in height is not
+/// the same state: a different chain, or a stretch of blocks without a reward.)
+pub const CLOCK_HEIGHT_SLACK: u64 = 2;
+
+/// The money supply as the state's clock; `None` when a node does not report one (then the height is all we have).
+fn supply_clock(r: &Roots) -> Option<u128> {
+    r.native_supply.trim().parse::<u128>().ok().filter(|s| *s > 0)
+}
+
 #[derive(Debug, Default)]
 pub struct Ledger {
     pub rows: BTreeMap<u64, HeightRow>,
+    /// what each node showed at a given money supply: node → (the height it reported, its roots)
+    pub states: BTreeMap<u128, HashMap<String, (u64, Roots)>>,
     /// how many heights to keep (the producer runs ~3 blk/s; 20k ≈ 2 h)
     pub retain: usize,
 }
 
 impl Ledger {
     pub fn new(retain: usize) -> Self {
-        Self { rows: BTreeMap::new(), retain }
+        Self { rows: BTreeMap::new(), states: BTreeMap::new(), retain }
     }
 
     fn row(&mut self, height: u64, now_ms: u64) -> &mut HeightRow {
@@ -131,10 +149,45 @@ impl Ledger {
         v
     }
 
-    /// The state roots `node` reports at its applied `height`. A repeat of what the node already said at this
-    /// height is not a new verdict (a lagging follower is polled many times at the same applied height).
-    /// `against` names the other node AND the fields that differ, e.g. `happysrv[wallet,native_supply]`.
+    /// The state roots `node` reports. Compared with what other nodes showed at the SAME MONEY SUPPLY (see the
+    /// module text); a repeat of what the node already said is not a new verdict. `against` names the other node
+    /// AND the fields that differ, e.g. `node7[wallet]`. A node that reports no supply is compared by height.
     pub fn record_roots(&mut self, node: &str, height: u64, roots: Roots, now_ms: u64) -> Verdict {
+        let Some(clock) = supply_clock(&roots) else {
+            return self.record_roots_by_height(node, height, roots, now_ms);
+        };
+        let row = self.states.entry(clock).or_default();
+        if row.get(node).is_some_and(|(_, r)| *r == roots) {
+            return Verdict::First;
+        }
+        let mut with = 0usize;
+        let mut against = Vec::new();
+        for (n, (h, r)) in row.iter() {
+            if n == node || h.abs_diff(height) > CLOCK_HEIGHT_SLACK {
+                continue;
+            }
+            if *r == roots {
+                with += 1;
+            } else {
+                against.push(format!("{n}[{}]", roots_diff(r, &roots).join(",")));
+            }
+        }
+        row.insert(node.to_string(), (height, roots));
+        while self.states.len() > self.retain.max(1) {
+            self.states.pop_first();
+        }
+        if !against.is_empty() {
+            Verdict::Disagree { against }
+        } else if with > 0 {
+            Verdict::Agree { with }
+        } else {
+            Verdict::First
+        }
+    }
+
+    /// The old rule, for a node that reports no supply: compare at equal reported height (racy; the tracker
+    /// only believes a mismatch that persists).
+    fn record_roots_by_height(&mut self, node: &str, height: u64, roots: Roots, now_ms: u64) -> Verdict {
         let row = self.row(height, now_ms);
         if row.roots.get(node) == Some(&roots) {
             return Verdict::First;
@@ -181,8 +234,48 @@ impl Ledger {
 mod tests {
     use super::*;
 
+    /// a node that reports no supply (compared by height, the old rule)
     fn roots(w: &str) -> Roots {
-        Roots { wallet: w.into(), contract: "0".into(), dex: "0".into(), event_log: "0".into(), native_supply: "1".into(), anchor: "a".into(), notes: 1, nullifiers: 0 }
+        Roots { wallet: w.into(), contract: "0".into(), dex: "0".into(), event_log: "0".into(), native_supply: "".into(), anchor: "a".into(), notes: 1, nullifiers: 0 }
+    }
+
+    /// the state after `blocks` blocks: its own supply, and the wallet root that state has (`w`)
+    fn state(blocks: u64, w: &str) -> Roots {
+        Roots { native_supply: (blocks * 104_000_000).to_string(), ..roots(w) }
+    }
+
+    #[test]
+    fn a_height_read_one_block_off_is_not_a_disagreement() {
+        // The measured g3 shape: both nodes hold identical chains, each reports its height a block early or late.
+        let mut l = Ledger::new(100);
+        assert_eq!(l.record_roots("epsilon", 100, state(100, "w100"), 1), Verdict::First);
+        // node7 says "height 100" while its state is already block 101's: the old rule called this a disagreement
+        assert_eq!(l.record_roots("node7", 100, state(101, "w101"), 2), Verdict::First);
+        // epsilon reaches that state and reports it under height 101, or still under 100 — same state either way
+        assert_eq!(l.record_roots("epsilon", 101, state(101, "w101"), 3), Verdict::Agree { with: 1 });
+        assert_eq!(l.record_roots("node8", 100, state(101, "w101"), 4), Verdict::Agree { with: 2 });
+    }
+
+    #[test]
+    fn the_same_supply_with_different_roots_is_a_real_disagreement() {
+        let mut l = Ledger::new(100);
+        l.record_roots("epsilon", 100, state(100, "w100"), 1);
+        let v = l.record_roots("node7", 101, state(100, "wXXX"), 2); // same money, distributed differently
+        assert_eq!(v, Verdict::Disagree { against: vec!["epsilon[wallet]".into()] });
+        // the same supply far apart in height is not the same state and is not compared
+        assert_eq!(l.record_roots("node8", 500, state(100, "wYYY"), 3), Verdict::First);
+        // a repeat is not a new verdict
+        assert_eq!(l.record_roots("node7", 101, state(100, "wXXX"), 4), Verdict::First);
+    }
+
+    #[test]
+    fn the_state_table_is_trimmed_oldest_first() {
+        let mut l = Ledger::new(3);
+        for b in 1..=5u64 {
+            l.record_roots("e", b, state(b, "w"), b);
+        }
+        assert_eq!(l.states.len(), 3);
+        assert_eq!(*l.states.keys().next().unwrap(), 3 * 104_000_000);
     }
 
     #[test]
@@ -196,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn roots_compare_only_at_equal_height() {
+    fn without_a_supply_roots_compare_at_equal_height() {
         let mut l = Ledger::new(100);
         assert_eq!(l.record_roots("epsilon", 5, roots("w1"), 1), Verdict::First);
         assert_eq!(l.record_roots("happysrv", 6, roots("w2"), 1), Verdict::First); // different height: no verdict

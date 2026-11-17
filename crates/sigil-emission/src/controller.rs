@@ -170,6 +170,26 @@ impl EmissionController {
             }
         }
     }
+    /// S18 (2026-11-14): feed the rate window from the node's SETTLED height — one sample per height settled since
+    /// the last call, whoever made the block — so `smoothed_rate()` is the chain's paying-block rate, not this maker's
+    /// own mint rate. `fed_to` is the caller's cursor (None = first call: start at `settled_height`, feed nothing).
+    /// A jump above 10,000 heights (a sync) moves the cursor without feeding; `tip_ts_secs` (the settled tip's header
+    /// time) lets `add_block`'s 120 s rule mark old blocks as not live. Pure; same on every node.
+    pub fn feed_settled_height(&mut self, fed_to: &mut Option<u64>, settled_height: u64, tip_ts_secs: u64, now_secs: u64) {
+        match *fed_to {
+            None => *fed_to = Some(settled_height),
+            Some(fed) if settled_height > fed => {
+                if settled_height - fed <= 10_000 {
+                    for h in (fed + 1)..=settled_height {
+                        self.add_block(h, tip_ts_secs, now_secs);
+                    }
+                }
+                *fed_to = Some(settled_height);
+            }
+            Some(_) => {}
+        }
+    }
+
     /// Measured live block rate (blocks/sec) over the window; clamped to a sane
     /// band so a cold window or a burst can't produce absurd rewards.
     pub fn smoothed_rate(&self) -> f64 {

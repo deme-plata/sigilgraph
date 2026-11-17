@@ -932,6 +932,9 @@ fn run_start() -> Result<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
         let mut emission = coinbase::load_controller(&snap_dir, emission_genesis_ts);
+        // S18 fix (2026-11-14, lane sigil-r3-rehearsal-1114): the settled height the reward controller's rate
+        // window has been fed up to. None until the first mint tick (then it starts at the current settled tip).
+        let mut rate_fed_height: Option<u64> = None;
         if emission.is_some() {
             eprintln!("💠 adaptive emission controller LIVE — time-based halving + PID rate control (watermark persisted)");
         }
@@ -2639,6 +2642,16 @@ fn run_start() -> Result<()> {
                     // computes the reward (time-based + PID + rate) and we bake the
                     // exact amount into the coinbase; else the pure height schedule.
                     let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    // S18 fix (2026-11-14): the controller's rate is the CHAIN's settled block rate — one sample per
+                    // height this node settled since the last tick, whoever made the block and whichever path applied
+                    // it — not this maker's own mint rate. Fed by its own mints (10.7.8), two makers each saw half the
+                    // rate and each paid ~2x per block (sim: 2.0x issuance for hours, 1.8x over a week). One rewarded
+                    // block per settled height, so this is exactly the paying-block rate. The tip's timestamp marks a
+                    // deep catch-up as not live (add_block's 120 s rule), so a sync does not spike the rate.
+                    if let Some(c) = emission.as_mut() {
+                        let tip_ts = chain.tip_block().map(|b| b.header.timestamp_ms / 1000).unwrap_or(now_secs);
+                        c.feed_settled_height(&mut rate_fed_height, chain.height(), tip_ts, now_secs);
+                    }
                     // 2026-10-24 roadmap 4b: under SIGIL_EMISSION_CHAINWIDE the reward servos on the chain's
                     // committed supply (not this controller's local tally), so several block-makers don't over-issue.
                     let chainwide_emission = std::env::var("SIGIL_EMISSION_CHAINWIDE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
@@ -2647,9 +2660,8 @@ fn run_start() -> Result<()> {
                             // servo on the CAP-GOVERNED total (public + shielded value_locked), so a deposit moving
                             // value into the pool is not re-minted (sigil-field, 2026-10-24).
                             let cap_supply = mint_ref.state().cap_supply();
-                            let r = c.chainwide_reward(now_secs, cap_supply, c.smoothed_rate());
-                            c.record_emission(r); // keep the local tally tracking for the status line
-                            r
+                            // S18: no record_emission here — the settle path below books it once (it was twice).
+                            c.chainwide_reward(now_secs, cap_supply, c.smoothed_rate())
                         } else {
                             let supply = mint_ref.state().native_supply(); // borrow — was a full state clone per tick
                             c.calculate_block_reward(now_secs, supply)
@@ -2899,7 +2911,8 @@ fn run_start() -> Result<()> {
                                     // drain — this only feeds THIS node's future reward math).
                                     if let (Some(c), Some(r)) = (emission.as_mut(), reward_override) {
                                         c.record_emission(r);
-                                        c.add_block(h, now_secs, now_secs);
+                                        // S18: the rate window is fed from the settled height at each tick (above),
+                                        // not from this maker's own mints.
                                         if h % 32 == 0 { coinbase::save_controller(&snap_dir, c); }
                                     }
                                     produced += 1;

@@ -119,6 +119,48 @@ impl PeerProducerAffinity {
         }
         connected.first().copied()
     }
+
+    /// 2026-11-15 (S20 on r3): which peer a by-hash ask for missing DAG parents goes to. Every ask used
+    /// `best_for`, so every RETRY went to the same peer: a follower asked the one peer that relays a
+    /// producer's strand, that peer did not hold the blocks ("peer holds none of them", 33 times on node C),
+    /// and the node that did was never asked; asks without a producer always went to the FIRST peer.
+    /// Even asks keep the affinity choice; odd asks walk through every connected peer in turn, so within
+    /// 2 × peers asks everyone has been asked once. `ask` is a running counter kept by the caller.
+    pub(crate) fn for_parent_fetch(&self, connected: &[flux_p2p::PeerId], producer: Option<[u8; 32]>, ask: u64) -> Option<flux_p2p::PeerId> {
+        if connected.is_empty() {
+            return None;
+        }
+        if ask % 2 == 0 {
+            return self.best_for(connected, producer);
+        }
+        Some(connected[((ask / 2) as usize) % connected.len()])
+    }
+}
+
+#[cfg(test)]
+mod parent_fetch_rotation_tests {
+    use super::PeerProducerAffinity;
+    use flux_p2p::PeerId;
+
+    #[test]
+    fn retries_reach_every_connected_peer_not_only_the_affinity_choice() {
+        let (a, b, c) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let prod = [7u8; 32];
+        let mut aff = PeerProducerAffinity::default();
+        aff.record(b, prod, 10); // b relays the producer: the affinity choice
+        let peers = [a, b, c];
+        let asked: Vec<PeerId> = (0..6).map(|n| aff.for_parent_fetch(&peers, Some(prod), n).unwrap()).collect();
+        for n in (0..6).step_by(2) {
+            assert_eq!(asked[n], b, "even asks keep the affinity choice");
+        }
+        for p in [a, b, c] {
+            assert!(asked.contains(&p), "within 2 × peers asks every connected peer is asked");
+        }
+        // the old behaviour for asks WITHOUT a producer: always the first peer — now it rotates too
+        let none: std::collections::HashSet<PeerId> = (0..6).map(|n| aff.for_parent_fetch(&peers, None, n).unwrap()).collect();
+        assert_eq!(none.len(), 3);
+        assert_eq!(aff.for_parent_fetch(&[], Some(prod), 3), None);
+    }
 }
 
 #[cfg(test)]

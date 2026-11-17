@@ -353,6 +353,9 @@ fn spine_vote(
     finality.on_spine_vote(t, target, order, finality_wire::now_ms())
 }
 
+/// Running count of by-hash parent asks, so retries rotate peers (`PeerProducerAffinity::for_parent_fetch`).
+static PARENT_ASKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 2026-10-07 (roadmap step 1): ask `peer` for DAG parents BY HASH (see
 /// `parent_fetch`). Off the select loop; the answer lands on `tx` and is inserted
 /// into the braid there. Failures are reported, sampled, never silent.
@@ -2499,7 +2502,7 @@ fn run_start() -> Result<()> {
                             let want = parents_in_flight.take_new(&[g], std::time::Instant::now());
                             if !want.is_empty() {
                                 let connected = mgr.connected_peers();
-                                if let Some(peer) = peer_affinity.best_for(&connected, None) {
+                                if let Some(peer) = peer_affinity.for_parent_fetch(&connected, None, PARENT_ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
                                     spawn_parent_fetch(&mgr, peer, &want, &sync_hs, &bh_tx);
                                 }
                             }
@@ -4194,7 +4197,7 @@ fn run_start() -> Result<()> {
                                             let want = parents_in_flight.take_new(&missing, std::time::Instant::now());
                                             if !want.is_empty() {
                                                 let connected = mgr.connected_peers();
-                                                if let Some(peer) = peer_affinity.best_for(&connected, Some(block_producer)) {
+                                                if let Some(peer) = peer_affinity.for_parent_fetch(&connected, Some(block_producer), PARENT_ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
                                                     spawn_parent_fetch(&mgr, peer, &want, &sync_hs, &bh_tx);
                                                 }
                                             }
@@ -4926,7 +4929,7 @@ fn run_start() -> Result<()> {
                         let want = parents_in_flight.take_new(&still_missing, std::time::Instant::now());
                         if !want.is_empty() {
                             let connected = mgr.connected_peers();
-                            if let Some(peer) = peer_affinity.best_for(&connected, producer_hint) {
+                            if let Some(peer) = peer_affinity.for_parent_fetch(&connected, producer_hint, PARENT_ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
                                 spawn_parent_fetch(&mgr, peer, &want, &sync_hs, &bh_tx);
                             }
                         }

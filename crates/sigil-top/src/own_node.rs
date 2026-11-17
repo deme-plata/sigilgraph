@@ -1259,7 +1259,7 @@ pub fn start_for_screen() -> Option<NodeHost> {
                     let floor = crate::disk_guard::start_floor(std::env::var(crate::disk_guard::ENV).ok().as_deref())
                         .unwrap_or(crate::disk_guard::DEFAULT_START_FLOOR);
                     status::set_message(match crate::disk_guard::free_bytes(&plan2.data_dir) {
-                        Some(free) => crate::disk_guard::refusal(free, floor, &plan2.data_dir),
+                        Some(free) => crate::disk_guard::refusal_short(free, floor), // one line on the card: the long text was cut before the way out
                         None => "the node stopped: the disk that holds its data is nearly full".to_string(),
                     });
                     failures = 0;

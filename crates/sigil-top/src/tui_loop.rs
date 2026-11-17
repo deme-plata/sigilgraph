@@ -97,7 +97,12 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
     }
     // 10.6.0: with your own node running the screen never downloads a second copy of the chain.
     if std::env::var("SIGIL_AUTOFULLSYNC").is_ok() && app.p2p_sync.is_none() && !own_node_on() {
-        if let Some(store) = app.take_idle_store() {
+        // disk guard, part 2: never start holding the whole chain on a nearly full disk
+        if let Some(why) = crate::disk_guard::full_sync_blocked(&sigil_top_db_path()) {
+            boot_trace(&format!("AUTOFULLSYNC refused: {why}"));
+            app.toast = why;
+            app.toast_sticky = true;
+        } else if let Some(store) = app.take_idle_store() {
             let p2p = block_sync::P2PBlockSync::launch(store, false);
             app.p2p_sync = Some(p2p);
             app.full_sync = true;
@@ -259,11 +264,26 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
         std::env::var("SIGIL_SPINE_SYNC").ok().as_deref(),
         std::env::args().any(|a| a == "--no-sync") || std::env::var("SIGIL_TOP_NO_SYNC").is_ok(),
     );
-    if spine_opt_in || autostart_full || autofullsync {
+    // Disk guard, part 2 (the light engine's store): measured on the disk that really holds the store, now and every
+    // 20 s. Low → the engine does not hold the whole chain (light monitor instead). Critical → no engine at all.
+    let disk_first = crate::disk_guard::watch_store(&db_path);
+    let disk_low = matches!(disk_first, crate::disk_guard::Verdict::Low | crate::disk_guard::Verdict::Critical);
+    let disk_critical = disk_first == crate::disk_guard::Verdict::Critical;
+    // Say it only when it changes something: the whole chain was asked for (low), or no engine starts at all (critical).
+    let wanted_whole_chain = autostart_full
+        || autofullsync
+        || !std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true);
+    if disk_critical || (disk_low && wanted_whole_chain) {
+        app.toast = crate::disk_guard::store_message(disk_critical);
+        app.toast_sticky = true;
+        boot_trace(&format!("disk guard (light store): {}", app.toast));
+    }
+    if (spine_opt_in || autostart_full || autofullsync) && !disk_critical {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
         // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
-        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
-            && !autostart_full && !autofullsync;
+        let recent_only = (std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
+            && !autostart_full && !autofullsync)
+            || disk_low;
         let p2p = block_sync::P2PBlockSync::launch_deferred(store_rx, recent_only);
         sync_handle = Some(p2p.state_handle());
         if !recent_only { app.full_sync = true; }
@@ -586,6 +606,13 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // never reached the engine). Engine running → LIVE-FLIP it between
                                 // full-archive and light-monitor through the engine atomics.
                                 // Light-monitor's 10ms tip-verify stays the untouched startup default.
+                                // Disk guard, part 2: [F] never starts (or flips to) the whole chain on a nearly full disk.
+                                if let Some(why) = crate::disk_guard::full_sync_blocked(&sigil_top_db_path())
+                                    .filter(|_| app.p2p_sync.as_ref().is_none_or(|p| p.is_recent_only()))
+                                {
+                                    app.toast = why;
+                                    app.toast_sticky = true;
+                                } else
                                 if app.p2p_sync.is_none() {
                                     // BUG FIX (Viktor report, "sync doesnt work", v7.1.17):
                                     // take_idle_store() ALREADY sets an accurate toast on
@@ -802,6 +829,28 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.10.5.1: adaptive cadence — fast when online, gentle backoff when offline.
             if !app.refresh_inflight && app.last_fetch.elapsed() >= app.refresh_delay() {
                 app.request_refresh();
+            }
+            // Disk guard, part 2: carry out what the store's disk says (one atomic read per loop).
+            match crate::disk_guard::store_action(
+                crate::disk_guard::store_state(),
+                app.p2p_sync.is_some(),
+                app.p2p_sync.as_ref().is_some_and(|p| !p.is_recent_only()),
+            ) {
+                crate::disk_guard::StoreAction::Stop => {
+                    app.p2p_sync = None; // dropping the engine stops it; the store closes with it
+                    app.full_sync = false;
+                    app.toast = crate::disk_guard::store_message(true);
+                    app.toast_sticky = true;
+                    boot_trace(&format!("disk guard (light store): {}", app.toast));
+                }
+                crate::disk_guard::StoreAction::ToLight => {
+                    if let Some(ref p2p) = app.p2p_sync { p2p.set_light_monitor(); }
+                    app.full_sync = false; // the saved choice stays "full": it resumes once there is room
+                    app.toast = crate::disk_guard::store_message(false);
+                    app.toast_sticky = true;
+                    boot_trace(&format!("disk guard (light store): {}", app.toast));
+                }
+                crate::disk_guard::StoreAction::Nothing => {}
             }
             // v0.13: keep the Swarm AI / Results board live (2s) while it's on screen.
             // v7.0.13: Swarm AI / Results tabs removed — no periodic swarm reload needed.

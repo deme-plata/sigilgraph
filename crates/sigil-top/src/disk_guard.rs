@@ -21,6 +21,9 @@ pub(crate) const DEFAULT_START_FLOOR: u64 = 4 * GIB;
 /// Below this a running node stops. Enough room left for its own shutdown snapshot and for the rest of the machine.
 pub(crate) const STOP_FLOOR: u64 = GIB;
 pub(crate) const ENV: &str = "SIGIL_MIN_FREE_GB";
+/// Exit code of anything that refuses or stops for a nearly full disk (the node's `EXIT_DISK_LOW`; kept here too
+/// because the node module is absent from builds without the node).
+pub(crate) const EXIT_CODE: i32 = 77;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -71,6 +74,16 @@ pub(crate) fn refusal(free: u64, floor: u64, dir: &Path) -> String {
          and start again. ({ENV}=<GB> changes the limit, 0 turns it off.)",
         gb(free),
         dir.display(),
+        gb(floor),
+    )
+}
+
+/// The same refusal for the screen's node card, which shows ONE line: the number and the way out come first and it
+/// fits in ~100 columns (driven in a real terminal 2026-11-11: the long text was cut before "SIGIL_TOP_DB").
+pub(crate) fn refusal_short(free: u64, floor: u64) -> String {
+    format!(
+        "disk nearly full: {:.2} GB free, needs {:.2} — free space or set SIGIL_TOP_DB=<big disk>/sigil-top-blocks.db",
+        gb(free),
         gb(floor),
     )
 }
@@ -133,6 +146,137 @@ pub(crate) fn watch(dir: std::path::PathBuf, user_mode: bool, on_critical: impl 
             }
         }
     });
+}
+
+// ── Part 2: the light engine's block store ──────────────────────────────────────────────────────────────────────
+//
+// When no own node runs, the screen's light engine writes `sigil-top-blocks.db`. In light-monitor mode it keeps a
+// recent window; asked to hold the whole chain it grows by gigabytes (measured: 7.4 → 11 GB swings on the 40 GB
+// system disk, 2026-09-15). The same two floors apply to the disk that REALLY holds that store:
+//   * under the start floor the engine does not hold the whole chain (it stays, or falls back to, light monitor);
+//   * under the stop floor the engine stops downloading altogether.
+// The light engine is always a user's (no operator runs a block-maker on it), so only `SIGIL_MIN_FREE_GB=0` turns
+// this off.
+
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+
+static STORE_STATE: AtomicU8 = AtomicU8::new(0); // 0 = room / not judged, 1 = low, 2 = critical
+static STORE_FREE: AtomicU64 = AtomicU64::new(u64::MAX);
+static STORE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Where the light engine's store really lives: a link is followed, also one whose target does not exist yet
+/// (measuring the link's own folder would read the wrong disk).
+pub(crate) fn store_location(db_path: &str) -> std::path::PathBuf {
+    let p = Path::new(db_path);
+    if let Ok(real) = std::fs::canonicalize(p) {
+        return real;
+    }
+    match std::fs::read_link(p) {
+        Ok(target) if target.is_absolute() => target,
+        Ok(target) => p.parent().map(|d| d.join(&target)).unwrap_or(target),
+        Err(_) => p.to_path_buf(),
+    }
+}
+
+/// What the screen does about its light engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreAction {
+    Nothing,
+    /// Stop holding the whole chain; keep following the tip.
+    ToLight,
+    /// Stop the engine: nothing more is downloaded.
+    Stop,
+}
+
+pub(crate) fn store_action(v: Verdict, engine_running: bool, holding_whole_chain: bool) -> StoreAction {
+    match v {
+        Verdict::Critical if engine_running => StoreAction::Stop,
+        Verdict::Low if engine_running && holding_whole_chain => StoreAction::ToLight,
+        _ => StoreAction::Nothing,
+    }
+}
+
+/// One line for the screen: why the whole chain is not being held.
+pub(crate) fn full_sync_refusal(free: u64, floor: u64, at: &Path) -> String {
+    format!(
+        "⚠ not holding the whole chain: {:.2} GB free on the disk of {} (needs {:.2} GB). Free space, or set \
+         SIGIL_TOP_DB=<big disk>/sigil-top-blocks.db and start again. ({ENV}=0 turns this check off.)",
+        gb(free),
+        at.display(),
+        gb(floor),
+    )
+}
+
+/// One line for the screen: the engine stopped downloading.
+pub(crate) fn store_stop_notice(free: u64, at: &Path) -> String {
+    format!(
+        "🛑 block download stopped: only {:.2} GB free on the disk of {} — nothing more is written. Free space (or \
+         move the store: SIGIL_TOP_DB) and start sigil-top again.",
+        gb(free),
+        at.display(),
+    )
+}
+
+fn measure_store(at: &Path, floor: Option<u64>) -> Verdict {
+    let free = free_bytes(at);
+    let v = judge(free, floor);
+    STORE_FREE.store(free.unwrap_or(u64::MAX), Ordering::Relaxed);
+    STORE_STATE.store(
+        match v {
+            Verdict::Low => 1,
+            Verdict::Critical => 2,
+            _ => 0,
+        },
+        Ordering::Relaxed,
+    );
+    v
+}
+
+/// Measure the store's disk now and keep measuring every 20 s. Returns the first verdict.
+pub(crate) fn watch_store(db_path: &str) -> Verdict {
+    let floor = start_floor(std::env::var(ENV).ok().as_deref());
+    if floor.is_none() {
+        return Verdict::NotJudged;
+    }
+    let at = STORE_DIR.get_or_init(|| store_location(db_path)).clone();
+    let first = measure_store(&at, floor);
+    let _ = std::thread::Builder::new().name("light-store-disk-guard".into()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        measure_store(&at, floor);
+    });
+    first
+}
+
+/// The newest verdict of `watch_store` (no system call; safe to read every frame).
+pub(crate) fn store_state() -> Verdict {
+    match STORE_STATE.load(Ordering::Relaxed) {
+        1 => Verdict::Low,
+        2 => Verdict::Critical,
+        _ => Verdict::Room,
+    }
+}
+
+/// The message for the newest verdict: `stopped` picks the stop notice, otherwise the refusal.
+pub(crate) fn store_message(stopped: bool) -> String {
+    let free = STORE_FREE.load(Ordering::Relaxed);
+    let at = STORE_DIR.get().cloned().unwrap_or_default();
+    if stopped {
+        store_stop_notice(free, &at)
+    } else {
+        let floor = start_floor(std::env::var(ENV).ok().as_deref()).unwrap_or(DEFAULT_START_FLOOR);
+        full_sync_refusal(free, floor, &at)
+    }
+}
+
+/// `Some(message)` = the light engine must not START holding the whole chain now (measured on the spot).
+pub(crate) fn full_sync_blocked(db_path: &str) -> Option<String> {
+    let floor = start_floor(std::env::var(ENV).ok().as_deref());
+    let at = store_location(db_path);
+    let free = free_bytes(&at);
+    match (judge(free, floor), free, floor) {
+        (Verdict::Low | Verdict::Critical, Some(free), Some(floor)) => Some(full_sync_refusal(free, floor, &at)),
+        _ => None,
+    }
 }
 
 /// Free bytes on the filesystem holding `path` (or its nearest existing ancestor), as an unprivileged program may
@@ -217,6 +361,64 @@ mod tests {
         assert!(m.contains("needs 4.00 GB"), "{m}");
         assert!(m.contains("SIGIL_TOP_DB="), "{m}");
         assert!(m.contains("SIGIL_MIN_FREE_GB"), "{m}");
+    }
+
+    #[cfg(feature = "producer")]
+    #[test]
+    fn the_exit_code_is_the_nodes() {
+        assert_eq!(EXIT_CODE, crate::own_node::EXIT_DISK_LOW as i32);
+    }
+
+    #[test]
+    fn the_light_engine_falls_back_when_low_and_stops_when_critical() {
+        use StoreAction::*;
+        // room, or no engine: nothing to do
+        assert_eq!(store_action(Verdict::Room, true, true), Nothing);
+        assert_eq!(store_action(Verdict::NotJudged, true, true), Nothing);
+        assert_eq!(store_action(Verdict::Low, false, false), Nothing);
+        assert_eq!(store_action(Verdict::Critical, false, false), Nothing);
+        // low: only an engine that holds the whole chain changes (the light monitor keeps following the tip)
+        assert_eq!(store_action(Verdict::Low, true, true), ToLight);
+        assert_eq!(store_action(Verdict::Low, true, false), Nothing);
+        // critical: any running engine stops
+        assert_eq!(store_action(Verdict::Critical, true, true), Stop);
+        assert_eq!(store_action(Verdict::Critical, true, false), Stop);
+    }
+
+    #[test]
+    fn the_cards_one_line_keeps_the_number_and_the_way_out_within_reach() {
+        let m = refusal_short(3 * GIB / 2, DEFAULT_START_FLOOR);
+        assert!(m.contains("1.50 GB free") && m.contains("needs 4.00") && m.contains("SIGIL_TOP_DB="), "{m}");
+        assert!(m.chars().count() <= 110, "{} chars: {m}", m.chars().count());
+    }
+
+    #[test]
+    fn the_store_messages_name_the_number_the_place_and_the_way_out() {
+        let at = Path::new("/root/sigil-top-blocks.db");
+        let m = full_sync_refusal(3 * GIB / 2, DEFAULT_START_FLOOR, at);
+        assert!(m.contains("1.50 GB free") && m.contains("needs 4.00 GB"), "{m}");
+        assert!(m.contains("/root/sigil-top-blocks.db") && m.contains("SIGIL_TOP_DB=") && m.contains("SIGIL_MIN_FREE_GB=0"), "{m}");
+        let s = store_stop_notice(GIB / 2, at);
+        assert!(s.contains("0.50 GB free") && s.contains("stopped") && s.contains("SIGIL_TOP_DB"), "{s}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_store_is_measured_where_a_link_points_even_before_the_target_exists() {
+        let dir = std::env::temp_dir().join(format!("sigil-disk-guard-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("big")).unwrap();
+        let link = dir.join("sigil-top-blocks.db");
+        // a link to a store that does not exist yet
+        std::os::unix::fs::symlink(dir.join("big").join("blocks.db"), &link).unwrap();
+        assert_eq!(store_location(link.to_str().unwrap()), dir.join("big").join("blocks.db"));
+        // once it exists, the real path is returned
+        std::fs::create_dir_all(dir.join("big").join("blocks.db")).unwrap();
+        let real = store_location(link.to_str().unwrap());
+        assert!(real.ends_with("big/blocks.db"), "{}", real.display());
+        // no link at all: the path itself
+        assert_eq!(store_location("/no/such/place/x.db"), Path::new("/no/such/place/x.db"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

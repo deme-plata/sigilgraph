@@ -450,6 +450,16 @@ pub(crate) fn dispatch(argv: &[String]) -> bool {
             let timeout_s: u64 = argv.iter().position(|a| a == "--timeout")
                 .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1800);
             let path = sigil_top_db_path();
+            // Disk guard, part 2: a whole-chain download does not start on a nearly full disk — refused before the store
+            // is opened, so nothing is written (same exit code as the node). The recent-window monitor is not affected.
+            let wants_whole_chain = !(argv.iter().any(|a| a == "--recent")
+                || std::env::var("SIGIL_SYNC_RECENT").map(|v| v == "1" || v == "true").unwrap_or(false));
+            if wants_whole_chain {
+                if let Some(why) = crate::disk_guard::full_sync_blocked(&path) {
+                    eprintln!("{RED}{why}{RESET}");
+                    std::process::exit(crate::disk_guard::EXIT_CODE);
+                }
+            }
             let store = match block_store::BlockStore::open_blocking(&path) {
                 Ok(s) => s,
                 Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }

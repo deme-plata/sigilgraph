@@ -744,6 +744,45 @@ fn deposit_opening(account: &ShieldedAccount, index: u64, value: u64) -> Result<
     /// (`OUT_INDEX_BASE = 2^31`), so they cannot collide with the sequential counter
     /// `mine-shield` allocates from either. Nothing on this path needs the fix applied
     /// above; it is already position-derived rather than counter-derived.
+    /// 10.7.9: the memo check, run before any proof is built. `Err` is the sentence the sender reads. A refused memo
+    /// used to cost a whole proof and then read "could not seal the note to the recipient" on the v7 path (every g3
+    /// payment), which named the wrong problem.
+    pub(crate) fn memo_precheck(memo: &str) -> Result<(), String> {
+        use sigil_shield::note_cipher::{CipherError, Memo};
+        match Memo::from_text(memo) {
+            Ok(_) => Ok(()),
+            Err(CipherError::MemoRefused(why)) => Err(format!("memo rejected, nothing was sent: {why}")),
+            Err(e) => Err(format!("memo rejected, nothing was sent: {e}")),
+        }
+    }
+
+    #[cfg(test)]
+    mod memo_precheck_tests {
+        use super::memo_precheck;
+
+        #[test]
+        fn ordinary_memos_pass_including_newlines_and_emoji() {
+            for ok in ["", "thanks for lunch", "line one\nline two\ttab", "Ølbrød 🍺 — tak!"] {
+                assert_eq!(memo_precheck(ok), Ok(()), "{ok:?}");
+            }
+        }
+
+        #[test]
+        fn a_refused_memo_names_the_character_the_reason_and_that_nothing_was_sent() {
+            let e = memo_precheck("invoice \u{202E}fdp.exe").unwrap_err();
+            assert!(e.contains("nothing was sent") && e.contains("U+202E") && e.contains("text-direction override"), "{e}");
+            let e = memo_precheck("hi\u{E0041}").unwrap_err();
+            assert!(e.contains("U+E0041") && e.contains("tag character"), "{e}");
+            assert!(!e.contains("refused: memo"), "no doubled prefix: {e}");
+        }
+
+        #[test]
+        fn a_memo_over_the_limit_says_both_numbers() {
+            let e = memo_precheck(&"x".repeat(600)).unwrap_err();
+            assert!(e.contains("600") && e.contains("512") && e.contains("nothing was sent"), "{e}");
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn handle_mine_send_private(body: &str) -> (&'static str, String) {
         #[derive(serde::Deserialize)]
@@ -780,6 +819,10 @@ fn deposit_opening(account: &ShieldedAccount, index: u64, value: u64) -> Result<
                 )
             }
         };
+        // 10.7.9: judge the memo before anything is built (see memo_precheck).
+        if let Err(why) = memo_precheck(&req.memo) {
+            return bad_request(why);
+        }
         let Some(recipient_pk_bytes) = hex_decode32(&req.recipient_pk_shield) else {
             return bad_request("recipient_pk_shield must be 64 hex chars".into());
         };

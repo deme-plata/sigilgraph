@@ -938,6 +938,12 @@ fn run_start() -> Result<()> {
         // S18 fix (2026-11-14, lane sigil-r3-rehearsal-1114): the settled height the reward controller's rate
         // window has been fed up to. None until the first mint tick (then it starts at the current settled tip).
         let mut rate_fed_height: Option<u64> = None;
+        // S19 merge (2026-11-17): the settled-height rate feed is a change to what a block-maker emits, so it rides
+        // the switch that already means "size the reward from the whole chain, not from this maker":
+        // SIGIL_EMISSION_CHAINWIDE=1. Off (the live g3 maker today) = the 10.7.8 behaviour, byte for byte: the rate
+        // window is fed by this maker's own mints at settle time. On = fed from the settled height (r3 S19, 43.5 h
+        // with two makers: issuance 1.002x of the schedule, every 4 h window 0.984x–1.028x). Read once at boot.
+        let rate_from_settled = std::env::var("SIGIL_EMISSION_CHAINWIDE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         if emission.is_some() {
             eprintln!("💠 adaptive emission controller LIVE — time-based halving + PID rate control (watermark persisted)");
         }
@@ -2651,7 +2657,7 @@ fn run_start() -> Result<()> {
                     // rate and each paid ~2x per block (sim: 2.0x issuance for hours, 1.8x over a week). One rewarded
                     // block per settled height, so this is exactly the paying-block rate. The tip's timestamp marks a
                     // deep catch-up as not live (add_block's 120 s rule), so a sync does not spike the rate.
-                    if let Some(c) = emission.as_mut() {
+                    if let (true, Some(c)) = (rate_from_settled, emission.as_mut()) {
                         let tip_ts = chain.tip_block().map(|b| b.header.timestamp_ms / 1000).unwrap_or(now_secs);
                         c.feed_settled_height(&mut rate_fed_height, chain.height(), tip_ts, now_secs);
                     }
@@ -2914,8 +2920,10 @@ fn run_start() -> Result<()> {
                                     // drain — this only feeds THIS node's future reward math).
                                     if let (Some(c), Some(r)) = (emission.as_mut(), reward_override) {
                                         c.record_emission(r);
-                                        // S18: the rate window is fed from the settled height at each tick (above),
-                                        // not from this maker's own mints.
+                                        // S18/S19: under SIGIL_EMISSION_CHAINWIDE the rate window is fed from the
+                                        // settled height at each tick (above); otherwise from this maker's own mints,
+                                        // as before (one maker: the same blocks).
+                                        if !rate_from_settled { c.add_block(h, now_secs, now_secs); }
                                         if h % 32 == 0 { coinbase::save_controller(&snap_dir, c); }
                                     }
                                     produced += 1;

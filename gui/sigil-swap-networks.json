@@ -1,0 +1,107 @@
+{
+  "schema": "sigil-swap-networks/1",
+  "updated": "2026-11-19",
+  "note": "The ONE place the swap page learns which pair to trade. The page re-checks every address on chain in the visitor's browser before it allows a signature (router -> factory -> getPair -> token0/token1 -> decimals). A wrong or missing address shows 'not ready', never a made-up price. Pool opened 2026-11-19 by lane rocky-wsigil-polygon-1119 (bus #393): addLiquidity tx 0x233c25e1…9989, block 97,576,428.",
+  "default": "polygon",
+  "networks": [
+    {
+      "key": "polygon",
+      "label": "Polygon PoS",
+      "short": "Polygon PoS",
+      "testnet": false,
+      "chain": {
+        "chainId": "0x89",
+        "chainName": "Polygon Mainnet",
+        "nativeCurrency": {
+          "name": "POL",
+          "symbol": "POL",
+          "decimals": 18
+        },
+        "rpcUrls": [
+          "https://polygon.drpc.org",
+          "https://1rpc.io/matic"
+        ],
+        "blockExplorerUrls": [
+          "https://polygonscan.com"
+        ]
+      },
+      "readRpcs": [
+        "https://polygon.drpc.org",
+        "https://1rpc.io/matic",
+        "https://polygon.gateway.tenderly.co"
+      ],
+      "explorer": "https://polygonscan.com",
+      "dex": {
+        "name": "Uniswap V2",
+        "router": "0xedf6066a2b290C185783862C7F4776A2C8077AD1",
+        "factory": "0x9e5A52f57b3038F1B8EeE45F28b3C1967e22799C"
+      },
+      "quote": {
+        "symbol": "USDC",
+        "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "decimals": 6
+      },
+      "wsigil": {
+        "symbol": "wSIGIL3",
+        "address": "0x3FCED760b0DE6d57F96835C6110b1227941Ec2e9",
+        "decimals": 18
+      },
+      "pair": "0x7e9C5d73104Ed2fC2bc55139ac0999036EAf41d7",
+      "faucets": [],
+      "notice": "wSIGIL3 is the SIGIL testnet coin, traded here against real USDC on Polygon PoS. The 1,002 wSIGIL3 that exist were created as a pool seed, not from locked SIGIL, so they cannot be exchanged back to native SIGIL (the bridge relay is switched off), and the SIGIL testnet resets at mainnet. The pool opened on 19 Nov 2026 with about 1 USDC, so even small trades move the price."
+    }
+  ],
+  "parked": [
+    {
+      "key": "amoy",
+      "label": "Polygon Amoy",
+      "short": "Amoy · test",
+      "testnet": true,
+      "chain": {
+        "chainId": "0x13882",
+        "chainName": "Polygon Amoy Testnet",
+        "nativeCurrency": {
+          "name": "POL",
+          "symbol": "POL",
+          "decimals": 18
+        },
+        "rpcUrls": [
+          "https://rpc-amoy.polygon.technology",
+          "https://polygon-amoy.drpc.org"
+        ],
+        "blockExplorerUrls": [
+          "https://amoy.polygonscan.com"
+        ]
+      },
+      "readRpcs": [
+        "https://polygon-amoy.drpc.org",
+        "https://polygon-amoy.gateway.tenderly.co"
+      ],
+      "explorer": "https://amoy.polygonscan.com",
+      "dex": {
+        "name": "Uniswap V2",
+        "router": null,
+        "factory": null
+      },
+      "quote": {
+        "symbol": "USDC",
+        "address": "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
+        "decimals": 6
+      },
+      "wsigil": null,
+      "pair": null,
+      "faucets": [
+        {
+          "label": "Test USDC · Circle faucet",
+          "url": "https://faucet.circle.com/"
+        },
+        {
+          "label": "Test POL for gas · Polygon faucet",
+          "url": "https://faucet.polygon.technology/"
+        }
+      ],
+      "notice": "Test network. Every token here is free test money with no value, and the SIGIL testnet resets at mainnet.",
+      "parked_note": "Parked 2026-11-19: Viktor chose real Polygon now and reuses wSIGIL3. Move back into 'networks' to show the Amoy tab again."
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+/* exchange-v2 copy of exchange-v1/sigil-metamask.js + ensureChain/request (patch_metamask_v2.py, 2026-11-19). */
 /* ──────────────────────────────────────────────────────────────────────────
    sigil-metamask.js — SIGILGRAPH ⇄ MetaMask / Polygon integration.
    2026-08-26. Plain classic script (no bundler, no ESM, no CDN): defines
@@ -323,6 +324,27 @@
   }
 
   /**
+   * exchange-v2: the same switch-or-add dance as ensurePolygon(), for ANY chain
+   * (Polygon Amoy for the testnet coin). `params` is a wallet_addEthereumChain object.
+   */
+  async function ensureChain(params) {
+    if (!params || !params.chainId) throw new Error('ensureChain: chain params missing');
+    if (!state.provider) await connect();
+    try { state.chainId = await req('eth_chainId'); } catch (e) {}
+    if (state.chainId === params.chainId) return true;
+    try {
+      await req('wallet_switchEthereumChain', [{ chainId: params.chainId }]);
+    } catch (e) {
+      var code = e && (e.code != null ? e.code : (e.data && e.data.originalError && e.data.originalError.code));
+      if (code === 4902 || code === -32603) await req('wallet_addEthereumChain', [params]);
+      else throw e;
+    }
+    try { state.chainId = await req('eth_chainId'); } catch (e) {}
+    emit('change', getState());
+    return state.chainId === params.chainId;
+  }
+
+  /**
    * Ask MetaMask to display wrapped SIGIL in its asset list. Never fatal:
    * the user may simply decline, and the bridge works either way.
    */
@@ -608,6 +630,8 @@
     resume: resume,
     disconnect: disconnect,
     ensurePolygon: ensurePolygon,
+    ensureChain: ensureChain,                       // exchange-v2
+    request: function (method, params) { return req(method, params); },  // exchange-v2
     watchToken: watchToken,
     signMessage: signMessage,
     balanceOfWei: balanceOfWei,

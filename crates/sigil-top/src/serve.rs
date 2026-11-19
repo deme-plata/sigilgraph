@@ -1014,6 +1014,22 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     if names(safe, "sigil-exchange.js") {
         return Some((include_str!("../../../gui/sigil-exchange.js").as_bytes().to_vec(), JS));
     }
+    // 2026-11-19: the wSIGIL3/USDC swap window (exchange-v2, live on sigilgraph.org the same day). The wallet page
+    // loads /exchange-v2/sigil-metamask.js + /exchange-v2/sigil-swap.js; the script then fetches its stylesheet and its
+    // network list from beside itself. The list must answer as JSON (the script refuses anything else), and every
+    // address in it is re-checked on chain in the browser before a signature, so a stale list reads "not ready".
+    if names(safe, "sigil-swap.js") {
+        return Some((include_str!("../../../gui/sigil-swap.js").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-swap.css") {
+        return Some((include_str!("../../../gui/sigil-swap.css").as_bytes().to_vec(), "text/css; charset=utf-8"));
+    }
+    if names(safe, "sigil-swap-networks.json") {
+        return Some((
+            include_str!("../../../gui/sigil-swap-networks.json").as_bytes().to_vec(),
+            "application/json; charset=utf-8",
+        ));
+    }
     // 2026-11-11: the ◈ NETWORK STATS 3D map. The page imports /sigil-netmap.js, which imports three.js from
     // /three/ — all three files ride in the binary, so [W] never loads script from another host (this origin
     // holds the local signer). Exact paths only: `names` would also match these under any folder.
@@ -2474,6 +2490,11 @@ mod tests {
             "three/three.core.min.js",
             "sigil-wallet-phrase.mjs",
             "wasm/sigil_wallet_phrase.wasm",
+            "sigil-metamask.js",
+            "wsigil-market.js",
+            "exchange-v2/sigil-swap.js",
+            "exchange-v2/sigil-swap.css",
+            "exchange-v2/sigil-swap-networks.json",
         ] {
             let got = embedded_surface(name);
             assert!(got.is_some(), "{name} is not served from the binary");
@@ -2483,6 +2504,29 @@ mod tests {
         }
         assert!(embedded_surface("sigil-recent-blocks.json").is_none());
         assert!(embedded_surface("downloads/sigil-top-linux-x64").is_none());
+    }
+
+    /// 2026-11-19: every exchange script the wallet page asks for rides in the binary, and the swap window's
+    /// network list answers as JSON with its default network present (the script refuses anything else, and a
+    /// missing file 404s silently in [W] — the 2026-08-26 sigil-metamask.js lesson).
+    #[test]
+    fn swap_window_assets_match_what_the_wallet_page_loads() {
+        let (page, _) = embedded_surface("sigil-wallet-tron.html").expect("wallet page");
+        let page = String::from_utf8_lossy(&page);
+        let mut seen = 0;
+        for chunk in page.split("<script src=\"/exchange-v").skip(1) {
+            let path = format!("exchange-v{}", chunk.split(['?', '"']).next().unwrap());
+            assert!(embedded_surface(&path).is_some(), "the wallet page loads /{path}, which the binary does not serve");
+            seen += 1;
+        }
+        assert!(seen >= 3, "expected the exchange scripts in the wallet page, found {seen}");
+        assert!(page.contains("<script src=\"/exchange-v2/sigil-swap.js?"), "wallet page is not on the v2 swap window");
+        let (json, ct) = embedded_surface("exchange-v2/sigil-swap-networks.json").unwrap();
+        assert!(ct.starts_with("application/json"), "network list content type {ct}");
+        let v: serde_json::Value = serde_json::from_slice(&json).expect("network list is JSON");
+        let def = v["default"].as_str().expect("default network key");
+        assert!(v["networks"].as_array().expect("networks").iter().any(|n| n["key"] == def), "default network {def} missing");
+        assert!(embedded_surface("exchange-v2/sigil-swap.css").unwrap().1.starts_with("text/css"));
     }
 
     /// The regression this whole change exists to prevent: a stale wallet sitting in the

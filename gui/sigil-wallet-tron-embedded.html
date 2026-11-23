@@ -642,6 +642,28 @@ body.view-desktop .desktop{display:flex}
     const pa=document.getElementById('passets'); if(pa) pa.innerHTML=assetRows();
     const da=document.getElementById('dassets'); if(da) da.innerHTML=assetRows();
     document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(totalRaw()));
+    // 2026-11-18 (sigilPrivLockedNote-20261118): on g3 the coins are PRIVATE notes. A view that holds no key for this
+    // address (sigil-top's [W] fallback, any shared ?addr= link) cannot see them, so the total above is the PUBLIC part
+    // only. It used to sit under a "verified" badge reading 0 while the wallet held private coins. Say what it is.
+    try{
+      var _pk=null; try{ _pk=window.__sigilMnemonic||localStorage.getItem('sigil-wallet-mnemonic'); }catch(_){}
+      var _state = SHIELD_RAW!=null ? 'full' : ((_pk && !window.__sigilKeyMismatch) ? 'scanning' : 'nokey');   // sigilKeyMismatch-20261118
+      document.querySelectorAll('.vbadge').forEach(function(b){
+        if(!b.dataset.orig) b.dataset.orig=b.innerHTML;
+        b.innerHTML = _state==='full' ? b.dataset.orig : (_state==='scanning' ? 'scanning private coins…' : 'public only');
+        b.title = _state==='nokey' ? 'This view has no key for this address, so its private coins are not counted.' : '';
+      });
+      document.querySelectorAll('#amt,#damt').forEach(function(el){
+        var n=el.parentElement && el.parentElement.querySelector('.privlock-note');
+        if(_state==='nokey'){
+          if(!n){ n=document.createElement('div'); n.className='privlock-note';
+            n.style.cssText='font-family:JetBrains Mono,monospace;font-size:11px;line-height:1.45;color:#fbbf24;margin:6px 0 2px;max-width:46em';
+            el.insertAdjacentElement('afterend', n); }
+          n.textContent=(window.__sigilKeyMismatch ? ('This browser is logged in to a DIFFERENT wallet ('+window.__sigilKeyMismatch.slice(0,10)+'…), so the private coins of the wallet on screen are not shown. ') : 'Private coins are not shown here — this view has no key for this address. ')
+            + 'Open the wallet with its recovery phrase (I already have a wallet), or in sigil-top open your local wallet (localhost:9800/w), to see them.';
+        } else if(n){ n.remove(); }
+      });
+    }catch(_){}
     // phone balance sub → the user's real address (copyable) + fresh badge
     const sub=document.querySelector('.balance .sub');
     if(sub){
@@ -1134,7 +1156,7 @@ body.view-desktop .desktop{display:flex}
     // raw seed as a phrase, so a wallet opened from a raw seed (MCP, sigil-top, mine-rig)
     // scanned the pool with the WRONG key and showed 0 private balance while holding
     // hundreds of SIGIL; sigilDeriveAuto() is the dispatcher every send path already uses.
-    let seed; try{ var _a=((window.MINE_ADDR||window.ADDR)||'').toLowerCase(); seed=(window.sigilDeriveAuto?window.sigilDeriveAuto(mn,_a):window.sigilDeriveFrom(mn)).priv; }catch(e){ el.textContent='—'; return; }
+    let seed; try{ var _a=((window.MINE_ADDR||window.ADDR)||'').toLowerCase(); var _kp=(window.sigilDeriveAuto?window.sigilDeriveAuto(mn,_a):window.sigilDeriveFrom(mn)); /* sigilKeyMismatch-20261118: the key must belong to the wallet on screen, or every scan reads 0 */ if(_a && _kp && _kp.address && _kp.address.toLowerCase()!==_a){ window.__sigilKeyMismatch=_kp.address.toLowerCase(); SHIELD_RAW=null; el.textContent='not this wallet'; if(nt) nt.textContent='this browser holds the key of '+_kp.address.slice(0,10)+'…, not of the wallet on screen'; try{ render(); }catch(_){} return; } window.__sigilKeyMismatch=null; seed=_kp.priv; }catch(e){ el.textContent='—'; return; }
     // The scan opens notes with the WASM decoder; make sure it is loaded first.
     try{ if(!window.sigilShieldWasm && window.sigilShieldWasmReady) await window.sigilShieldWasmReady; }catch(_){}
     try{
@@ -8013,13 +8035,53 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     }
   };
 
+  /* bridgeAvailHonest-20261120 ─ the lock direction gets the honesty the burn direction
+     already had. A lock is a Shield FROM THE PUBLIC balance (sigil-api bridge.rs), and on g3
+     nearly all value is private notes, so a bare "0" beside a wallet holding private SIGIL
+     reads as a lost balance. And while no relayer wallet is configured the node refuses every
+     lock (BridgeError::NotActivated) — say that BEFORE an amount is typed, not after. */
+  var lastBridgeSt=null;
+  function xcPrivGlyphs(){
+    try{ return window.__sigilShieldRaw!=null ? BigInt(window.__sigilShieldRaw) : null; }catch(_){ return null; }
+  }
+  function xcApplyLockGate(st, pubBase, privG){
+    if(dir!=='to_polygon' || !st) return;
+    var go=$('xcGo'), note=$('xcNote'); if(!go || !note) return;
+    var off=!st.relayer, paused=!!st.paused;
+    var privTxt=(privG!=null && privG>0n) ? fmt8(privG/100n)+' SIGIL' : '';
+    if(off || paused){
+      go.textContent = off ? '🚫 BRIDGE NOT ACTIVE' : '⏸ BRIDGE PAUSED';
+      go.disabled=true; go.style.opacity='.5'; go.style.cursor='not-allowed';
+      note.innerHTML='<b style="color:#ff9d9d">'+(off ? 'The SIGIL → Polygon bridge is not switched on yet.' : 'The bridge is paused by its admin.')+'</b> '
+        +(off ? 'No relayer is configured on this chain, so the node refuses every lock — nothing would mint wrapped SIGIL on Polygon. ' : 'Locks are refused until it is resumed. ')
+        +(privTxt ? 'Your <b>'+privTxt+'</b> are private coins and stay safe in this wallet.' : 'Your SIGIL stays safe in this wallet.');
+      return;
+    }
+    go.textContent='🌉 LOCK & BRIDGE'; go.disabled=false; go.style.opacity=''; go.style.cursor='';
+    if(pubBase===0n && privTxt){
+      note.innerHTML='Locks native SIGIL into the bridge vault. A lock spends your <b>public</b> balance, which is 0 here — your <b>'+privTxt+'</b> are private coins, and this page cannot move private coins to the public balance yet.';
+    }
+  }
+  async function xcLockGate(pubBase, privG){
+    if(lastBridgeSt) xcApplyLockGate(lastBridgeSt, pubBase, privG);   // no enabled-button flicker on reopen
+    try{
+      var r=await fetch('/v1/bridge/status',{cache:'no-store'}); var j=await r.json();
+      var st=j && (j.data||j);
+      if(st && typeof st==='object' && ('relayer' in st)){ lastBridgeSt=st; xcApplyLockGate(st, pubBase, privG); }
+    }catch(_){ /* unknown: leave the button as it is; the node still refuses an inactive bridge */ }
+  }
+
   async function refreshAvail(){
     var el=$('xcAvail'); if(el) el.textContent='…';
     try{
       if(dir==='to_polygon'){
         // SIGIL_RAW is glyphs (10dp); this bridge speaks 8dp base units end to end.
         availBase = BigInt(window.SIGIL_RAW||'0') / 100n;
-        if(el) el.textContent=fmt8(availBase)+' SIGIL';
+        // bridgeAvailHonest-20261120: say what the wallet holds, not only what a lock can take.
+        var privG=xcPrivGlyphs();
+        if(el) el.textContent=fmt8(availBase)+' SIGIL public'
+          +(privG==null ? ' · private not scanned' : (privG>0n ? ' · '+fmt8(privG/100n)+' private' : ''));
+        xcLockGate(availBase, privG);
       } else {
         var st = MM ? MM.getState() : {};
         if(!st.connected){ availBase=0n; if(el) el.textContent='connect MetaMask'; return; }
@@ -8950,7 +9012,9 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       // right one and, when it ran first, marked the whole pool scanned with nothing in
       // it: the balance card read 0 and Send found 'no landed shielded note' on a wallet
       // holding 1.5 SIGIL (measured 2026-09-09, the two seeds logged side by side).
-      var seed = (window.sigilDeriveAuto ? window.sigilDeriveAuto(mn, addr()) : window.sigilDeriveFrom(mn)).priv;
+      var _kp2 = (window.sigilDeriveAuto ? window.sigilDeriveAuto(mn, addr()) : window.sigilDeriveFrom(mn));
+      if (addr() && _kp2 && _kp2.address && _kp2.address.toLowerCase() !== addr().toLowerCase()) return;   // sigilKeyMismatch-20261118: never record another wallet's scan
+      var seed = _kp2.priv;
       var r = await window._scanAllEpochsFast(seed, M, S);
       // A gross figure that can only ever rise is worse than no figure: it would
       // manufacture phantom incoming rows on every spend. Skip unless netted.
@@ -11089,4 +11153,6 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 <script src="/exchange-v2/sigil-swap.js?v=20261119-1"></script>
 <script src="/address-book-v1/sigil-address-book.js?v=20261016-1"></script>
 <script src="/send-v1/sigil-send.js?v=20261016-1"></script>
+<!-- sigilQrScan-20261120: webcam / picture QR scan for the Send window (jsQR loaded on first use) -->
+<script src="/send-v1/sigil-qrscan.js?v=20261120-1"></script>
 </body></html>

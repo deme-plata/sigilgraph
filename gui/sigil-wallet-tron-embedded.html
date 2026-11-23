@@ -678,7 +678,8 @@ body.view-desktop .desktop{display:flex}
       } else {
         sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'
           +(SHIELD_RAW==null ? ' · <span style="opacity:.7">private balance not scanned yet</span>'
-              : ' · 🛡 '+glyphStr(SHIELD_RAW,4)+' private + '+glyphStr(SIGIL_RAW,4)+' public')+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
+              : ' · 🛡 '+glyphStr(SHIELD_RAW,4)+' private + '+glyphStr(SIGIL_RAW,4)+' public'
+                +((window.__sigilOlderScan && !window.__sigilOlderScan.done) ? ' · <span style="opacity:.75">counting older coins '+window.__sigilOlderScan.pct+' %…</span>' : ''))+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
       }
     }
     // desktop gbar pill + sidecard + portfolio
@@ -937,7 +938,7 @@ body.view-desktop .desktop{display:flex}
   var _shieldCache = { epochs:Object.create(null), spentSeen:0 };
 
   function _seedHexOf(seed){ try{ if(typeof seed==='string') return seed; return Array.from(seed).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); }catch(_){ return ''; } }
-  async function _scanEpochTail(e, live, seed, M, S, spent, gen){
+  async function _scanEpochTail(e, live, seed, M, S, spent, gen, count){   // sealedV7Gens-20261123: count = chunk size for sealed generations
     // 2026-10-19 (sigil-g3): the v7 record has its own key — on g3 v1 and v7 are both epoch 0.
     var _ck=(gen==='v7'?'v7:':'')+e;
     var c=_shieldCache.epochs[_ck];
@@ -952,7 +953,7 @@ body.view-desktop .desktop{display:flex}
     // advance `scanned`; the caller reports 'scanning…' and the next tick retries.
     if(!(window.sigilShieldWasm && window.sigilShieldWasm.openNoteCiphertext)) return c;
     if(c.gen==='v7' && !window.sigilShieldWasm.openNoteCiphertextV7) return c;   // 2026-10-13: no v7 decoder ⇒ do not advance
-    var url='/v1/shielded/leaves?from='+c.scanned+(e===live?'':('&epoch='+e));
+    var url='/v1/shielded/leaves?from='+c.scanned+(e===live?'':('&epoch='+e))+(count?('&count='+count):'');
     var page=await fetch(url,{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;});
     if(!page || page.ok===false) return c;
     var cts=page.ciphertexts||[];
@@ -986,7 +987,12 @@ body.view-desktop .desktop{display:flex}
     }
     // `total` is authoritative for how far this epoch has been scanned; fall back
     // to what we spliced if an older node does not send it.
-    c.scanned = (typeof page.total==='number') ? page.total : (base+cts.length);
+    // sealedV7Gens-20261123: advance only over positions actually served. With `count` (or any capped
+    // reply) `total` is the generation's size, not what arrived; taking it would skip every coin after
+    // the first chunk.
+    var _served=base+cts.length;
+    if(cts.length && page.leaves && page.leaves.length===cts.length) c.lastLeaf=String(page.leaves[cts.length-1]).toLowerCase();
+    c.scanned = (typeof page.total==='number') ? Math.min(page.total, _served) : _served;
     return c;
   }
 
@@ -1019,14 +1025,18 @@ body.view-desktop .desktop{display:flex}
     var v7ep=(_pg && _pg.v7) ? _pg.v7.epoch : null;
     // 2026-10-19 (sigil-g3): a v1 generation that is closed AND never held a note (g3 closes it at
     // genesis) has nothing to scan — and asking for "the live epoch" there returns the v7 leaves.
-    var v1Gone=!!(anchor && anchor.v1_live===false && anchor.notes===0 && !((anchor.sealed_epochs||[]).length));
+    // sealedV7Gens-20261123: g3 LISTS the closed v1 generation as a sealed epoch with 0 notes, so "no sealed
+    // epochs at all" never held there, and the v1 'live' request returned the v7 live leaves: a second 42 MB
+    // download on every fresh load, decrypted with an opener that opens none of them. v1 is gone when it is
+    // closed, empty, and every v1 epoch the node lists (numbers up to `live`) is empty too.
+    var v1Gone=!!(anchor && anchor.v1_live===false && anchor.notes===0 && (anchor.sealed_epochs||[]).every(function(se){ return !(se && se.epoch<=live && se.notes>0); }));
     // 2026-10-19 (sigil-g3): a chain reset (g2 → g3) starts this browser's note book at zero — the
     // old chain's notes would otherwise sit "pending" forever. Chain state is archived under
     // `<key>@<oldNet>` (best effort) and removed; the wallet itself stays.
     try{
       var _net=(anchor && anchor.network) || 'sigil-g2', _mine=localStorage.getItem('sigil-network') || 'sigil-g2';
       if(_mine!==_net){
-        var _pre=['sigil-shielded-notes-','sigil-shielded-noteidx-','sigil-sealed-scan-','sigil-refused-notes-','sigil-history-','sigil-balhist-','sigil-autoshield-','sigil-activity-','sigil-p2p-balance'];
+        var _pre=['sigil-shielded-notes-','sigil-shielded-noteidx-','sigil-sealed-scan-','sigil-sealed-part-','sigil-refused-notes-','sigil-history-','sigil-balhist-','sigil-autoshield-','sigil-activity-','sigil-p2p-balance'];
         var _keys=[]; for(var _i=0;_i<localStorage.length;_i++){ var _k=localStorage.key(_i);
           if(_k && _k.indexOf('@')<0 && _k!=='sigil-history-prefs' && _pre.some(function(x){ return _k.indexOf(x)===0; })) _keys.push(_k); }
         _keys.forEach(function(k){ try{ localStorage.setItem(k+'@'+_mine, localStorage.getItem(k)); }catch(_){} localStorage.removeItem(k); });
@@ -1056,15 +1066,64 @@ body.view-desktop .desktop{display:flex}
     // background, one at a time, and the balance re-renders when they land.
     var tag=_scanCacheTag(seed, M);
     for(var pe=0; pe<live; pe++){ if(!_shieldCache.epochs[pe]){ var saved=_loadSealedEpoch(tag, pe); if(saved) _shieldCache.epochs[pe]=saved; } }
+    // sealedV7Gens-20261123: SEALED v7 generations. The scanner read only the LIVE v7 generation, so when
+    // generation 1 sealed (~2026-11-06, 32,768 coins) every coin still in it vanished from this page while
+    // the phone (1.13.8+) kept counting it. A sealed root stays a valid anchor forever (sigil-state
+    // rotate_v7), so these coins are fully spendable. v7 epochs are numbered above every v1 epoch.
+    var sealedV7=[]; try{ (anchor.sealed_epochs||[]).forEach(function(se){ if(se && se.notes>0 && se.epoch>live && (v7ep===null || se.epoch<v7ep)) sealedV7.push(se.epoch); }); }catch(_){}
+    // A finished sealed scan is loaded as final. Unfinished progress (a sealed generation half read, or the LIVE
+    // generation read up to coin N) resumes where it stopped, after checking that the coin at N-1 is still the
+    // same commitment on the node (one leaf, no envelope). Before this the live generation (~42 MB) was read
+    // in full on EVERY page load.
+    var _toLoad=sealedV7.slice(); if(v7ep!==null) _toLoad.push(v7ep);
+    for(var li=0; li<_toLoad.length; li++){
+      var e7=_toLoad[li], k7='v7:'+e7, have7=_shieldCache.epochs[k7];
+      if(have7 && (have7.complete || have7.scanned>0)) continue;
+      var sv7=(e7!==v7ep) ? _loadSealedEpoch(tag, k7) : null;
+      if(!sv7){ var pp7=_loadPartialSealed(tag, k7); if(pp7 && await _partialStillValid(e7, live, pp7)) sv7=pp7; else if(pp7) _dropPartialSealed(tag, k7); }
+      if(sv7){ sv7.gen='v7'; _shieldCache.epochs[k7]=sv7; }
+    }
     if(!v1Gone) await _scanEpochTail(live, live, seed, M, S, spent);
     if(v7ep!==null) await _scanEpochTail(v7ep, live, seed, M, S, spent, 'v7');
+    // sealedV7Gens-20261123: remember how far the live generation was read (throttled: every 512 coins or 60 s)
+    if(v7ep!==null){ var cl7=_shieldCache.epochs['v7:'+v7ep];
+      if(cl7 && cl7.scanned>0 && cl7.lastLeaf && cl7.scanned!==cl7._savedAt && (!cl7._savedAt || cl7.scanned-cl7._savedAt>=512 || Date.now()-(cl7._savedT||0)>=60000)){
+        _savePartialSealed(tag, 'v7:'+v7ep, cl7); cl7._savedAt=cl7.scanned; cl7._savedT=Date.now(); } }
     var sealedTotals={}; try{ (anchor.sealed_epochs||[]).forEach(function(se){ sealedTotals[se.epoch]=se.notes; }); }catch(_){}
     var pendingSealed=[];
     for(var se2=0; se2<live; se2++){ var cs=_shieldCache.epochs[se2]; if(!cs || !cs.complete) pendingSealed.push(se2); }
+    sealedV7.forEach(function(e7){ var cs7=_shieldCache.epochs['v7:'+e7]; if(!cs7 || !cs7.complete) pendingSealed.push('v7:'+e7); });   // sealedV7Gens-20261123
+    if(!pendingSealed.some(function(p){ return typeof p==='string'; })) _olderProgress(null);
     if(pendingSealed.length && !_shieldCache.sealedJob){
+      var _jobKey=_shieldCache.seedKey;
+      // one progress figure across ALL older generations (it used to restart at 0 % per generation)
+      var _v7q=pendingSealed.filter(function(x){ return typeof x==='string'; }), _v7all=0, _v7base=0;
+      _v7q.forEach(function(k){ var t=sealedTotals[Number(k.slice(3))]; if(typeof t==='number') _v7all+=t; });
+      if(_v7q.length) _olderProgress(0, _v7all);
       _shieldCache.sealedJob=(async function(){
         for(var q=0;q<pendingSealed.length;q++){
           var ep=pendingSealed[q];
+          if(typeof ep==='string'){
+            // sealedV7Gens-20261123: a sealed v7 generation is ~45 MB with envelopes, so read it in 2,048-coin
+            // chunks (~2.8 MB each; the phone OOM'd on the one-string read, 1.13.8), save it once complete.
+            var e7n=Number(ep.slice(3)), want7=sealedTotals[e7n], c7=null, last7=-1;
+            try{
+              for(var g7=0; g7<64; g7++){
+                if(_shieldCache.seedKey!==_jobKey) return;               // another wallet opened: stop here
+                c7=await _scanEpochTail(e7n, live, seed, M, S, spent, 'v7', 2048);
+                _olderProgress(_v7base+((c7&&c7.scanned)|0), _v7all);
+                if(!c7 || c7.scanned===last7) break;                     // no progress (decoder not ready / node error): next refresh retries
+                last7=c7.scanned;
+                if(typeof want7==='number' && c7.scanned>=want7) break;
+                if(g7%4===3){ _savePartialSealed(tag, ep, c7); try{ if(window.refreshShielded) window.refreshShielded(); }catch(_){} }
+              }
+              if(c7 && typeof want7==='number' && c7.scanned>=want7){ c7.complete=true; _saveSealedEpoch(tag, ep, c7); _dropPartialSealed(tag, ep); }
+              else if(c7) _savePartialSealed(tag, ep, c7);
+            }catch(_){}
+            _v7base += (typeof want7==='number') ? want7 : ((c7&&c7.scanned)|0);
+            try{ if(window.refreshShielded) window.refreshShielded(); }catch(_){}
+            continue;
+          }
           try{
             var cc=await _scanEpochTail(ep, live, seed, M, S, spent);
             var want=sealedTotals[ep];
@@ -1076,9 +1135,14 @@ body.view-desktop .desktop{display:flex}
     }
 
     var balance=0n, gross=0n, notes=0, sealed=0, v7notes=0;
-    var _eps=[]; if(!v1Gone){ for(var ei=0;ei<=live;ei++) _eps.push({key:ei, ep:ei}); } if(v7ep!==null) _eps.push({key:'v7:'+v7ep, ep:v7ep});
+    var _eps=[]; if(!v1Gone){ for(var ei=0;ei<=live;ei++) _eps.push({key:ei, ep:ei}); }
+    sealedV7.forEach(function(e7){ _eps.push({key:'v7:'+e7, ep:e7, older:true}); });   // sealedV7Gens-20261123
+    if(v7ep!==null) _eps.push({key:'v7:'+v7ep, ep:v7ep});
+    var gens={}, olderValue=0n, olderNotes=0;
     for(var ex=0;ex<_eps.length;ex++){ var ee=_eps[ex].ep;
       var c=_shieldCache.epochs[_eps[ex].key]; if(!c) continue;
+      var _g=gens[_eps[ex].key]={ key:_eps[ex].key, epoch:ee, gen:c.gen||'v1', older:!!_eps[ex].older, live:(c.gen==='v7'?ee===v7ep:ee===live),
+                                  value:0n, notes:0, max:0n, max2:0n, complete:(!_eps[ex].older || !!c.complete), scanned:c.scanned, total:sealedTotals[ee] };
       if(c.gen!=='v7' && ee!==live && c.scanned>0) sealed++;
       gross+=c.gross;
       for(var i=0;i<c.mine.length;i++){
@@ -1099,10 +1163,22 @@ body.view-desktop .desktop{display:flex}
           }
           isSpent=spent.has(_scopedNullifier(M, ee, raw));
         }
-        if(!isSpent){ balance+=n.value; notes++; if(c.gen==='v7') v7notes++; }
+        if(!isSpent){ balance+=n.value; notes++; if(c.gen==='v7') v7notes++;
+          _g.value+=n.value; _g.notes++; if(n.value>_g.max){ _g.max2=_g.max; _g.max=n.value; } else if(n.value>_g.max2){ _g.max2=n.value; }
+          if(_g.older){ olderValue+=n.value; olderNotes++; } }
       }
     }
-    return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed, sealedPending:pendingSealed.length, v7:(v7ep!==null), v7notes:v7notes };
+    try{ window.__sigilGenTotals=gens; }catch(_){}   // sealedV7Gens-20261123: read by the send path + bridge window
+    return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed, sealedPending:pendingSealed.length, v7:(v7ep!==null), v7notes:v7notes,
+             gens:gens, olderValue:olderValue, olderNotes:olderNotes };
+  }
+  // sealedV7Gens-20261123: progress of the one-time read of older (sealed) generations, for the headline + bridge.
+  // _olderProgress(scanned, total) while counting; _olderProgress(null) once nothing older is left to read.
+  function _olderProgress(scanned, total){
+    var p = (scanned==null) ? { done:true, scanned:0, total:0, pct:100 }
+          : { done:false, scanned:scanned|0, total:total|0, pct:(total>0 ? Math.min(99, Math.floor((scanned|0)*100/total)) : 0) };
+    var o=window.__sigilOlderScan; if(o && o.done===p.done && o.pct===p.pct && o.scanned===p.scanned) return;   // unchanged: no event
+    try{ window.__sigilOlderScan=p; window.dispatchEvent(new CustomEvent('sigil-older-scan',{detail:p})); }catch(_){}
   }
   // Persisted sealed-epoch scans. Keyed by a hash of the seed (never the seed itself);
   // a sealed epoch never changes, so the record is final once `complete`.
@@ -1116,6 +1192,26 @@ body.view-desktop .desktop{display:flex}
       return { scanned:j.scanned|0, gross:BigInt(j.gross||'0'), complete:true,
                mine:(j.mine||[]).map(function(n){ return { pos:n.pos|0, value:BigInt(n.value||'0') }; }) };
     }catch(_){ return null; }
+  }
+  // sealedV7Gens-20261123: progress of an UNFINISHED sealed-generation scan, so closing the page at 80 %
+  // does not start the ~45 MB read over. Positions in a sealed generation never change, so a prefix is final.
+  function _loadPartialSealed(tag, k){
+    if(!tag) return null;
+    try{ var j=JSON.parse(localStorage.getItem('sigil-sealed-part-'+tag+'-'+k)||'null'); if(!j || !(j.scanned>0)) return null;
+      return { scanned:j.scanned|0, gross:BigInt(j.gross||'0'), complete:false, lastLeaf:(j.lastLeaf||null), _savedAt:j.scanned|0, _savedT:Date.now(),
+               mine:(j.mine||[]).map(function(n){ return { pos:n.pos|0, value:BigInt(n.value||'0') }; }) }; }catch(_){ return null; }
+  }
+  function _savePartialSealed(tag, k, c){
+    if(!tag || !c || c.complete) return;
+    try{ localStorage.setItem('sigil-sealed-part-'+tag+'-'+k, JSON.stringify({ scanned:c.scanned, gross:String(c.gross), lastLeaf:c.lastLeaf||null,
+           mine:c.mine.map(function(n){ return { pos:n.pos, value:String(n.value) }; }) })); }catch(_){}
+  }
+  function _dropPartialSealed(tag, k){ try{ if(tag) localStorage.removeItem('sigil-sealed-part-'+tag+'-'+k); }catch(_){} }
+  // Is saved progress still a prefix of what the node serves? The commitment at position scanned-1 must match.
+  async function _partialStillValid(e, live, rec){
+    if(!rec || !(rec.scanned>0) || !rec.lastLeaf) return false;
+    try{ var j=await fetch('/v1/shielded/leaves?from='+(rec.scanned-1)+'&count=1&ciphertexts=0'+(e===live?'':('&epoch='+e)),{cache:'no-store'}).then(function(r){ return r.json(); });
+      return !!(j && j.ok!==false && j.from===rec.scanned-1 && j.leaves && j.leaves.length && String(j.leaves[0]).toLowerCase()===String(rec.lastLeaf).toLowerCase()); }catch(_){ return false; }
   }
   function _saveSealedEpoch(tag, e, c){
     if(!tag || !c) return;
@@ -1168,6 +1264,7 @@ body.view-desktop .desktop{display:flex}
       // whose entire balance was private read as almost empty.
       SHIELD_RAW = r.balance;
       try{ window.__sigilShieldRaw = r.balance; }catch(_){}
+      try{ window.dispatchEvent(new CustomEvent('sigil-private-balance',{detail:{balance:String(r.balance)}})); }catch(_){}   // sealedV7Gens-20261123
       try{ render(); }catch(_){}
       if(nt){
         // Never present a gross figure as a balance: if spends could not be netted,
@@ -1175,6 +1272,10 @@ body.view-desktop .desktop{display:flex}
         nt.textContent = r.netted
           ? (r.notes+' note'+(r.notes===1?'':'s')+(r.sealed?(' · '+r.epochs+' epochs'):'')+(r.sealedPending?(' · checking '+r.sealedPending+' older epoch'+(r.sealedPending===1?'':'s')+' in the background…'):'')+(r.v7?(' · 256-bit pool'+(r.v7notes?(': '+r.v7notes+' note'+(r.v7notes===1?'':'s')):'')):''))
           : '⚠ gross — spends not netted';
+        // sealedV7Gens-20261123: coins in an older (sealed) generation are counted, and said so.
+        try{ var _os=window.__sigilOlderScan;
+          if(r.olderValue>0n) nt.textContent += ' · older pool '+glyphStr(r.olderValue,2)+' SIGIL';
+          if(_os && !_os.done) nt.textContent += ' · counting older coins '+_os.pct+' %'; }catch(_){}
         nt.style.color = r.netted ? '' : '#fbbf24';
       }
     }catch(e){ el.textContent='—'; if(nt) nt.textContent='scan failed'; }
@@ -3398,6 +3499,36 @@ window.sigilPostProof = sigilPostProof;
   // opens it, which is why the inbox below is opened here, in the browser.
   function sigilPrivMemo(){ var el=document.getElementById('privMemo'); return el?String(el.value||''):''; }
   function sigilClearPrivMemo(){ var el=document.getElementById('privMemo'); if(el) el.value=''; var c=document.getElementById('privMemoCount'); if(c) c.textContent='0 / 512 bytes'; }
+  // sealedV7Gens-20261123: which v7 generation should fund a payment of `amountRaw`? From the scanner's
+  // per-generation totals. Preference: the live generation if one or two of its coins cover it; else an
+  // older one where one or two coins cover it; else the live one if its total covers it (merges stay in
+  // the live tree); else an older one whose total does; else the live one (the existing messages apply).
+  function sigilPickSpendGen(liveEp, amountRaw){
+    var gens=null; try{ gens=window.__sigilGenTotals||null; }catch(_){}
+    if(!gens) return liveEp;
+    var need=BigInt(amountRaw)+100000n;   // + SHIELDED_FEE
+    var live=gens['v7:'+liveEp]||null, older=[];
+    Object.keys(gens).forEach(function(k){ var g=gens[k]; if(g && g.gen==='v7' && g.older && g.value>0n) older.push(g); });
+    older.sort(function(a,b){ return a.value<b.value?1:(a.value>b.value?-1:0); });
+    var two=function(g){ return g && (g.max>=need || g.max+g.max2>=need); };
+    if(two(live)) return liveEp;
+    for(var i=0;i<older.length;i++) if(two(older[i])) return older[i].epoch;
+    if(live && live.value>=need) return liveEp;
+    for(var j=0;j<older.length;j++) if(older[j].value>=need) return older[j].epoch;
+    return liveEp;
+  }
+  // When no single generation can fund `need`, say how the coins are split (one payment = one pool).
+  function sigilSplitNote(need){
+    var gens=null; try{ gens=window.__sigilGenTotals||null; }catch(_){}
+    if(!gens) return '';
+    var v7s=[]; Object.keys(gens).forEach(function(k){ var g=gens[k]; if(g && g.gen==='v7' && g.value>0n) v7s.push(g); });
+    if(v7s.length<2) return '';
+    var total=0n, best=0n; v7s.forEach(function(g){ total+=g.value; if(g.value>best) best=g.value; });
+    if(total<need) return '';
+    var parts=v7s.map(function(g){ return glyphStr(g.value.toString(),4)+' SIGIL in the '+(g.older?'older':'current')+' pool'; }).join(' and ');
+    var most=best>100000n ? best-100000n : 0n;
+    return '✗ your private coins are in two pools: '+parts+'. One payment draws from one pool, so the most a single payment can carry right now is about '+glyphStr(most.toString(),4)+' SIGIL. Send it as two payments (or a smaller amount).';
+  }
   function sigilRenderInbox(wasm, seedHex, lj){
     var box=document.getElementById('privInbox'); if(!box || !wasm || !wasm.openNoteCiphertext) return 0;
     var cts=(lj&&lj.ciphertexts)||[], base=(lj&&lj.from)||0, found=[];
@@ -3525,12 +3656,16 @@ window.sigilPostProof = sigilPostProof;
     var btn=document.getElementById('privGo'); if(btn)btn.disabled=true;
     privMsg('Loading your shielded notes…', '#6df3ff');
     try{
-      var lr=await fetch(V7?('/v1/shielded/leaves?epoch='+V7.epoch):'/v1/shielded/leaves',{cache:'no-store'});
+      // sealedV7Gens-20261123: one proof spends from ONE generation (one tree, one anchor). A sealed v7
+      // generation stays spendable forever, so when the live one cannot fund this payment and an older one
+      // can, spend from that one. The node scopes the nullifier by the anchor's epoch; noteEp below follows.
+      var spendEpV7 = V7 ? sigilPickSpendGen(V7.epoch, amountRaw) : null;
+      var lr=await fetch(V7?('/v1/shielded/leaves?epoch='+spendEpV7):'/v1/shielded/leaves',{cache:'no-store'});
       var lj=await lr.json();
       if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
       var leaves=lj.leaves||[], capacity=lj.capacity;
       if(V7 && !(wasm.buildPrivateSendV7 && wasm.openNoteCiphertextV7 && wasm.noteNullifierV7 && wasm.shieldNoteCommitmentV7 && wasm.noteBlindingV7)){ privMsg('✗ this wallet build cannot spend 256-bit notes — reload the page.', '#ff8a8a'); return; }
-      try{ sigilRenderInbox(wasm, seedHex, lj); }catch(_){}
+      if(!V7 || spendEpV7===V7.epoch){ try{ sigilRenderInbox(wasm, seedHex, lj); }catch(_){} }   // sealedV7Gens-20261123: the inbox shows the live generation
 
       var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE (g2: 100_000 glyphs; was 1000 on g1) — mirrored in wasm_api.rs too
       var candidates=[], unlanded=0;
@@ -3718,6 +3853,10 @@ window.sigilPostProof = sigilPostProof;
           return 'retry';
         }
         var avail = landedTotal+transparent;
+        var _osS=window.__sigilOlderScan;   // sealedV7Gens-20261123: older coins still being counted? then this is not the answer yet
+        if(V7 && _osS && !_osS.done){ privMsg('⏳ still counting the coins in your older pool ('+_osS.pct+' %) — try again in a few seconds.', '#fbbf24'); return 'retry'; }
+        var _split=V7 ? sigilSplitNote(need) : '';   // sealedV7Gens-20261123
+        if(_split){ privMsg(_split, '#fbbf24'); return; }
         privMsg('✗ this wallet holds '+glyphStr(avail.toString())+' SIGIL spendable'+(unlanded>0?' (+ '+unlanded+' note'+(unlanded===1?'':'s')+' still settling)':'')+' and this payment needs '+glyphStr(need.toString())+' including the fee. Send a smaller amount, or wait for more to arrive.', '#fbbf24');
         return;
       }
@@ -8030,8 +8169,10 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       var a = st.account;
       if(!a){ try{ a=localStorage.getItem('sigil-mm-account')||''; }catch(e){} }
       if(a) $('xcDest').value=a;
+      else if(/^(0x)?[0-9a-f]{64}$/i.test(String($('xcDest').value||'').trim())) $('xcDest').value='';   // sealedV7Gens-20261123: left over from the other direction
     } else {
       var s=sigilAddr(); if(/^[0-9a-f]{64}$/.test(s)) $('xcDest').value=s;
+      else if(/^0x[0-9a-f]{40}$/i.test(String($('xcDest').value||'').trim())) $('xcDest').value='';
     }
   };
 
@@ -8071,6 +8212,32 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     }catch(_){ /* unknown: leave the button as it is; the node still refuses an inactive bridge */ }
   }
 
+  // sealedV7Gens-20261123: the line used to freeze at whatever the private scan had when the window
+  // opened, and it never saw coins in an older (sealed) generation. Now: the full private figure, its
+  // split between the current and the older pool, and a live update while older coins are counted.
+  function xcAvailText(pubBase, privG){
+    var t=fmt8(pubBase)+' SIGIL public';
+    if(privG==null) return t+' · private not scanned';
+    if(privG>0n) t+=' · '+fmt8(privG/100n)+' private';
+    try{
+      var gens=window.__sigilGenTotals||{}, cur=0n, old=0n;
+      Object.keys(gens).forEach(function(k){ var g=gens[k]; if(!g) return; if(g.older) old+=g.value; else cur+=g.value; });
+      var f2=function(b){ return fmt8(b/100n).replace(/(\.\d{2})\d*$/,'$1'); };
+      if(old>0n) t+=' ('+(cur>0n ? f2(cur)+' current + ' : '')+f2(old)+' in the older pool)';
+      var os=window.__sigilOlderScan;
+      if(os && !os.done) t+=' · counting older coins '+os.pct+' %…';
+    }catch(_){}
+    return t;
+  }
+  var _xcLiveT=0;
+  function xcLiveAvail(){
+    var m=$('xchain-modal'); if(!m || m.style.display!=='flex' || dir!=='to_polygon') return;
+    var now=Date.now(); if(now-_xcLiveT<700){ if(!xcLiveAvail._t) xcLiveAvail._t=setTimeout(function(){ xcLiveAvail._t=null; xcLiveAvail(); }, 750); return; } _xcLiveT=now;
+    var el=$('xcAvail'), privG=xcPrivGlyphs();
+    if(el) el.textContent=xcAvailText(availBase, privG);
+    if(lastBridgeSt) xcApplyLockGate(lastBridgeSt, availBase, privG);
+  }
+  try{ window.addEventListener('sigil-private-balance', xcLiveAvail); window.addEventListener('sigil-older-scan', xcLiveAvail); }catch(_){}
   async function refreshAvail(){
     var el=$('xcAvail'); if(el) el.textContent='…';
     try{
@@ -8079,8 +8246,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
         availBase = BigInt(window.SIGIL_RAW||'0') / 100n;
         // bridgeAvailHonest-20261120: say what the wallet holds, not only what a lock can take.
         var privG=xcPrivGlyphs();
-        if(el) el.textContent=fmt8(availBase)+' SIGIL public'
-          +(privG==null ? ' · private not scanned' : (privG>0n ? ' · '+fmt8(privG/100n)+' private' : ''));
+        if(el) el.textContent=xcAvailText(availBase, privG);   // sealedV7Gens-20261123
         xcLockGate(availBase, privG);
       } else {
         var st = MM ? MM.getState() : {};

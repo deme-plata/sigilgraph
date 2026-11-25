@@ -98,15 +98,22 @@ MINING
   mine                              mine using the seed/wallet resolved below
   mine-rig <NODE_URL>               mine against a specific node
 
+    THE EASY WAY: press P in the dashboard and paste the address your coins should go to
+    (phone app or sigilgraph.org > Receive). No environment variable needed.
+    Without the dashboard: sigil-top wallet mine-to <address>   (or: wallet mine-to own)
+
     Reward address resolution, HIGHEST priority first — this order surprises people:
-      1. SIGIL_MINE_SEED            (a seed: it both signs and sets the address)
-      2. SIGIL_MINE_WALLET          (an address only)
-      3. the wallet chosen in the UI  (GET /api/v1/use-wallet)
+      0. the payout address set with P or `wallet mine-to` (dashboard; also `mine-rig`
+         when no address, SIGIL_MINE_WALLET or SIGIL_MINE_SEED is given)
+      1. SIGIL_MINE_SEED, or the wallet this computer made or imported (its key is here)
+      2. SIGIL_MINE_WALLET          (an address only; ignored when 1 exists)
+      3. the wallet chosen in the UI  (GET /api/v1/use-wallet; ignored when 1 exists)
       4. a hash of the hostname     ← unspendable fallback; nobody holds this key
 
     So a SIGIL_MINE_SEED left over from an earlier session silently keeps crediting THAT
-    wallet no matter what you pick in the UI. `GET /api/v1/mine-wallet` reports the address
-    actually being credited — check it rather than assuming.
+    wallet unless you set a payout address with P. The Mining tab (3) and
+    `GET /api/v1/mine-wallet` (`payout`, else `mining_wallet`) show the address actually
+    being credited — check it rather than assuming.
 
 WALLET AND API
   serve                             serve the wallet UI + local API on 127.0.0.1:9800
@@ -131,7 +138,8 @@ UPDATES AND INTEGRATION
 ENVIRONMENT
   Identity and rewards
     SIGIL_MINE_SEED                 seed to mine and sign with (highest priority)
-    SIGIL_MINE_WALLET               reward address only, no signing
+    SIGIL_MINE_WALLET               reward address only (ignored when this computer has a
+                                    wallet, which is almost always — press P instead)
     SIGIL_MINE_CPU=1                force CPU mining even where a GPU is present
     SIGIL_MINE_DIFFICULTY           override share difficulty
     SIGIL_MINE_NODE / SIGIL_MINE_URL  node to mine against
@@ -204,7 +212,7 @@ mod tests {
         for needle in [
             "full-sync", "verify-chain", "mine-rig", "serve", "update", "autostart", "kgauge",
             "SIGIL_MINE_SEED", "SIGIL_MINE_WALLET", "FLUX_STATIC_DIR", "SIGIL_HEADLESS",
-            "EXIT CODES", "9800", "--interval", "--lite",
+            "EXIT CODES", "9800", "--interval", "--lite", "press P in the dashboard", "wallet mine-to",
         ] {
             assert!(out.contains(needle), "--help must document `{needle}`");
         }

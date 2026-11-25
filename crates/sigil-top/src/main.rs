@@ -39,6 +39,7 @@ mod serve;
 mod heroes;
 use heroes::*;
 mod mining_ui;  // LANE-U: mining tab + hero renderers
+mod payout;     // [P] — where your mined coins go (10.8.0)
 mod forge_ui;   // 10.4.27: the seal + block belt card · 10.6.0: ◆ YOUR NODE, from own_node::status
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers

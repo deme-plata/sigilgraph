@@ -898,7 +898,12 @@ const ONE_ACTION_SEND_JS: &str = r##"
 /// Splice [`ONE_ACTION_SEND_JS`] in just before `</body>`, so it runs after every script the
 /// page defines (it needs `window.doUnifiedSend` to already exist in order to capture it as
 /// the fallback). Appends if there is no `</body>` at all rather than dropping the script.
+/// The node-details row of the [W] page that names the mining wallet.
+const MINE_WALLET_ROW: &str = "shortHex(mw.data&&mw.data.mining_wallet)";
+
 fn inject_one_action_send(html: &str) -> Vec<u8> {
+    // 10.8.0: with a payout address set ([P]) that row names the address rewards really go to.
+    let html = &html.replace(MINE_WALLET_ROW, "shortHex(mw.data&&(mw.data.payout||mw.data.mining_wallet))");
     match html.rfind("</body>") {
         Some(i) => {
             let mut out = String::with_capacity(html.len() + ONE_ACTION_SEND_JS.len() + 8);
@@ -2559,5 +2564,19 @@ mod tests {
         assert_eq!(body, b"{\"tip\":1}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod payout_row_tests {
+    /// The [W] page's "Mining wallet" row must name the address rewards really go to. The page is edited often;
+    /// if that row is reworded, this fails instead of the row quietly going back to the wrong wallet.
+    #[test]
+    fn the_wallet_page_names_the_payout_address() {
+        let page = include_str!("../../../gui/sigil-wallet-tron-embedded.html");
+        assert_eq!(page.matches(super::MINE_WALLET_ROW).count(), 1);
+        let served = String::from_utf8(super::inject_one_action_send(page)).unwrap();
+        assert!(served.contains("shortHex(mw.data&&(mw.data.payout||mw.data.mining_wallet))"));
+        assert!(!served.contains(super::MINE_WALLET_ROW));
     }
 }

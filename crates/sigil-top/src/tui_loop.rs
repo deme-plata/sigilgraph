@@ -438,6 +438,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
             app.tick_mining_history();
             // v0.10.5: drain any completed async refresh (never blocks).
             app.poll_refresh();
+            if let Some(ui) = app.payout_ui.as_mut() { ui.poll(Instant::now()); }
             // v0.27 CRASH-PROOF: a panic inside rendering (bad slice, unwrap on odd data, etc.)
             // used to unwind out of run_tui and EXIT the app ("crashes after 20s"). Catch it —
             // the panic hook logs [PANIC] with file:line — re-init the terminal and keep running;
@@ -526,6 +527,22 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // LANE-U v0.67: the first key dismisses the welcome modal (F also falls
                         // through to start sync/mining as usual).
                         if app.welcome_until.is_some() { app.welcome_until = None; }
+                        // [P] the payout screen takes EVERY key while it is open. A paste arrives as one key per
+                        // character, so take all that is waiting before the next (slow, on Windows) redraw. What
+                        // follows an Enter in the same burst is dropped: a paste must never answer a question.
+                        if app.payout_ui.is_some() {
+                            let mut entered = crate::payout::on_key(&mut app, k);
+                            let mut budget = 4096;
+                            while budget > 0 && event::poll(Duration::ZERO)? {
+                                if let Event::Key(k) = event::read()? {
+                                    if k.kind == KeyEventKind::Press && !entered {
+                                        entered = crate::payout::on_key(&mut app, k);
+                                    }
+                                }
+                                budget -= 1;
+                            }
+                            continue;
+                        }
                         match k.code {
                             // [A]I tab captures typing — these guarded arms MUST precede the
                             // global shortcuts so 'q'/Esc/digits type into the chat instead of
@@ -564,6 +581,7 @@ pub(crate) fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = false;
                             }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
+                            KeyCode::Char('p') | KeyCode::Char('P') => { crate::payout::open(&mut app); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
                                 // [G] gates GPU use: GPU mining is OFF by default and only
                                 // engages on an explicit opt-in here (and only on a -gpu
@@ -1421,9 +1439,9 @@ pub(crate) fn ai_run_action(app: &mut App, name: &str) -> String {
         },
         "sigil_start_mining" => {
             if app.mining { return "Already mining — see tab 3.".into(); }
-            if miner_keypair().is_none() { return "⚠ This node has no wallet yet, and mining needs one it can sign for. Ask me to create a wallet first.".into(); }
+            if miner_keypair().is_none() && crate::payout::chosen().is_none() { return "⚠ This node has no wallet yet, and mining needs one to pay into. Ask me to create a wallet, or press P to mine into a wallet you already have.".into(); }
             app.toggle_engine_mining();
-            format!("✓ Mining started to {} — the Mining tab shows hashrate and shares.", miner_wallet())
+            format!("✓ Mining started to {} — the Mining tab shows hashrate and shares.", crate::payout::mining_wallet())
         }
         "sigil_stop_mining" => {
             if !app.mining { return "Not mining right now.".into(); }

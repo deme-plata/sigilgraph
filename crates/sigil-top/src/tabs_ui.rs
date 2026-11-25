@@ -571,6 +571,9 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
     // the welcome modal, but self-gates (draw_store_open_overlay returns immediately
     // once the open finishes or if there was never a WAL to replay).
     draw_store_open_overlay(f, app, area);
+
+    // [P] the payout screen: on top of everything while it is open.
+    crate::payout::draw(f, app, area);
 }
 
 pub(crate) fn render_fleet_card(app: &App) -> Paragraph<'static> {
@@ -730,6 +733,7 @@ pub(crate) fn render_footer(app: &App, width: u16) -> Paragraph<'static> {
     };
     let mut kb = vec![Span::raw(sa(" "))];
     kb.extend(keys("[M]", "ine", C_GOLD));
+    kb.extend(keys("[P]", "ayout", C_GOLD));
     kb.extend(keys("[F]", "ull", C_GREEN));
     kb.extend(keys("[V]", "erify", C_GREEN));
     kb.extend(keys("[Y]", "esync", C_CYAN));

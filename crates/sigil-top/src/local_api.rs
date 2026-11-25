@@ -102,7 +102,9 @@ impl LocalApi {
             "/api/v1/peers" => self.peers(),
             // LANE-N: the mining-wallet reconcile pair (local, never proxied).
             // GET /api/v1/mine-wallet → the address the miner credits (what the Mining tab shows).
-            "/api/v1/mine-wallet" => Some(format!(r#"{{"mining_wallet":"{}"}}"#, crate::miner_wallet())),
+            // `mining_wallet` is the wallet this computer holds the KEY of (the [W] page signs with it). `payout`
+            // is the address chosen with [P] that rewards are credited to instead, or null.
+            "/api/v1/mine-wallet" => Some(serde_json::json!({ "mining_wallet": crate::miner_wallet(), "payout": crate::payout::chosen() }).to_string()),
             // GET /api/v1/use-wallet?address=<64hex> → the [W] wallet claims "mine to ME",
             // so mined coins land in the keyed wallet the operator actually sees (not the
             // unspendable hostname-hash default). Takes effect on the next mining (re)start.

@@ -131,16 +131,19 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     // Live at the time this was added: 7.77 SIGIL transparent and unmoving, while the
     // same rig's shielded holdings grew past 100 SIGIL. Those two rows are the difference
     // between "mining is broken" and "mining is working and private".
-    let [head, rates, tally, netrow, solverow, acctrow, shrow, poolrow, body, hint] = Layout::vertical([
-        Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+    let [head, payrow, rates, tally, netrow, solverow, acctrow, shrow, poolrow, body, hint] = Layout::vertical([
+        Constraint::Length(1), Constraint::Length(1),
+        Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
         Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
         Constraint::Min(0), Constraint::Length(1),
     ]).areas(inner);
 
-    let wallet = miner_wallet();
-    let wshort = if wallet.len() >= 14 {
-        format!("{}…{}", &wallet[..8], &wallet[wallet.len() - 6..])
-    } else { wallet.clone() };
+    // Where the coins go: the running miner's own wallet first, so this row can never name another one.
+    // The label describes the wallet on the row, not the setting: the two differ for a moment when the setting is
+    // changed from the command line while the miner runs (`apply` then says what to press).
+    let wallet = app.mine_active_wallet.clone().unwrap_or_else(crate::payout::mining_wallet);
+    let custom = wallet != miner_wallet();
+    let apply = app.mine_active_wallet.as_ref().is_some_and(|w| *w != crate::payout::mining_wallet());
 
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(format!(" [{mode}] "), Style::default().fg(mcol).add_modifier(Modifier::BOLD)),
@@ -148,9 +151,17 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         dim(" + "), Span::styled("VDF Ω", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
         dim("   "), Span::styled(conn_txt, Style::default().fg(conn_col).add_modifier(Modifier::BOLD)),
         dim("   node "), Span::styled(engine_node_url(), Style::default().fg(C_DIM)),
-        dim("   "), Span::styled(wshort, Style::default().fg(C_DIM)),
         Span::styled(relay_summary(), Style::default().fg(C_NEON_CYAN)),
     ])), head);
+
+    // 10.8.0: the one line a miner must be able to check. The whole address when the row has room for it.
+    let wallet_shown = if payrow.width as usize >= 64 + 62 { wallet.clone() } else { crate::payout::short(&wallet) };
+    f.render_widget(Paragraph::new(Line::from(vec![
+        dim(" coins go to "), Span::styled(sa(wallet_shown), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        dim(&format!("  {}   ", crate::payout::owner_text(custom))),
+        Span::styled("[P]", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)), dim(" change it"),
+        Span::styled(if apply { "   a new setting waits: press M twice" } else { "" }, Style::default().fg(C_NEON_GOLD)),
+    ])), payrow);
 
     f.render_widget(Paragraph::new(Line::from(vec![
         dim(" hashrate "), Span::styled(engine::format_hps(s.hashrate), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
@@ -167,11 +178,14 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     let bal_pair: (String, String) = {
         #[cfg(feature = "shield-register")]
         {
-            match crate::shield_setup::latest_shielded() {
+            // A payout address has its key somewhere else: this computer's private coins are another wallet's.
+            match crate::shield_setup::latest_shielded().filter(|_| !custom) {
                 Some(sn) => (
                     format!("{} SIGIL", fmt_glyphs(sn.balance as u128, 8)),
                     format!(" shielded  ·  {} transparent", fmt_glyphs(s.balance as u128, 8)),
                 ),
+                None if custom && s.balance == 0 && s.shares_ok == 0 => ("—".to_string(), " (read after the first share)".to_string()),
+                None if custom => (format!("{} SIGIL", fmt_glyphs(s.balance as u128, 8)), " public, in the payout wallet".to_string()),
                 None => (format!("{} SIGIL", fmt_glyphs(s.balance as u128, 8)), " transparent".to_string()),
             }
         }
@@ -326,7 +340,7 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                         crate::store_lifecycle::human_bytes(sn.fetched_bytes),
                         if sn.view_tags { " · view tags" } else { "" }
                     )),
-                    dim("   (transparent balance stays 0 — this is the real one)"),
+                    dim(if custom { "   (this computer's own wallet, not the payout wallet)" } else { "" }),
                 ])), shrow);
 
                 // Pool fill matters to a miner in a way it does not to anyone else: at
@@ -361,7 +375,7 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
             None => {
                 f.render_widget(Paragraph::new(Line::from(vec![
                     Span::styled(" 🛡 SHIELDED", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)),
-                    dim("  no seed — set SIGIL_MINE_SEED to see private rewards (rewards stay transparent without it)"),
+                    dim("  this computer's own wallet: first scan still running (mining itself does not wait for it)"),
                 ])), shrow);
                 f.render_widget(Paragraph::new(Line::from(dim(" pool  —"))), poolrow);
             }
@@ -422,6 +436,8 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         dim(if mining { "stop  " } else { "start  " }),
         Span::styled("g ", Style::default().fg(C_NEON_PINK).add_modifier(Modifier::BOLD)),
         dim("GPU/CPU  "),
+        Span::styled("p ", Style::default().fg(C_NEON_PINK).add_modifier(Modifier::BOLD)),
+        dim("payout wallet  "),
         Span::styled(err, Style::default().fg(C_RED)),
     ])), hint);
 }
@@ -497,6 +513,7 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
         Some(_) => String::new(),
         None => " (private: scanning…)".to_string(),
     };
+    let pays = app.mine_active_wallet.clone().unwrap_or_else(crate::payout::mining_wallet);
     let tlines = vec![
         Line::from(vec![
             dim("reward "), Span::styled(format!("{} SIGIL/blk", crate::heroes::reward_text(app.st.reward_sig)), Style::default().fg(C_GREEN)),
@@ -516,6 +533,12 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
             dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
             dim("   est earn "), Span::styled(est_earn, Style::default().fg(C_GOLD)),
             dim("   [M] mine"),
+        ]),
+        Line::from(vec![
+            dim("coins go to "),
+            Span::styled(sa(crate::payout::short(&pays)), Style::default().fg(C_NEON_CYAN)),
+            dim(&format!("  {}   ", crate::payout::owner_text(pays != miner_wallet()))),
+            dim("[P] change it"),
         ]),
     ];
     f.render_widget(Paragraph::new(tlines), tele);

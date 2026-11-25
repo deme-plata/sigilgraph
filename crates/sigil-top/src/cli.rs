@@ -211,7 +211,7 @@ pub(crate) fn dispatch(argv: &[String]) -> bool {
             let fallback_wallet = || {
                 argv.get(1).cloned()
                     .or_else(|| std::env::var("SIGIL_MINE_WALLET").ok())
-                    .unwrap_or_else(miner_wallet)
+                    .unwrap_or_else(crate::payout::mining_wallet)
             };
             let wallet = if let Some(seed) = seed_material.as_deref() {
                 #[cfg(feature = "shield-register")]

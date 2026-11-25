@@ -134,6 +134,13 @@ impl Keypair {
     }
 }
 
+/// Is this 32-byte value a usable Ed25519 public key — i.e. can it be a wallet address at all? A random value
+/// is a point on the curve only about half the time, so a typo in an address usually fails here. Small-order
+/// points (no private key behind them) are refused too.
+pub fn is_wallet_key(pk: &[u8; 32]) -> bool {
+    VerifyingKey::from_bytes(pk).map(|vk| !vk.is_weak()).unwrap_or(false)
+}
+
 /// Verify an Ed25519 signature; never panics on malformed inputs.
 pub fn verify_sig(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
     match VerifyingKey::from_bytes(pk) {
@@ -906,5 +913,23 @@ mod tests {
         assert!(!c.has_scope("university:auditor"));
         iss.revoke_all(); // a DNS epoch bump kills issued credentials too
         assert_eq!(verify_token(&cred, &iss.anchor(), now()), Err(OAuthError::KeyRevoked));
+    }
+}
+
+#[cfg(test)]
+mod wallet_key_tests {
+    use super::*;
+
+    #[test]
+    fn real_keys_pass_and_about_half_of_random_bytes_do_not() {
+        for i in 1..=64u8 {
+            assert!(is_wallet_key(&Keypair::from_seed(&[i; 32]).pubkey()));
+        }
+        let ok = (0..2000u32).filter(|i| is_wallet_key(blake3::hash(&i.to_le_bytes()).as_bytes())).count();
+        assert!((850..=1150).contains(&ok), "{ok} of 2000 random values are curve points");
+        // the identity point (y = 1) is a valid encoding with no private key behind it
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(!is_wallet_key(&identity));
     }
 }

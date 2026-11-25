@@ -123,6 +123,11 @@ pub(crate) fn draw_welcome_modal(f: &mut Frame, area: Rect) {
             Span::styled(sa(" to START — "), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
             Span::styled(sa("[5] Mining  [M] mine"), Style::default().fg(C_DIM)),
         ]),
+        Line::from(vec![
+            Span::styled(sa("  press "), Style::default().fg(C_DIM)),
+            Span::styled(" P ", Style::default().bg(C_NEON_GOLD).fg(C_BG).add_modifier(Modifier::BOLD)),
+            Span::styled(sa(" to choose the wallet your coins go to"), Style::default().fg(C_DIM)),
+        ]),
         Line::from(Span::styled(sa("        any other key to skip"), Style::default().fg(C_DIM))),
     ];
     lines.truncate(h.saturating_sub(2) as usize);

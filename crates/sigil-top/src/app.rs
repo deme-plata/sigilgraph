@@ -149,6 +149,11 @@ pub(crate) struct App {
     pub(crate) tab: Tab,
     pub(crate) swarm: SwarmView,
     pub(crate) last_swarm_load: Instant,
+    /// [P] the payout screen, while it is open (it takes every key).
+    pub(crate) payout_ui: Option<crate::payout::PayoutUi>,
+    /// The wallet the RUNNING miner credits — what the Mining tab shows, so the screen can never name a wallet
+    /// other than the one being mined to.
+    pub(crate) mine_active_wallet: Option<String>,
 }
 
 impl App {
@@ -246,6 +251,8 @@ impl App {
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
+              payout_ui: None,
+              mine_active_wallet: None,
         }
     }
 
@@ -320,22 +327,47 @@ impl App {
     pub(crate) fn toggle_engine_mining(&mut self) {
         self.mining = !self.mining;
         if self.mining {
-            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (url, wallet) = (engine_node_url(), miner_wallet());
-            let (st, dg, gf) = (self.mine_stats.clone(), self.mine_desired_gpu.clone(), self.mine_gpu_failed.clone());
-            let stopc = stop.clone();
-            std::thread::spawn(move || engine::supervisor(url, wallet, st, stopc, dg, gf));
-            self.mine_stop = Some(stop);
+            let wallet = self.start_engine();
             self.tab = Tab::Mining;
-            self.toast = "▲ MINING STARTED — dual-lane BLAKE4 Φ + VDF Ω, in-process".into();
+            self.toast = format!("▲ MINING STARTED — your coins go to {} ({}). Press P to use another wallet.",
+                crate::payout::short(&wallet), crate::payout::owner_text(crate::payout::chosen().is_some()));
             flux_webhook("mining_start", &format!("engine supervisor up (gpu_wanted={})", self.mine_desired_gpu.load(std::sync::atomic::Ordering::Relaxed)));
             self.toast_sticky = true;
         } else {
-            if let Some(s) = self.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+            self.stop_engine();
             self.toast = "■ mining stopped".into();
             flux_webhook("mining_stop", "engine stopped");
             self.toast_sticky = true;
         }
+    }
+
+    /// Start the engine on the wallet mining pays into (see `payout.rs`); returns that wallet.
+    fn start_engine(&mut self) -> String {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (url, wallet) = (engine_node_url(), crate::payout::mining_wallet());
+        let (st, dg, gf) = (self.mine_stats.clone(), self.mine_desired_gpu.clone(), self.mine_gpu_failed.clone());
+        let (stopc, w) = (stop.clone(), wallet.clone());
+        std::thread::spawn(move || engine::supervisor(url, w, st, stopc, dg, gf));
+        self.mine_stop = Some(stop);
+        self.mine_active_wallet = Some(wallet.clone());
+        wallet
+    }
+
+    fn stop_engine(&mut self) {
+        if let Some(s) = self.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+        self.mine_active_wallet = None;
+    }
+
+    /// [P] saved another payout wallet while the miner runs: move it over now. The old workers finish the share
+    /// they are on (it credits the old wallet) into their own counters, so the new wallet starts from a clean
+    /// sheet. False = not mining, nothing to move.
+    pub(crate) fn repoint_mining(&mut self) -> bool {
+        if !self.mining { return false; }
+        if self.mine_active_wallet.as_deref() == Some(crate::payout::mining_wallet().as_str()) { return true; }
+        self.stop_engine();
+        self.mine_stats = std::sync::Arc::new(std::sync::Mutex::new(MinerStats::default()));
+        self.start_engine();
+        true
     }
 
     /// v0.10.5.1: adaptive refresh cadence. Base interval while the node answers;

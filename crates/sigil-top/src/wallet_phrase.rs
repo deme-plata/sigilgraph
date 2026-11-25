@@ -511,7 +511,7 @@ fn publish_receiving_key() {
 #[cfg(not(feature = "shield-register"))]
 fn publish_receiving_key() {}
 
-/// `sigil-top wallet [show | phrase | import | new [--replace]]`
+/// `sigil-top wallet [show | phrase | import | new [--replace] | mine-to [<address> | own]]`
 pub(crate) fn run_cli(args: &[String]) {
     let home = crate::flux_home();
     let has_wallet = std::path::Path::new(&seed_path_in(&home)).exists();
@@ -579,7 +579,8 @@ pub(crate) fn run_cli(args: &[String]) {
                 Err(e) => eprintln!("  ✗ {e}"),
             }
         }
-        other => eprintln!("  unknown `wallet {other}` — use: show | phrase | import | new [--replace]"),
+        "mine-to" => { crate::payout::run_cli(args.get(1).map(|s| s.as_str()), ask); }
+        other => eprintln!("  unknown `wallet {other}` — use: show | phrase | import | new [--replace] | mine-to [<address> | own]"),
     }
 }
 
@@ -593,15 +594,27 @@ pub(crate) fn first_run_choice() {
     let named = std::env::var("SIGIL_MINE_SEED").is_ok()
         || std::env::var("SIGIL_MINE_WALLET").is_ok()
         || std::path::Path::new(&seed_path_in(&home)).exists()
-        || std::path::Path::new(&crate::mine_wallet_path()).exists();
+        || std::path::Path::new(&crate::mine_wallet_path()).exists()
+        || crate::payout::chosen().is_some();
     if named || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return;
     }
     println!("\n  SIGIL wallet — this install has none yet.\n");
     println!("   [1] I already have a SIGIL wallet (made on sigilgraph.org or in the phone app)");
-    println!("   [2] Make a new wallet (12 words — the same words also open it on sigilgraph.org and the phone)\n");
-    let res = match ask("  Choose 1 or 2 [2]: ").as_str() {
+    println!("   [2] Make a new wallet (12 words — the same words also open it on sigilgraph.org and the phone)");
+    println!("   [3] I only mine here — send my coins to an address I paste (no secret words on this computer)\n");
+    let res = match ask("  Choose 1, 2 or 3 [2]: ").as_str() {
         "1" => import_interactive(&home),
+        "3" => {
+            let typed = ask("  Paste the address (phone app or sigilgraph.org > Receive): ");
+            if !typed.is_empty() && crate::payout::run_cli(Some(&typed), ask) {
+                println!("  You can change it any time: press P in the dashboard.");
+            } else {
+                println!("  No payout address set. You can set it any time: press P in the dashboard.");
+            }
+            let _ = ask("  Press Enter to open the dashboard… ");
+            return;
+        }
         _ => new_wallet(&home),
     };
     match res {

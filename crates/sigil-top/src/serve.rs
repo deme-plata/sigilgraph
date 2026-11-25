@@ -1035,6 +1035,19 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
             "application/json; charset=utf-8",
         ));
     }
+    // 2026-11-25: the Send window's "Scan QR" (live on sigilgraph.org since 11-23). The page loads
+    // /send-v1/sigil-qrscan.js, which fetches jsQR from beside itself on first use. The page got the button on 11-23
+    // without these two, so in [W] it answered 404 and the button did nothing.
+    if names(safe, "sigil-qrscan.js") {
+        return Some((include_str!("../../../gui/sigil-qrscan.js").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "jsQR-1.4.0.js") {
+        return Some((include_str!("../../../gui/jsQR-1.4.0.js").as_bytes().to_vec(), JS));
+    }
+    // The wallet's Settings > Bluetooth button; the page loads it, sigilgraph.org serves it, [W] answered 404.
+    if safe == "sigil-ble.js" {
+        return Some((include_str!("../../../gui/sigil-ble.js").as_bytes().to_vec(), JS));
+    }
     // 2026-11-11: the ◈ NETWORK STATS 3D map. The page imports /sigil-netmap.js, which imports three.js from
     // /three/ — all three files ride in the binary, so [W] never loads script from another host (this origin
     // holds the local signer). Exact paths only: `names` would also match these under any folder.
@@ -2569,6 +2582,30 @@ mod tests {
 
 #[cfg(test)]
 mod payout_row_tests {
+    /// Every script and stylesheet the [W] page loads from its own address must ride in the binary. A page edit that
+    /// adds one without adding it here ships a button that does nothing (the QR scanner, 11-23).
+    #[test]
+    fn every_script_the_wallet_page_loads_is_in_the_binary() {
+        let page = include_str!("../../../gui/sigil-wallet-tron-embedded.html");
+        let mut seen = Vec::new();
+        for (tag, attr) in [("<script", "src=\""), ("<link", "href=\"")] {
+            for t in page.split(tag).skip(1) {
+                let head = &t[..t.find('>').unwrap_or(t.len())];
+                let Some(u) = head.split(attr).nth(1).and_then(|r| r.split('"').next()) else { continue };
+                let file = u.split(['?', '#']).next().unwrap_or("");
+                if u.contains("://") || u.starts_with("data:") || u.starts_with("//") { continue; }
+                if ![".js", ".mjs", ".css", ".json"].iter().any(|e| file.ends_with(e)) { continue; }
+                let safe = file.trim_start_matches("./").trim_start_matches('/').to_string();
+                assert!(super::embedded_surface(&safe).is_some(), "{u}: the wallet page loads it, the binary does not serve it");
+                seen.push(safe);
+            }
+        }
+        assert!(seen.iter().any(|f| f == "send-v1/sigil-qrscan.js") && seen.len() >= 8, "{seen:?}");
+        // loaded by the scanner itself, from beside it
+        assert!(include_str!("../../../gui/sigil-qrscan.js").contains("new URL('jsQR-1.4.0.js', SELF)"));
+        assert!(super::embedded_surface("send-v1/jsQR-1.4.0.js").is_some());
+    }
+
     /// The [W] page's "Mining wallet" row must name the address rewards really go to. The page is edited often;
     /// if that row is reworded, this fails instead of the row quietly going back to the wrong wallet.
     #[test]

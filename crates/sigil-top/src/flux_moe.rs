@@ -37,7 +37,7 @@
 //!    model`; it now reports what happened and what to do.
 
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where the user's own ollama listens. Overridable for exotic setups.
 pub(crate) const DEFAULT_OLLAMA: &str = "http://localhost:11434";
@@ -141,6 +141,41 @@ pub(crate) fn chat_timeout_secs() -> u64 {
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(900)
+}
+
+// ── The context window (11-26) ───────────────────────────────────────────────────────────────────────
+//
+// Nothing here ever set `num_ctx`, so every request got ollama's default window: 4096 tokens on ollama 0.20. The AI
+// tab sends far more: the system text, the flux-signed skills (~11 KB) and 11 tool definitions. Measured
+// 2026-11-26 on Epsilon with the mythos model: the stats line read "prompt 4096 tok" (cut to the window), no tool was
+// called, and the model wrote "I called /v1/network/topology … height 492,234" while the chain stood at ~25.97 M.
+// The cut drops the START of the prompt, which is where the tool definitions are rendered. A stand-in ollama (the
+// 11-06 screen test) never cuts, so it could not show this. Now the window is sized to the request.
+
+static CTX_FLOOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Pure: the window for a request of `payload_chars` characters (messages + tools as JSON): ~3 characters per
+/// token for this mix of prose and JSON (conservative), plus 4096 for thinking, the answer and tool results,
+/// rounded up to 8192-token steps, 8192..=32768.
+pub(crate) fn num_ctx_for(payload_chars: usize) -> u32 {
+    let est = (payload_chars / 3) as u32 + 4096;
+    (est.div_ceil(8192) * 8192).clamp(8192, 32768)
+}
+
+/// The window to ask for. Never steps DOWN within a run: every change of window makes ollama reload the whole
+/// model (15-19 s for a 9B on Epsilon). `SIGIL_AI_NUM_CTX=<n>` fixes it.
+pub(crate) fn chat_num_ctx(payload_chars: usize) -> u32 {
+    if let Some(v) = std::env::var("SIGIL_AI_NUM_CTX").ok().and_then(|s| s.trim().parse::<u32>().ok()).filter(|v| *v >= 2048) {
+        return v;
+    }
+    let need = num_ctx_for(payload_chars);
+    need.max(CTX_FLOOR.fetch_max(need, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// `options.num_ctx` for a chat body built from `messages` (and `tools`, if any).
+pub(crate) fn chat_options(messages: &[serde_json::Value], tools: Option<&serde_json::Value>) -> serde_json::Value {
+    let chars = serde_json::to_string(messages).map_or(0, |s| s.len()) + tools.and_then(|t| serde_json::to_string(t).ok()).map_or(0, |s| s.len());
+    serde_json::json!({ "num_ctx": chat_num_ctx(chars) })
 }
 
 /// Whether to override ollama's own thinking default. `None` (no env var) means
@@ -373,14 +408,30 @@ pub(crate) fn approx_model_bytes(tag: &str) -> Option<u64> {
 fn measured_weights_gib(tag: &str) -> Option<f64> {
     match tag.trim().to_ascii_lowercase().as_str() {
         "gpt-oss:120b" => Some(60.9),
+        // measured 2026-11-26: the repaired file is 5,629,110,496 B, the upload it is built from 5,780,092,000 B
+        t if t == MYTHOS_TAG => Some(5.24),
+        t if t == MYTHOS_SOURCE => Some(5.38),
         _ => None,
     }
 }
 
+/// The mythos model (`model mythos`): a Qwen 3.5 9B fine-tune ("Qwythos Claude Mythos", refusals removed), the
+/// model the operator picked for Flux on 2026-11-26. Ollama's registry has it only as the community upload
+/// [`MYTHOS_SOURCE`], which this generation of ollama cannot load (an extra MTP layer, see `gguf_repair`) and
+/// which ships no chat format (raw `{{ .Prompt }}`), so as published it can neither run nor use tools.
+/// `ai_setup::pull_model` therefore builds [`MYTHOS_TAG`] on the user's own machine: pull the upload, copy it
+/// without the MTP layer, register it with the Qwen 3.5 chat format (which is what gives it tools), and
+/// remove the unrepaired download. Same tag as the Flux cockpit's repaired copy on Epsilon.
+pub(crate) const MYTHOS_TAG: &str = "qwythos-9b:flux";
+pub(crate) const MYTHOS_SOURCE: &str = "chatgpt1/qwythos-9b-claude-mythos-5-1m-abliterated:latest";
+
+/// `model mythos` / `model qwythos` mean [`MYTHOS_TAG`].
+fn mythos_alias(w: &str) -> bool { matches!(w.trim().to_ascii_lowercase().as_str(), "mythos" | "qwythos") }
+
 /// What the `model` command offers, largest first. These are CHOICES ONLY: auto-setup reads the signed
 /// manifest's ladder and never this list, so a 61 GiB download can only ever start from a user's `yes`.
 /// Any other tag works too (`model <tag>`); models already installed are added to the list.
-pub(crate) const MODEL_OPTIONS: &[&str] = &["gpt-oss:120b", "qwen3.8:27b", "qwen3.5:9b", "qwen3:8b", "qwen3:4b", "qwen3:1.7b"];
+pub(crate) const MODEL_OPTIONS: &[&str] = &["gpt-oss:120b", "qwen3.8:27b", "qwen3.5:9b", MYTHOS_TAG, "qwen3:8b", "qwen3:4b", "qwen3:1.7b"];
 
 /// What the user typed in the AI tab about the model.
 #[derive(Debug, PartialEq, Eq)]
@@ -407,7 +458,7 @@ pub(crate) fn parse_model_command(s: &str) -> Option<ModelCommand> {
             let l = w.to_ascii_lowercase();
             if l == "auto" || l == "automatic" {
                 Some(ModelCommand::Auto)
-            } else if l.contains(':') || l.parse::<usize>().is_ok() {
+            } else if l.contains(':') || l.parse::<usize>().is_ok() || mythos_alias(&l) {
                 Some(ModelCommand::Choose(w.to_string()))
             } else {
                 None
@@ -421,6 +472,8 @@ pub(crate) fn parse_model_command(s: &str) -> Option<ModelCommand> {
 pub(crate) fn model_options(installed: &[String]) -> Vec<String> {
     let mut out: Vec<String> = MODEL_OPTIONS.iter().map(|s| s.to_string()).collect();
     for m in installed {
+        // the unrepaired mythos upload cannot run here; offering it would be offering a model that fails to load
+        if m.eq_ignore_ascii_case(MYTHOS_SOURCE) { continue; }
         if !out.iter().any(|o| o.eq_ignore_ascii_case(m)) {
             out.push(m.clone());
         }
@@ -430,6 +483,7 @@ pub(crate) fn model_options(installed: &[String]) -> Vec<String> {
 
 /// A number picks from the list; anything else must look like a tag.
 pub(crate) fn resolve_model_choice(arg: &str, options: &[String]) -> Result<String, String> {
+    if mythos_alias(arg) { return Ok(MYTHOS_TAG.to_string()); }
     if let Ok(n) = arg.parse::<usize>() {
         return options.get(n.wrapping_sub(1)).cloned()
             .ok_or_else(|| format!("There is no number {n} in the list. Type `model` to see it."));
@@ -615,9 +669,23 @@ pub(crate) fn model_list_text(installed: &[String], current: Option<&str>, hw: &
             ModelFit::Unknown => "cannot tell if it fits",
         };
         let mark = if in_use(tag) { "▶" } else { " " };
-        out.push_str(&format!("{mark}{:>2}. {tag} · {size} · {state} · {fit}\n", i + 1));
+        // What an installed model can do with the node's tools (ollama's own report; asked in the background).
+        let tools = if crate::ai_setup::have_model(installed, tag) {
+            match model_caps_now(tag) {
+                c @ Caps::Known(_) if c.has("tools") => " · tools ✓",
+                Caps::Known(_) => " · no tools",
+                _ => "",
+            }
+        } else { "" };
+        out.push_str(&format!("{mark}{:>2}. {tag} · {size} · {state} · {fit}{tools}\n", i + 1));
+        if tag.eq_ignore_ascii_case(MYTHOS_TAG) {
+            out.push_str("      mythos: Qwen 3.5 9B \"Claude Mythos\" fine-tune, refusals removed. Built here from a community upload and repaired so it runs and can use the SIGIL tools.\n");
+        }
     }
-    out.push_str("Type `model 1` or `model gpt-oss:120b` to switch, `model auto` to let sigil-top choose. Nothing downloads until you say yes.");
+    // Which SIGIL tools (the node's MCP surface) a model marked "tools ✓" gets here: all on this device, fewer off it.
+    let granted = crate::ai_tools::granted_scopes(!ollama_is_local(), std::env::var("SIGIL_AI_REMOTE_SCOPES").ok().as_deref());
+    out.push_str(&format!("🔧 a model with tools ✓ can call these SIGIL tools here (MCP): {} — actions ask you first.\n", tool_names_text(&granted)));
+    out.push_str("Type `model 1`, `model mythos` or `model gpt-oss:120b` to switch, `model auto` to let sigil-top choose. Nothing downloads until you say yes.");
     out
 }
 
@@ -641,6 +709,16 @@ pub(crate) fn model_download_question(tag: &str, need: Option<u64>, fit: ModelFi
         ModelFit::Memory => "It fits in memory, but whatever is not on a GPU runs on the CPU, which is slow for a model this size.",
         _ => "I cannot measure whether it fits here.",
     };
+    if tag.eq_ignore_ascii_case(MYTHOS_TAG) {
+        let mem = need.map_or_else(|| "a few GB".to_string(), gib_text);
+        return format!(
+            "`{MYTHOS_TAG}` (mythos) is not on this machine yet. sigil-top downloads the community upload {MYTHOS_SOURCE} (~5.4 GB) and repairs it here: \
+             as published it cannot run on ollama (it carries an extra MTP layer) and has no chat format, so it could not use tools either. \
+             The repair copies it without that layer and adds the Qwen 3.5 chat format, which gives it the SIGIL tools; the unrepaired download is removed afterwards. \
+             It needs ~13 GB of free disk while repairing (~5.2 GB after) and ~{mem} of memory to run. {speed}\n\
+             It is a Qwen 3.5 9B fine-tune with its refusals removed (\"abliterated\"); it is not ChatGPT or Claude.\n\
+             Type yes to download it. Anything else cancels.");
+    }
     format!("`{tag}` is not on this machine yet. {cost} {speed}\nType yes to download it. Anything else cancels.")
 }
 
@@ -769,6 +847,122 @@ pub(crate) fn pick_model_with(
 ///
 /// So: answer the question that was meant, in the user's own language, and keep
 /// the honesty rule exactly where it was — live numbers still come from the node.
+// ── What a model can do (ollama's own report) ──────────────────────────────────────────────
+//
+// Ollama says per model what it supports (`/api/show` → `capabilities`, ollama ≥ 0.6): completion, tools,
+// thinking, vision. "tools" decides whether the SIGIL tools (the node's MCP surface in `ai_tools`) work at all:
+// a model without it is refused by ollama when tools are sent, and the agent falls back to a plain answer.
+
+/// A model's capabilities as ollama reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Caps {
+    /// Asked in the background, no answer yet.
+    Checking,
+    /// This ollama does not report capabilities, or could not be asked.
+    Unknown,
+    Known(Vec<String>),
+}
+
+impl Caps {
+    pub(crate) fn has(&self, c: &str) -> bool { matches!(self, Caps::Known(v) if v.iter().any(|x| x == c)) }
+}
+
+/// Pure: `capabilities` out of an `/api/show` reply.
+pub(crate) fn caps_from_show(v: &serde_json::Value) -> Caps {
+    match v.get("capabilities").and_then(|c| c.as_array()) {
+        Some(a) => Caps::Known(a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()),
+        None => Caps::Unknown,
+    }
+}
+
+pub(crate) fn fetch_caps_at(http: &reqwest::blocking::Client, base: &str, model: &str) -> Caps {
+    match http.post(format!("{base}/api/show")).json(&serde_json::json!({"model": model})).send() {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().map(|v| caps_from_show(&v)).unwrap_or(Caps::Unknown),
+        _ => Caps::Unknown,
+    }
+}
+
+static CAPS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, (Instant, Caps)>>> = OnceLock::new();
+
+/// Pure: whether a cached answer of this age is still good. A model can be re-created under the same name,
+/// and "not installed yet" must not stick for long after it is installed.
+fn caps_fresh(c: &Caps, age: Duration) -> bool {
+    age < match c { Caps::Known(_) => Duration::from_secs(120), Caps::Checking => Duration::from_secs(60), Caps::Unknown => Duration::from_secs(10) }
+}
+
+/// What `model` can do, for the screen. Never blocks: the first call answers `Checking` and asks ollama on a
+/// background thread (through the same route as the chat, so Tor stays Tor).
+pub(crate) fn model_caps(model: &str) -> Caps {
+    let map = CAPS.get_or_init(Default::default);
+    let key = model.trim().to_ascii_lowercase();
+    {
+        let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, c)) = m.get(&key) {
+            if caps_fresh(c, at.elapsed()) { return c.clone(); }
+        }
+        m.insert(key.clone(), (Instant::now(), Caps::Checking));
+    }
+    let model = model.to_string();
+    std::thread::spawn(move || {
+        let caps = match chat_client(&current_ai_route()) {
+            Ok(http) => fetch_caps_at(&http, &ollama_base(), &model),
+            Err(_) => Caps::Unknown,
+        };
+        if let Some(map) = CAPS.get() { map.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (Instant::now(), caps)); }
+    });
+    Caps::Checking
+}
+
+/// Like [`model_caps`], but a LOCAL ollama is asked right away (≤ 2 s, normally milliseconds), so a list the user
+/// just asked for is complete the first time. A remote ollama (maybe over Tor) is never waited for here.
+pub(crate) fn model_caps_now(model: &str) -> Caps {
+    let c = model_caps(model);
+    if c != Caps::Checking || !ollama_is_local() { return c; }
+    let caps = fetch_caps_at(&client_with_timeout(2), &ollama_base(), model);
+    if let Some(map) = CAPS.get() {
+        map.lock().unwrap_or_else(|e| e.into_inner()).insert(model.trim().to_ascii_lowercase(), (Instant::now(), caps.clone()));
+    }
+    caps
+}
+
+/// Forget what is known about `model` (setup just (re)built it).
+pub(crate) fn forget_caps(model: &str) {
+    if let Some(map) = CAPS.get() { map.lock().unwrap_or_else(|e| e.into_inner()).remove(&model.trim().to_ascii_lowercase()); }
+}
+
+/// Pure: the names of the SIGIL tools offered for `granted`, readable (`sigil_network_status` → `network status`).
+pub(crate) fn tool_names_text(granted: &[crate::ai_tools::Scope]) -> String {
+    let defs = crate::ai_tools::tool_defs_for(granted);
+    let names: Vec<String> = defs.as_array().map(|a| a.iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+        .map(|n| n.trim_start_matches("sigil_").replace('_', " ")).collect()).unwrap_or_default();
+    names.join(" · ")
+}
+
+/// Pure: the AI tab's line about what the model in use can do with this node. `granted` = the tool scopes it
+/// gets (all of them on this device, fewer off it; `ai_tools::granted_scopes`).
+pub(crate) fn abilities_line(caps: &Caps, granted: &[crate::ai_tools::Scope]) -> String {
+    use crate::ai_tools::Scope;
+    let counts = crate::ai_tools::tool_counts(granted);
+    let total: usize = counts.iter().map(|(_, n)| n).sum();
+    let parts: Vec<String> = counts.iter().filter(|(_, n)| *n > 0).map(|(s, n)| match s {
+        Scope::Network => format!("{n} network"),
+        Scope::Wallet => format!("{n} wallet"),
+        Scope::Payments => format!("{n} payment"),
+        Scope::Actions => format!("{n} actions you confirm"),
+    }).collect();
+    let tools = match caps {
+        Caps::Known(_) if caps.has("tools") => format!("🔧 MCP tools ✓ it can call {total} SIGIL tools ({})", parts.join(" · ")),
+        Caps::Known(_) => "🔧 no tool support: it answers from what it knows and cannot read live numbers from your node (`model mythos` can)".to_string(),
+        Caps::Checking => "🔧 checking what this model can do…".to_string(),
+        Caps::Unknown => format!("🔧 {total} SIGIL tools offered (this ollama does not say whether the model can use them)"),
+    };
+    let mut s = format!(" {tools}");
+    if caps.has("thinking") { s.push_str("   ·   💭 thinks before it answers"); }
+    if caps.has("vision") { s.push_str("   ·   👁 reads images"); }
+    s
+}
+
 pub(crate) fn system_prompt() -> &'static str {
     "You are flux-moe, the on-device AI inside the SIGIL sigil-top node. You know the SIGIL \
      whitepaper well — the block header and its commitments, dual-lane mining (Φ proof-of-work \
@@ -884,10 +1078,12 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
     // off is a regression and forcing it on is already ollama's default. `think` is
     // also only understood by newer ollama; a model that rejects it is retried
     // without it just below.
+    let options = chat_options(&messages, None);
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": false,
+        "options": options,
     });
     if let (Some(t), Some(o)) = (think_override(), body.as_object_mut()) {
         o.insert("think".to_string(), serde_json::Value::Bool(t));
@@ -1070,7 +1266,8 @@ pub(crate) fn chat_stream(model: &str, history: &[(String, String)], user: &str,
             Err(e) => { let _ = tx.send(StreamEv::Whole(e)); return; }
         }
     };
-    let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": true });
+    let options = chat_options(&messages, None);
+    let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": true, "options": options });
     if let (Some(t), Some(o)) = (think_override(), body.as_object_mut()) {
         o.insert("think".to_string(), serde_json::Value::Bool(t));
     }

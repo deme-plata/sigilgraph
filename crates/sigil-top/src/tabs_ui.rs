@@ -144,7 +144,7 @@ pub(crate) const AI_STARTERS: [&str; 5] = [
 
 pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let [status_area, msgs_area, input_area] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(3),
         Constraint::Length(3),
     ]).areas(area);
@@ -157,7 +157,19 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
                                     app.ai_models.len()),
         (None, false) => format!(" 🧠 no local model yet — auto-setup runs at start-up and when this tab opens; type `setup` + Enter (or F5) to run it again{skills}"),
     };
-    f.render_widget(Paragraph::new(status).style(Style::default().fg(C_DIM)), status_area);
+    // Second line (11-26): what the model in use can do with this node, from ollama's own report. "tools" decides
+    // whether the SIGIL tools (the node's MCP surface, ai_tools) work at all.
+    let granted = crate::ai_tools::granted_scopes(!crate::flux_moe::ollama_is_local(), std::env::var("SIGIL_AI_REMOTE_SCOPES").ok().as_deref());
+    let caps = match (&app.ai_model, app.ai_setup_running) {
+        (Some(m), false) => Some(crate::flux_moe::model_caps(m)),
+        _ => None,
+    };
+    let abilities = caps.as_ref().map(|c| crate::flux_moe::abilities_line(c, &granted)).unwrap_or_default();
+    let ab_color = match &caps { Some(c) if c.has("tools") => C_NEON_CYAN, Some(crate::flux_moe::Caps::Known(_)) => C_NEON_GOLD, _ => C_DIM };
+    f.render_widget(Paragraph::new(vec![
+        Line::from(Span::styled(status, Style::default().fg(C_DIM))),
+        Line::from(Span::styled(abilities, Style::default().fg(ab_color))),
+    ]), status_area);
 
     // transcript
     let mut lines: Vec<Line> = Vec::new();
@@ -182,6 +194,12 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
             )));
         }
         lines.push(Line::from(dim("  It never invents balances or prices — those come from the node.")));
+        if caps.as_ref().is_some_and(|c| c.has("tools")) {
+            lines.push(Line::from(Span::styled(
+                format!("  🔧 tools it can call (MCP): {} — actions ask you first", crate::flux_moe::tool_names_text(&granted)),
+                Style::default().fg(C_NEON_CYAN),
+            )));
+        }
         lines.push(Line::from(dim("  Type `model` to see which AIs this machine can run, or to switch.")));
     }
     for (i, (role, content)) in app.ai_msgs.iter().enumerate() {

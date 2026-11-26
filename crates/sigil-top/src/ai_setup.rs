@@ -415,6 +415,12 @@ fn check_disk_for(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
         Some(n) => n,
         None => return Ok(()), // unknown size ⇒ do not guess, let ollama decide
     };
+    check_disk_need(model, need, tx)
+}
+
+/// [`check_disk_for`] with the bytes given (a repair needs the upload AND the repaired copy side by side).
+fn check_disk_need(what: &str, need: u64, tx: &Sender<SetupEvent>) -> Result<(), String> {
+    let model = what;
     // CHECK EVERY DIRECTORY THE BYTES COULD LAND IN, not just the one WE are configured for.
     //
     // A pull goes through ollama's HTTP API, so the weights land wherever the RUNNING SERVER
@@ -692,6 +698,21 @@ pub(crate) fn have_model(models: &[String], want: &str) -> bool {
 
 /// Pull `model` through ollama's own API, streaming progress to the transcript.
 pub(crate) fn pull_model(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
+    // The mythos model is not pulled as published: it is built here from the upload (see MYTHOS).
+    if model.eq_ignore_ascii_case(MYTHOS.target) {
+        if !crate::flux_moe::ollama_is_local() {
+            return Err(format!(
+                "{} is built by repairing a download on the machine that runs ollama, and your ollama is not on this machine ({}). Run sigil-top there, or choose another model.",
+                MYTHOS.target, crate::flux_moe::ollama_base()));
+        }
+        // The upload and the repaired copy sit side by side until the upload is removed: make room for both.
+        let pull = |m: &str, tx: &Sender<SetupEvent>| {
+            let need = crate::flux_moe::approx_model_bytes(MYTHOS.source).unwrap_or(0) + crate::flux_moe::approx_model_bytes(MYTHOS.target).unwrap_or(0);
+            check_disk_need(&format!("{} (download + repair)", MYTHOS.target), need, tx)?;
+            pull_model(m, tx)
+        };
+        return install_repaired_at(&crate::flux_moe::ollama_base(), &MYTHOS, tx, &pull);
+    }
     // Check the disk BEFORE downloading gigabytes onto a filesystem that cannot
     // hold them — a full root partition breaks far more than this tab.
     check_disk_for(model, tx)?;
@@ -760,6 +781,189 @@ pub(crate) fn pull_model(model: &str, tx: &Sender<SetupEvent>) -> Result<(), Str
     } else {
         Err("pull stream ended before ollama reported success".into())
     }
+}
+
+// ── A published model that needs a repair before ollama can run it (the mythos model) ─────────────────
+//
+// Measured 2026-11-26 (Epsilon, ollama 0.20.2): the upload `chatgpt1/qwythos-9b-claude-mythos-5-1m-abliterated`
+// fails to load ("qwen3next: layer 32 missing attn_qkv/attn_gate") because it carries a multi-token-prediction
+// layer ollama reads as an ordinary one, and its template is a bare `{{ .Prompt }}`, so ollama reports it as
+// `completion` only: no chat roles, no tools. Built here instead: the upload minus that layer (gguf_repair),
+// registered through ollama's own API with the Qwen 3.5 renderer/parser, which is what gives it `tools` and
+// `thinking`. No temporary file: the repaired bytes stream straight into ollama's blob store.
+
+/// How to turn a published upload into a model this ollama can run, with the chat format that gives it tools.
+pub(crate) struct Recipe {
+    pub(crate) source: &'static str,
+    pub(crate) target: &'static str,
+    /// The file name ollama records for the repaired weights (cosmetic; the digest is what counts).
+    pub(crate) file_name: &'static str,
+    pub(crate) renderer: &'static str,
+    pub(crate) parser: &'static str,
+}
+
+/// The mythos model ([`crate::flux_moe::MYTHOS_TAG`]); same tag, file and format as the Flux cockpit's copy.
+pub(crate) const MYTHOS: Recipe = Recipe {
+    source: crate::flux_moe::MYTHOS_SOURCE,
+    target: crate::flux_moe::MYTHOS_TAG,
+    file_name: "qwythos-9b-nomtp.gguf",
+    renderer: "qwen3.5",
+    parser: "qwen3.5",
+};
+
+/// Pure: the `/api/create` body. Sampling = the upload's own recommendation for Qwen 3.5.
+pub(crate) fn create_body(r: &Recipe, digest: &str) -> serde_json::Value {
+    let mut files = serde_json::Map::new();
+    files.insert(r.file_name.to_string(), serde_json::Value::String(format!("sha256:{digest}")));
+    serde_json::json!({
+        "model": r.target, "files": files, "renderer": r.renderer, "parser": r.parser,
+        "parameters": {"presence_penalty": 1.5, "temperature": 1, "top_k": 20, "top_p": 0.95},
+        "stream": false,
+    })
+}
+
+/// Pure: an ollama blob file name (`sha256-<64 hex>`) → its digest.
+pub(crate) fn digest_of_blob_path(p: &std::path::Path) -> Option<String> {
+    let hex = p.file_name()?.to_str()?.strip_prefix("sha256-")?;
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hex.to_ascii_lowercase())
+}
+
+/// Where ollama keeps a model's weights (the `FROM` line of `/api/show`). The repair reads that file, so it
+/// has to run on the machine that runs ollama.
+fn model_file_at(http: &reqwest::blocking::Client, base: &str, model: &str) -> Result<PathBuf, String> {
+    let v: serde_json::Value = http.post(format!("{base}/api/show")).json(&serde_json::json!({"model": model})).send()
+        .and_then(|r| r.error_for_status()).map_err(|e| format!("ollama show {model}: {e}"))?
+        .json().map_err(|e| format!("ollama show {model}: {e}"))?;
+    let mf = v.get("modelfile").and_then(|m| m.as_str()).unwrap_or("");
+    let from = mf.lines().find_map(|l| l.strip_prefix("FROM ")).map(str::trim)
+        .ok_or_else(|| format!("ollama did not say where {model} is stored"))?;
+    let path = PathBuf::from(from);
+    if !path.is_file() {
+        return Err(format!("ollama keeps {model} at {from}, which this program cannot read. The repair has to run on the machine that runs ollama ({base})."));
+    }
+    Ok(path)
+}
+
+fn blob_exists(http: &reqwest::blocking::Client, base: &str, digest: &str) -> bool {
+    http.head(format!("{base}/api/blobs/sha256:{digest}")).send().map(|r| r.status().is_success()).unwrap_or(false)
+}
+
+/// Counts what reqwest reads, for "⬆ 25 %… 50 %…" lines.
+struct Progress<R> { inner: R, done: u64, total: u64, shown: u64, tx: Sender<SetupEvent> }
+
+impl<R: Read> Read for Progress<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.done += n as u64;
+        let pct = self.done * 100 / self.total.max(1);
+        if pct / 25 > self.shown / 25 {
+            self.shown = pct;
+            let _ = self.tx.send(SetupEvent::Line(format!("  ⬆ {pct}% handed to ollama")));
+        }
+        Ok(n)
+    }
+}
+
+/// Stream the repaired file into ollama's blob store. Ollama checks the bytes against the digest in the URL.
+fn upload_blob(http: &reqwest::blocking::Client, base: &str, digest: &str, plan: &crate::gguf_repair::Plan,
+               tx: &Sender<SetupEvent>) -> Result<(), String> {
+    let reader = Progress { inner: plan.reader()?, done: 0, total: plan.out_len, shown: 0, tx: tx.clone() };
+    let r = http.post(format!("{base}/api/blobs/sha256:{digest}"))
+        .body(reqwest::blocking::Body::sized(reader, plan.out_len)).send()
+        .map_err(|e| format!("handing the repaired file to ollama failed: {e}"))?;
+    if !r.status().is_success() {
+        let st = r.status();
+        let t: String = r.text().unwrap_or_default().chars().take(200).collect();
+        return Err(format!("ollama refused the repaired file ({st}): {t}"));
+    }
+    Ok(())
+}
+
+fn create_from_blob(http: &reqwest::blocking::Client, base: &str, r: &Recipe, digest: &str) -> Result<(), String> {
+    let resp = http.post(format!("{base}/api/create")).json(&create_body(r, digest)).send()
+        .map_err(|e| format!("ollama could not register {}: {e}", r.target))?;
+    let st = resp.status();
+    let t = resp.text().unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&t).unwrap_or(serde_json::Value::Null);
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(format!("ollama could not register {}: {e}", r.target));
+    }
+    if !st.is_success() || v.get("status").and_then(|s| s.as_str()) != Some("success") {
+        return Err(format!("ollama could not register {} ({st}): {}", r.target, t.chars().take(200).collect::<String>()));
+    }
+    Ok(())
+}
+
+fn delete_model(http: &reqwest::blocking::Client, base: &str, model: &str) -> Result<(), String> {
+    let r = http.delete(format!("{base}/api/delete")).json(&serde_json::json!({"model": model})).send().map_err(|e| e.to_string())?;
+    if r.status().is_success() { Ok(()) } else { Err(format!("ollama answered {}", r.status())) }
+}
+
+/// Build `r.target` from the upload `r.source`: pull it (unless it is here), repair it if it carries an MTP
+/// layer, register it with the chat format, prove ollama now reports `tools`, and remove the upload if this
+/// run downloaded it. `pull` is [`pull_model`] (injected so the tests can use a stand-in ollama).
+pub(crate) fn install_repaired_at(base: &str, r: &Recipe, tx: &Sender<SetupEvent>,
+                                  pull: &dyn Fn(&str, &Sender<SetupEvent>) -> Result<(), String>) -> Result<(), String> {
+    let http = client(3 * 3600);
+    let pulled_here = !have_model(&crate::flux_moe::list_models_at(base), r.source);
+    emit(tx, format!("  · {} is built here from the community upload {}: download → repair → register", r.target, r.source));
+    if pulled_here {
+        pull(r.source, tx)?;
+    } else {
+        emit(tx, format!("  ✓ the upload {} is already here", r.source));
+    }
+    let path = model_file_at(&http, base, r.source)?;
+    let plan = crate::gguf_repair::Plan::inspect(&path)?;
+    let (digest, repaired) = if plan.needs_repair() {
+        emit(tx, format!(
+            "  🔧 the upload declares {} layers; the last is a multi-token-prediction helper that ollama would read as an ordinary layer and refuse to load",
+            plan.blocks));
+        let plan = plan.drop_mtp()?;
+        emit(tx, format!("  · copying it without blk.{} ({} tensors); every other byte unchanged → {:.2} GB",
+                         plan.blocks - 1, plan.dropped.len(), plan.out_len as f64 / 1e9));
+        if let Some(free) = path.parent().and_then(|d| free_disk_bytes(&d.to_path_buf())) {
+            if free < plan.out_len + 2 * GIB {
+                return Err(format!("not enough disk to repair {}: {:.1} GB free next to ollama's models ({}), need ~{:.1} GB plus headroom",
+                                   r.target, free as f64 / GIB as f64, path.parent().map(|d| d.display().to_string()).unwrap_or_default(),
+                                   plan.out_len as f64 / GIB as f64));
+            }
+        }
+        let mut shown = 0u64;
+        let digest = plan.sha256_hex(|done, total| {
+            let pct = done * 100 / total.max(1);
+            if pct / 25 > shown / 25 { shown = pct; emit(tx, format!("  · fingerprinting the repaired copy {pct}%")); }
+        })?;
+        (digest, Some(plan))
+    } else {
+        emit(tx, "  · the upload needs no layer repair; registering it with the chat format");
+        let d = digest_of_blob_path(&path).ok_or_else(|| format!("{} is not named like an ollama blob", path.display()))?;
+        (d, None)
+    };
+    if let Some(plan) = &repaired {
+        if blob_exists(&http, base, &digest) {
+            emit(tx, "  ✓ ollama already holds this exact repaired file");
+        } else {
+            emit(tx, format!("  ⬆ handing the repaired copy to ollama ({:.1} GB, sha256 {}…)", plan.out_len as f64 / 1e9, &digest[..12]));
+            upload_blob(&http, base, &digest, plan, tx)?;
+        }
+    }
+    create_from_blob(&http, base, r, &digest)?;
+    crate::flux_moe::forget_caps(r.target);
+    let caps = crate::flux_moe::fetch_caps_at(&http, base, r.target);
+    if !caps.has("tools") {
+        let _ = delete_model(&http, base, r.target);
+        return Err(format!(
+            "ollama registered {} without the Qwen 3.5 chat format (it reports {caps:?}), so the model could not use tools. This ollama is probably too old for that format: update ollama and type `model mythos` again.",
+            r.target));
+    }
+    if pulled_here {
+        match delete_model(&http, base, r.source) {
+            Ok(()) => emit(tx, format!("  · removed the unrepaired upload {} (it cannot run here)", r.source)),
+            Err(e) => emit(tx, format!("  ⚠ could not remove the unrepaired upload {}: {e}", r.source)),
+        }
+    }
+    emit(tx, format!("  ✓ model {} ready · tools ✓{}", r.target, if caps.has("thinking") { " · thinking ✓" } else { "" }));
+    Ok(())
 }
 
 fn looks_like_memory_error(e: &str) -> bool {
@@ -1064,6 +1268,220 @@ pub(crate) fn version_older(a: &str, b: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Fake {
+        tags: Vec<String>,
+        source_file: String,
+        caps_after_create: Vec<String>,
+        blobs: Vec<String>,
+        created: Option<serde_json::Value>,
+        deleted: Vec<String>,
+        log: Vec<String>,
+    }
+
+    /// A stand-in ollama: tags, show, blob HEAD/POST (checks the sha256 like ollama does), create, delete.
+    fn fake_ollama(state: Arc<Mutex<Fake>>) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut c) = conn else { continue };
+                let mut rd = BufReader::new(c.try_clone().unwrap());
+                let mut first = String::new();
+                if rd.read_line(&mut first).is_err() { continue; }
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if rd.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" { break; }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap_or(0); }
+                }
+                let mut body = vec![0u8; len];
+                rd.read_exact(&mut body).unwrap();
+                let mut it = first.split_whitespace();
+                let (method, path) = (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string());
+                let j: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                let mut st = state.lock().unwrap();
+                st.log.push(format!("{method} {path}"));
+                let (code, out) = match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/tags") => (200, serde_json::json!({"models": st.tags.iter().map(|t| serde_json::json!({"name": t})).collect::<Vec<_>>()}).to_string()),
+                    ("POST", "/api/show") => {
+                        let m = j["model"].as_str().unwrap_or("");
+                        if m == MYTHOS.source { (200, serde_json::json!({"modelfile": format!("# x\nFROM {}\nTEMPLATE {{{{ .Prompt }}}}\n", st.source_file), "capabilities": ["completion"]}).to_string()) }
+                        else if m == MYTHOS.target && st.created.is_some() { (200, serde_json::json!({"capabilities": st.caps_after_create}).to_string()) }
+                        else { (404, r#"{"error":"model not found"}"#.to_string()) }
+                    }
+                    ("HEAD", p) if p.starts_with("/api/blobs/") => (if st.blobs.iter().any(|b| p.ends_with(b.as_str())) { 200 } else { 404 }, String::new()),
+                    ("POST", p) if p.starts_with("/api/blobs/sha256:") => {
+                        let want = p.trim_start_matches("/api/blobs/sha256:").to_string();
+                        let got: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+                        if got == want { st.blobs.push(want); (201, String::new()) } else { (400, r#"{"error":"digest mismatch"}"#.to_string()) }
+                    }
+                    ("POST", "/api/create") => { st.created = Some(j.clone()); (200, r#"{"status":"success"}"#.to_string()) }
+                    ("DELETE", "/api/delete") => { let m = j["model"].as_str().unwrap_or("").to_string(); st.tags.retain(|t| *t != m); st.deleted.push(m); (200, String::new()) }
+                    _ => (404, "{}".to_string()),
+                };
+                drop(st);
+                let head = format!("HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", out.len());
+                let _ = c.write_all(head.as_bytes());
+                if method != "HEAD" { let _ = c.write_all(out.as_bytes()); }
+            }
+        });
+        base
+    }
+
+    fn upload_file(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("sigil-mythos-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("sha256-0000000000000000000000000000000000000000000000000000000000000000");
+        std::fs::write(&p, crate::gguf_repair::test_gguf("qwen35", 1)).unwrap();
+        p.display().to_string()
+    }
+
+    fn expected_digest(path: &str) -> String {
+        let plan = crate::gguf_repair::Plan::inspect(std::path::Path::new(path)).unwrap().drop_mtp().unwrap();
+        let mut v = Vec::new();
+        plan.reader().unwrap().read_to_end(&mut v).unwrap();
+        Sha256::digest(&v).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn mythos_is_pulled_repaired_registered_with_tools_and_the_upload_removed() {
+        let file = upload_file("full");
+        let state = Arc::new(Mutex::new(Fake { source_file: file.clone(), caps_after_create: vec!["completion".into(), "tools".into(), "thinking".into()], ..Default::default() }));
+        let base = fake_ollama(state.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pulled = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (p2, s2) = (pulled.clone(), state.clone());
+        let pull = move |m: &str, _: &Sender<SetupEvent>| { p2.lock().unwrap().push(m.to_string()); s2.lock().unwrap().tags.push(m.to_string()); Ok(()) };
+        install_repaired_at(&base, &MYTHOS, &tx, &pull).expect("install");
+        let lines: Vec<String> = rx.try_iter().filter_map(|e| if let SetupEvent::Line(l) = e { Some(l) } else { None }).collect();
+        let st = state.lock().unwrap();
+        assert_eq!(*pulled.lock().unwrap(), vec![MYTHOS.source.to_string()], "the upload is pulled once");
+        let digest = expected_digest(&file);
+        assert_eq!(st.blobs, vec![digest.clone()], "the repaired bytes reached the blob store under their own digest");
+        let created = st.created.as_ref().unwrap();
+        assert_eq!(created["model"], MYTHOS.target);
+        assert_eq!(created["files"][MYTHOS.file_name], format!("sha256:{digest}"));
+        assert_eq!((created["renderer"].as_str(), created["parser"].as_str()), (Some("qwen3.5"), Some("qwen3.5")));
+        assert_eq!(st.deleted, vec![MYTHOS.source.to_string()], "the unrepaired upload pulled by this run is removed");
+        assert!(lines.iter().any(|l| l.contains("ready · tools ✓ · thinking ✓")), "{lines:#?}");
+    }
+
+    #[test]
+    fn an_upload_already_here_is_kept_and_an_existing_blob_is_not_sent_again() {
+        let file = upload_file("kept");
+        let digest = expected_digest(&file);
+        let state = Arc::new(Mutex::new(Fake { tags: vec![MYTHOS.source.to_string()], source_file: file, caps_after_create: vec!["completion".into(), "tools".into()], blobs: vec![digest], ..Default::default() }));
+        let base = fake_ollama(state.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pull = |_: &str, _: &Sender<SetupEvent>| -> Result<(), String> { panic!("must not pull what is already here") };
+        install_repaired_at(&base, &MYTHOS, &tx, &pull).expect("install");
+        let st = state.lock().unwrap();
+        assert!(st.deleted.is_empty(), "the user's own download is not removed");
+        assert!(!st.log.iter().any(|l| l.starts_with("POST /api/blobs/")), "no second upload: {:?}", st.log);
+        assert!(st.created.is_some());
+    }
+
+    #[test]
+    fn an_ollama_that_cannot_give_it_tools_is_an_error_and_leaves_no_half_model() {
+        let file = upload_file("old");
+        let state = Arc::new(Mutex::new(Fake { tags: vec![MYTHOS.source.to_string()], source_file: file, caps_after_create: vec!["completion".into()], ..Default::default() }));
+        let base = fake_ollama(state.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pull = |_: &str, _: &Sender<SetupEvent>| -> Result<(), String> { Ok(()) };
+        let e = install_repaired_at(&base, &MYTHOS, &tx, &pull).unwrap_err();
+        assert!(e.contains("too old") && e.contains("could not use tools"), "{e}");
+        assert_eq!(state.lock().unwrap().deleted, vec![MYTHOS.target.to_string()], "the tool-less copy is removed again");
+    }
+
+    #[test]
+    fn a_model_without_tools_is_named_not_hidden() {
+        let n = crate::ai_tools::no_tools_notice("chatgpt1/x:latest", r#"{"error":"registry.ollama.ai/chatgpt1/x:latest does not support tools"}"#);
+        assert!(n.contains("cannot use the SIGIL tools (registry.ollama.ai/chatgpt1/x:latest does not support tools)") && n.contains("model mythos"), "{n}");
+        assert!(crate::ai_tools::no_tools_notice("m", "not json").contains("(not json)"));
+    }
+
+    /// Against the REAL local ollama (opt-in: `SIGIL_REAL_OLLAMA=http://127.0.0.1:11434`, the upload must be pulled):
+    /// builds the mythos model under a throwaway tag, proves ollama reports tools + thinking, removes the tag.
+    #[test]
+    #[ignore]
+    fn real_ollama_builds_mythos_under_a_test_tag() {
+        let base = std::env::var("SIGIL_REAL_OLLAMA").expect("SIGIL_REAL_OLLAMA");
+        let r = Recipe { target: "qwythos-9b:sigil-e2e", ..MYTHOS };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pull = |_: &str, _: &Sender<SetupEvent>| -> Result<(), String> { panic!("the upload must already be pulled for this test") };
+        let res = install_repaired_at(&base, &r, &tx, &pull);
+        let lines: Vec<String> = rx.try_iter().filter_map(|e| if let SetupEvent::Line(l) = e { Some(l) } else { None }).collect();
+        for l in &lines { eprintln!("{l}"); }
+        let http = client(60);
+        let caps = crate::flux_moe::fetch_caps_at(&http, &base, r.target);
+        let _ = delete_model(&http, &base, r.target);
+        res.expect("install");
+        assert!(caps.has("tools") && caps.has("thinking"), "{caps:?}");
+        assert!(crate::flux_moe::list_models_at(&base).iter().any(|m| m == MYTHOS.source), "an upload this run did not pull is kept");
+    }
+
+    /// The real ollama takes the repaired stream as a blob and agrees on its digest (opt-in, as above). Leaves one
+    /// tiny unreferenced blob, which ollama prunes at its next start.
+    #[test]
+    #[ignore]
+    fn real_ollama_accepts_the_streamed_repair_as_a_blob() {
+        let base = std::env::var("SIGIL_REAL_OLLAMA").expect("SIGIL_REAL_OLLAMA");
+        let file = upload_file("realblob");
+        let plan = crate::gguf_repair::Plan::inspect(std::path::Path::new(&file)).unwrap().drop_mtp().unwrap();
+        let digest = plan.sha256_hex(|_, _| {}).unwrap();
+        let http = client(60);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        upload_blob(&http, &base, &digest, &plan, &tx).expect("upload");
+        assert!(blob_exists(&http, &base, &digest), "ollama holds sha256:{digest}");
+    }
+
+    #[test]
+    fn the_ability_line_and_tool_names_follow_the_granted_scopes() {
+        use crate::ai_tools::Scope;
+        use crate::flux_moe::{abilities_line, tool_names_text, Caps};
+        let all = [Scope::Network, Scope::Wallet, Scope::Payments, Scope::Actions];
+        let mythos = Caps::Known(vec!["completion".into(), "tools".into(), "thinking".into()]);
+        let l = abilities_line(&mythos, &all);
+        assert!(l.contains("MCP tools ✓ it can call 11 SIGIL tools (5 network · 2 wallet · 1 payment · 3 actions you confirm)") && l.contains("thinks before it answers"), "{l}");
+        let upload = Caps::Known(vec!["completion".into()]);
+        assert!(abilities_line(&upload, &all).contains("no tool support"), "the unrepaired upload cannot use tools");
+        // a model off this device gets only the network scope by default
+        assert!(abilities_line(&mythos, &[Scope::Network]).contains("it can call 5 SIGIL tools (5 network)"));
+        assert!(abilities_line(&Caps::Checking, &all).contains("checking"));
+        let names = tool_names_text(&all);
+        assert!(names.starts_with("balance · network status · pools") && names.contains("propose private send") && names.ends_with("stop mining"), "{names}");
+        assert!(!tool_names_text(&[Scope::Network]).contains("balance"), "wallet tools are not offered off-device");
+    }
+
+    #[test]
+    fn the_context_window_fits_the_prompt_in_8k_steps() {
+        use crate::flux_moe::num_ctx_for;
+        assert_eq!(num_ctx_for(0), 8192, "never below 8192");
+        assert_eq!(num_ctx_for(12_000), 8192, "~4k tokens + 4k headroom");
+        assert_eq!(num_ctx_for(13_000), 16384);
+        // the AI tab today: ~11 KB of skills + system text + 11 tools ≈ 20 KB → 16k, not ollama's 4096 default
+        assert_eq!(num_ctx_for(20_000), 16384);
+        assert_eq!(num_ctx_for(10_000_000), 32768, "capped");
+    }
+
+    #[test]
+    fn blob_names_and_the_create_body() {
+        let d = "fa0ca6cdb85132d0c14db6ee090533cd24f04f25ef6efc1459ff10022bb212d8";
+        assert_eq!(digest_of_blob_path(std::path::Path::new(&format!("/m/blobs/sha256-{d}"))).as_deref(), Some(d));
+        assert_eq!(digest_of_blob_path(std::path::Path::new("/m/blobs/model.gguf")), None);
+        let b = create_body(&MYTHOS, d);
+        assert_eq!(b["parameters"]["top_k"], 20);
+        assert_eq!(b["stream"], false);
+    }
 }
 
 #[cfg(test)]

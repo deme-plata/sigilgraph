@@ -50,6 +50,7 @@ mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
 mod mining_relay; // miners point at THIS node (127.0.0.1:18186); balanced failover across upstream nodes
 mod ai_tools;   // [A]I: the SIGIL wallet MCP surface as tools the model can use (read / propose / confirmed actions)
 mod ai_setup;   // [A]I auto-setup: install/start ollama + pull the model, from a flux-SIGNED manifest
+mod gguf_repair; // [A]I: repair a published GGUF this ollama cannot load (the mythos model's extra MTP layer)
 mod skills;     // flux-signed skill packs (text-only) for flux-moe
 use sync_ui::*;
 mod tabs_ui;    // LANE-U: draw_ui dispatcher + tab/card/footer renderers

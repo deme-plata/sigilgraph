@@ -118,6 +118,23 @@ pub(crate) fn tool_defs_for(granted: &[Scope]) -> Value {
     Value::Array(kept)
 }
 
+/// How many tools of each scope the model is offered (the same filter as [`tool_defs_for`]), for the AI tab.
+pub(crate) fn tool_counts(granted: &[Scope]) -> Vec<(Scope, usize)> {
+    let defs = tool_defs_for(granted);
+    let names: Vec<String> = defs.as_array().map(|a| a.iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()).map(str::to_string)).collect()).unwrap_or_default();
+    [Scope::Network, Scope::Wallet, Scope::Payments, Scope::Actions].iter()
+        .map(|s| (*s, names.iter().filter(|n| scope_of(n) == *s).count())).collect()
+}
+
+/// Pure: the one line shown when ollama refuses tools for a model (`{"error":"… does not support tools"}`).
+pub(crate) fn no_tools_notice(model: &str, body: &str) -> String {
+    let why = serde_json::from_str::<Value>(body).ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| body.trim().chars().take(160).collect());
+    format!("🔧 {model} cannot use the SIGIL tools ({why}), so it answers without live numbers from your node. `model mythos` can use them.")
+}
+
 pub(crate) fn scope_label(s: Scope) -> &'static str {
     match s { Scope::Network => "network", Scope::Wallet => "wallet", Scope::Payments => "payments", Scope::Actions => "actions" }
 }
@@ -452,10 +469,20 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
     let url = format!("{}/api/chat", ollama_base);
     let granted = granted_scopes(remote, std::env::var("SIGIL_AI_REMOTE_SCOPES").ok().as_deref());
     let tools = tool_defs_for(&granted);
+    // One window for the whole turn, sized once with room for the tool results (flux_moe::chat_options, 11-26):
+    // without it ollama cut the prompt to 4096 tokens and the tool definitions fell off the front.
+    let options = flux_moe::chat_options(&messages, Some(&tools));
     for step in 0..MAX_STEPS {
-        let body = json!({"model": model, "messages": messages, "stream": true, "tools": tools});
+        let body = json!({"model": model, "messages": messages, "stream": true, "tools": tools, "options": options});
         let resp = match http.post(&url).json(&body).send() {
             Ok(r) if r.status().is_success() => r,
+            // A model that cannot use tools is refused by ollama when tools are sent. It used to fall back to a
+            // plain answer SILENTLY, so a user could not tell why live numbers never appeared. Now it says so.
+            Ok(r) if step == 0 && r.status().is_client_error() => {
+                let body = r.text().unwrap_or_default();
+                let _ = tx.send(StreamEv::ToolRan(no_tools_notice(model, &body)));
+                return flux_moe::chat_stream(model, history, user, extra_system, tx);
+            }
             _ if step == 0 => return flux_moe::chat_stream(model, history, user, extra_system, tx),
             Ok(r) => { let _ = tx.send(StreamEv::Whole(format!("⚠ model error {} after a tool call", r.status()))); return; }
             Err(e) => { let _ = tx.send(StreamEv::Whole(format!("⚠ {e}"))); return; }

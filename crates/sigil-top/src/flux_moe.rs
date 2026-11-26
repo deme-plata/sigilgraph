@@ -963,6 +963,46 @@ pub(crate) fn abilities_line(caps: &Caps, granted: &[crate::ai_tools::Scope]) ->
     s
 }
 
+// ── What the model is shown as "the conversation so far" (11-26) ─────────────────────────────────────
+//
+// The AI tab's transcript also holds sigil-top's own notices (setup progress, the `model` list, skill notices) and the
+// user's commands to sigil-top (`model mythos`, `setup`, "yes" to a download) with their replies. All of it used to go
+// to the model as history: ~1,500 tokens of numbers and status lines, and the mythos model then answered a height
+// question with an invented "1,248,903 blocks" and no tool call. The model now sees the real conversation only.
+
+/// Pure: a message sigil-top wrote itself (not a model answer).
+pub(crate) fn is_notice(content: &str) -> bool {
+    let t = content.trim_start();
+    const GLYPHS: &[&str] = &["·", "✓", "⬇", "⚠", "🔧", "🔏", "…", "🧠", "🕶"];
+    const OPENERS: &[&str] = &["Models flux-moe can use", "Switching to ", "Downloading ", "Cancelled", "Back to automatic",
+        "There is no number", "Setup is still running", "Your local AI", "SIGIL_AI_MODEL=", "flux-moe — your on-device"];
+    GLYPHS.iter().any(|g| t.starts_with(g)) || OPENERS.iter().any(|o| t.starts_with(o))
+        || t.contains("is not on this machine yet") || t.contains("does not fit here right now") || t.ends_with("is already in use.")
+}
+
+/// Pure: a line the user typed to sigil-top rather than to the model.
+pub(crate) fn is_command(content: &str) -> bool {
+    parse_model_command(content).is_some() || is_setup_command(content)
+        || matches!(content.trim().to_ascii_lowercase().as_str(), "yes" | "y" | "ja" | "j" | "ok" | "no" | "n" | "nej")
+}
+
+/// The history the model is given: user questions and model answers, without sigil-top's notices, without the user's
+/// commands to sigil-top, and without the reply that answered such a command.
+pub(crate) fn conversation_only(history: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut skip_reply = false;
+    for (role, content) in history {
+        if role == "user" {
+            skip_reply = is_command(content);
+            if !skip_reply { out.push((role.clone(), content.clone())); }
+            continue;
+        }
+        if role == "assistant" && (std::mem::take(&mut skip_reply) || is_notice(content)) { continue; }
+        if role == "assistant" || role == "system" { out.push((role.clone(), content.clone())); }
+    }
+    out
+}
+
 pub(crate) fn system_prompt() -> &'static str {
     "You are flux-moe, the on-device AI inside the SIGIL sigil-top node. You know the SIGIL \
      whitepaper well — the block header and its commitments, dual-lane mining (Φ proof-of-work \
@@ -985,10 +1025,11 @@ pub(crate) fn system_prompt() -> &'static str {
      that the name is not one you know in SIGIL, then answer the question underneath it and \
      ask one short question to confirm you understood. A person asking about 'emission' wants \
      to know how new SIGIL is created — tell them that.\n\n\
-     HONESTY — unchanged and absolute: for anything that needs a LIVE number or moves money \
-     (balance, height, supply, hashrate, price, a send), say which screen or command shows it \
-     rather than guessing. Never invent balances, prices, hashrates or amounts. Separate what \
-     you are sure of from what you are unsure of, and say plainly when you do not know."
+     HONESTY — unchanged and absolute: for anything that needs a LIVE number (balance, height, \
+     supply, hashrate, price), call the matching SIGIL tool when you have one and answer from its \
+     result; if no tool gives it, say which screen or command shows it. Never invent balances, \
+     prices, hashrates, heights or amounts. A send is only ever proposed; the user signs it. \
+     Separate what you are sure of from what you are unsure of, and say plainly when you do not know."
 }
 
 /// Older ollama builds inline the reasoning block in `content` instead of

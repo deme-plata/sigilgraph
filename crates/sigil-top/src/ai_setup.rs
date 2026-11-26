@@ -1474,6 +1474,34 @@ mod repair_tests {
     }
 
     #[test]
+    fn the_model_sees_the_conversation_not_sigil_tops_own_notices() {
+        use crate::flux_moe::conversation_only;
+        let a = |s: &str| ("assistant".to_string(), s.to_string());
+        let u = |s: &str| ("user".to_string(), s.to_string());
+        // the transcript of the 11-26 run, in shape
+        let t = vec![
+            a("🔏 skills loaded (flux-signed, blake3-verified): sigil-trading, sigil-whitepaper"),
+            a("· skill not loaded here — slagteren (audience: operator)"),
+            u("model"), a("Models flux-moe can use (48 cores):\n 1. gpt-oss:120b · needs ~62 GB"),
+            u("model mythos"), a("Switching to qwythos-9b:flux. Loading it to prove it runs here."),
+            a("  · model choice: qwythos-9b:flux"), a("  ✓ qwythos-9b:flux answered in 22s — \"READY\""),
+            a("✓ flux-moe ready on qwythos-9b:flux — ask me about mining"),
+            u("what is a note?"), a("A note is like a sealed envelope with an amount inside."),
+            u("model qwen3:1.7b"), a("`qwen3:1.7b` is not on this machine yet. It is a ~1 GB download."), u("no"), a("Cancelled. Nothing was downloaded."),
+            u("and the fee?"), a("The fee is paid by the sender."),
+        ];
+        assert_eq!(conversation_only(&t), vec![u("what is a note?"), a("A note is like a sealed envelope with an amount inside."),
+                                               u("and the fee?"), a("The fee is paid by the sender.")]);
+    }
+
+    #[test]
+    fn the_honesty_rule_sends_live_numbers_to_the_tools() {
+        let p = crate::flux_moe::system_prompt();
+        assert!(p.contains("call the matching SIGIL tool when you have one"), "the pre-tools rule said 'say which screen shows it' and fought the tools");
+        assert!(p.contains("Never invent balances, prices, hashrates, heights or amounts"));
+    }
+
+    #[test]
     fn blob_names_and_the_create_body() {
         let d = "fa0ca6cdb85132d0c14db6ee090533cd24f04f25ef6efc1459ff10022bb212d8";
         assert_eq!(digest_of_blob_path(std::path::Path::new(&format!("/m/blobs/sha256-{d}"))).as_deref(), Some(d));

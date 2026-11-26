@@ -432,6 +432,10 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
                             mode: flux_moe::RewriteMode, tx: &Sender<StreamEv>) {
     use std::io::BufRead;
     if let flux_moe::AiRoute::Refuse(msg) = route { let _ = tx.send(StreamEv::Whole(msg.clone())); return; }
+    // The real conversation only: sigil-top's own notices and the user's commands to it are not the model's business
+    // (with them the mythos model invented a height instead of calling a tool, 11-26).
+    let history_owned = flux_moe::conversation_only(history);
+    let history = history_owned.as_slice();
     let system = format!("{}{}{}", flux_moe::system_prompt(), extra_system, TOOLS_SYSTEM);
     let remote = !matches!(route, flux_moe::AiRoute::Local);
     // L4: an off-box model gets ONE de-identified question rewritten on this device —

@@ -167,8 +167,8 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
     let abilities = caps.as_ref().map(|c| crate::flux_moe::abilities_line(c, &granted)).unwrap_or_default();
     let ab_color = match &caps { Some(c) if c.has("tools") => C_NEON_CYAN, Some(crate::flux_moe::Caps::Known(_)) => C_NEON_GOLD, _ => C_DIM };
     f.render_widget(Paragraph::new(vec![
-        Line::from(Span::styled(status, Style::default().fg(C_DIM))),
-        Line::from(Span::styled(abilities, Style::default().fg(ab_color))),
+        Line::from(Span::styled(crate::flux_moe::sanitize_for_terminal(&status), Style::default().fg(C_DIM))),
+        Line::from(Span::styled(crate::flux_moe::sanitize_for_terminal(&abilities), Style::default().fg(ab_color))),
     ]), status_area);
 
     // transcript
@@ -207,7 +207,7 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
         // progress block below speaks for it, so don't print a bare "moe ›" yet.
         if app.ai_thinking && Some(i) == app.ai_reply_idx && content.is_empty() { continue; }
         if role == "tool" {
-            lines.push(Line::from(Span::styled(format!("  {content}"), Style::default().fg(C_NEON_GOLD))));
+            lines.push(Line::from(Span::styled(format!("  {}", crate::flux_moe::sanitize_for_terminal(content)), Style::default().fg(C_NEON_GOLD))));
             continue;
         }
         if role == "user" {
@@ -219,7 +219,8 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
         let width = msgs_area.width.saturating_sub(1).max(8) as usize;
         for l in content.lines() {
             // Wrap HERE, one Line per screen row, so the scroll arithmetic below is exact.
-            for row in wrap_rows(&format!("  {l}"), width, 2) {
+            // audit 11-26: no control characters from the model, a tool or ollama ever reach the terminal
+            for row in wrap_rows(&format!("  {}", crate::flux_moe::sanitize_for_terminal(l)), width, 2) {
                 lines.push(Line::from(Span::styled(row, Style::default().fg(Color::White))));
             }
         }
@@ -232,7 +233,7 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
     }
     for q in &app.ai_queued {
         lines.push(Line::from(Span::styled("you › (queued — sent when moe finishes)", Style::default().fg(C_DIM))));
-        lines.push(Line::from(Span::styled(format!("  {q}"), Style::default().fg(C_DIM))));
+        lines.push(Line::from(Span::styled(format!("  {}", crate::flux_moe::sanitize_for_terminal(q)), Style::default().fg(C_DIM))));
     }
     // Transcript rows are pre-wrapped above (one Line = one screen row), so the newest row
     // is always the last one — the old count-Lines-then-let-ratatui-wrap mismatch pushed the

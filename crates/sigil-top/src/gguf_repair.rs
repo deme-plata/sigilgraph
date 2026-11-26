@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 const MAGIC: &[u8; 4] = b"GGUF";
 /// Architectures this repair has been proven on. Anything else is refused rather than guessed at.
 const SUPPORTED_ARCH: &[&str] = &["qwen35"];
+/// Hostile-file limits (audit 11-26): a header bigger than this, or an alignment above this, is not a model.
+const MAX_HEADER: u64 = 256 << 20;
+const MAX_ALIGN: u64 = 1 << 16;
 
 #[derive(Debug, Clone)]
 struct Kv {
@@ -57,7 +60,7 @@ pub(crate) struct Plan {
     pub(crate) blocks: u64,
     pub(crate) nextn: u64,
     // Set by drop_mtp():
-    header_out: Vec<u8>,
+    header_out: std::sync::Arc<Vec<u8>>,
     pieces: Vec<(u64, u64)>,
     pub(crate) dropped: Vec<String>,
     pub(crate) out_len: u64,
@@ -176,7 +179,7 @@ impl Plan {
         if n_tensors > 1 << 20 || n_kv > 1 << 20 { return Err(bad("implausible GGUF table sizes")); }
         // Re-read the raw header later by range: keep the file, re-open for the copy.
         let mut kvs = Vec::with_capacity(n_kv as usize);
-        let (mut arch, mut align, mut blocks) = (String::new(), 32u64, None);
+        let (mut arch, mut align) = (String::new(), 32u64);
         for _ in 0..n_kv {
             let start = r.pos as usize;
             let key = r.string()?;
@@ -191,9 +194,9 @@ impl Plan {
                 skip_value(&mut r, ty, 0)?;
             }
             if key == "general.architecture" { arch = text.clone().unwrap_or_default(); }
-            if key == "general.alignment" { align = int.filter(|a| *a > 0 && a.is_power_of_two()).ok_or_else(|| bad("bad general.alignment"))?; }
-            if key.ends_with(".block_count") { blocks = int; }
+            if key == "general.alignment" { align = int.filter(|a| *a > 0 && a.is_power_of_two() && *a <= MAX_ALIGN).ok_or_else(|| bad("bad general.alignment"))?; }
             kvs.push(Kv { key, ty, start, end: r.pos as usize, int });
+            if r.pos > MAX_HEADER { return Err(bad("GGUF header too large")); }
         }
         let mut tensors = Vec::with_capacity(n_tensors as usize);
         for _ in 0..n_tensors {
@@ -204,14 +207,17 @@ impl Plan {
             let ty = r.u32()?;
             let off = r.u64()?;
             tensors.push(Tensor { name, dims, ty, off });
+            if r.pos > MAX_HEADER { return Err(bad("GGUF header too large")); }
         }
+        // the block count of THIS architecture (a vision tower's `*.block_count` must not decide which layer goes)
+        let blocks = kvs.iter().find(|k| k.key == format!("{arch}.block_count")).and_then(|k| k.int);
         let data_start = align_up(r.pos, align);
         // The raw header bytes, for copying unchanged entries exactly.
         let mut f = File::open(path)?;
         header_src.resize(r.pos as usize, 0);
         f.read_exact(&mut header_src)?;
         for t in &tensors {
-            if t.off % align != 0 || data_start + t.off > file_len {
+            if t.off % align != 0 || data_start.checked_add(t.off).map_or(true, |end| end > file_len) {
                 return Err(bad(format!("tensor {} sits at a bad offset", t.name)));
             }
         }
@@ -219,7 +225,7 @@ impl Plan {
         Ok(Plan {
             src: path.to_path_buf(), version, header_src, kvs, tensors, data_start, file_len, align, arch,
             blocks: blocks.unwrap_or(0), nextn,
-            header_out: Vec::new(), pieces: Vec::new(), dropped: Vec::new(), out_len: 0,
+            header_out: std::sync::Arc::new(Vec::new()), pieces: Vec::new(), dropped: Vec::new(), out_len: 0,
         })
     }
 
@@ -288,7 +294,7 @@ impl Plan {
         let padded = align_up(h.len() as u64, self.align) as usize;
         h.resize(padded, 0);
         self.out_len = h.len() as u64 + cur;
-        self.header_out = h;
+        self.header_out = std::sync::Arc::new(h);
         self.pieces = pieces;
         Ok(self)
     }
@@ -298,7 +304,7 @@ impl Plan {
         if self.header_out.is_empty() { return Err("drop_mtp() has not planned a repair".into()); }
         let file = File::open(&self.src).map_err(|e| format!("{}: {e}", self.src.display()))?;
         Ok(RepairedReader {
-            header: self.header_out.clone(), hpos: 0, file: BufReader::with_capacity(4 << 20, file),
+            header: std::sync::Arc::clone(&self.header_out), hpos: 0, file: BufReader::with_capacity(4 << 20, file),
             pieces: self.pieces.clone(), next: 0, left: 0,
         })
     }
@@ -326,7 +332,7 @@ impl Plan {
 
 /// The repaired file, produced on the fly from the source: the new header, then each kept tensor's bytes.
 pub(crate) struct RepairedReader {
-    header: Vec<u8>,
+    header: std::sync::Arc<Vec<u8>>,
     hpos: usize,
     file: BufReader<File>,
     pieces: Vec<(u64, u64)>,
@@ -484,6 +490,23 @@ mod tests {
 
         let src = tiny_gguf("qwen35", 1).0;
         assert!(Plan::inspect(&write_tmp(&src[..60], "short")).is_err(), "a cut-off header is an error, not a plan");
+    }
+
+    /// Audit 11-26: a hostile header cannot make the repair abort, wrap around or allocate absurdly.
+    #[test]
+    fn hostile_alignment_and_offsets_are_refused() {
+        // alignment 2^40: was accepted (any power of two) and later asked for a 1 TiB allocation
+        let mut src = tiny_gguf("qwen35", 1).0;
+        let key = b"general.alignment";
+        let at = src.windows(key.len()).position(|w| w == key).unwrap() + key.len() + 4;   // past the key and its type
+        src[at..at + 4].copy_from_slice(&(1u32 << 31).to_le_bytes());
+        assert!(Plan::inspect(&write_tmp(&src, "align")).unwrap_err().contains("alignment"));
+        // a tensor offset near u64::MAX: `data_start + off` wrapped in release builds and passed the bounds check
+        let mut src = tiny_gguf("qwen35", 1).0;
+        let name = b"output_norm.weight";
+        let at = src.windows(name.len()).position(|w| w == name).unwrap() + name.len() + 4 + 8 + 4;   // past dims and type
+        src[at..at + 8].copy_from_slice(&(u64::MAX - 63).to_le_bytes());
+        assert!(Plan::inspect(&write_tmp(&src, "wrap")).unwrap_err().contains("bad offset"));
     }
 
     /// The real upload, if this machine has it: `SIGIL_GGUF_SRC=<blob> SIGIL_GGUF_SHA256=<hex>`. On Epsilon the

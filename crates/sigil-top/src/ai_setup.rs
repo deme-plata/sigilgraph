@@ -800,6 +800,12 @@ pub(crate) struct Recipe {
     pub(crate) file_name: &'static str,
     pub(crate) renderer: &'static str,
     pub(crate) parser: &'static str,
+    /// The sha256 the upload's file MUST have (security audit 11-26). The upload is pulled by a mutable tag that an
+    /// unknown uploader can repoint at any time; a different file is refused before a byte of it is read, and a
+    /// copy this run downloaded is deleted again. `None` only in tests.
+    pub(crate) source_sha256: Option<&'static str>,
+    /// The sha256 the repaired file MUST have: everything ollama will load is the exact file that was tested.
+    pub(crate) target_sha256: Option<&'static str>,
 }
 
 /// The mythos model ([`crate::flux_moe::MYTHOS_TAG`]); same tag, file and format as the Flux cockpit's copy.
@@ -809,6 +815,9 @@ pub(crate) const MYTHOS: Recipe = Recipe {
     file_name: "qwythos-9b-nomtp.gguf",
     renderer: "qwen3.5",
     parser: "qwen3.5",
+    // measured 2026-11-26 on Epsilon: the upload as pulled, and its repair (= the Flux cockpit's qwythos-9b:flux)
+    source_sha256: Some("81607afaa304ed698ddd149b58db1242567d02797d103e4d74b56d7a5bdf5396"),
+    target_sha256: Some("fa0ca6cdb85132d0c14db6ee090533cd24f04f25ef6efc1459ff10022bb212d8"),
 };
 
 /// Pure: the `/api/create` body. Sampling = the upload's own recommendation for Qwen 3.5.
@@ -905,7 +914,15 @@ fn delete_model(http: &reqwest::blocking::Client, base: &str, model: &str) -> Re
 pub(crate) fn install_repaired_at(base: &str, r: &Recipe, tx: &Sender<SetupEvent>,
                                   pull: &dyn Fn(&str, &Sender<SetupEvent>) -> Result<(), String>) -> Result<(), String> {
     let http = client(3 * 3600);
-    let pulled_here = !have_model(&crate::flux_moe::list_models_at(base), r.source);
+    // Audit 11-26: list_models_at answers an empty list on ANY error, which read as "not here" and later deleted the
+    // user's own copy. Ask strictly; no answer = no install.
+    let tags: Vec<String> = http.get(format!("{base}/api/tags")).send().and_then(|r| r.error_for_status())
+        .and_then(|r| r.json::<serde_json::Value>())
+        .map_err(|e| format!("could not ask ollama which models it has ({e}); nothing was changed"))?
+        .get("models").and_then(|m| m.as_array()).map(|a| a.iter()
+            .filter_map(|m| m.get("name").or_else(|| m.get("model")).and_then(|n| n.as_str()).map(str::to_string)).collect())
+        .ok_or("ollama's model list had an unexpected shape; nothing was changed")?;
+    let pulled_here = !have_model(&tags, r.source);
     emit(tx, format!("  · {} is built here from the community upload {}: download → repair → register", r.target, r.source));
     if pulled_here {
         pull(r.source, tx)?;
@@ -913,6 +930,18 @@ pub(crate) fn install_repaired_at(base: &str, r: &Recipe, tx: &Sender<SetupEvent
         emit(tx, format!("  ✓ the upload {} is already here", r.source));
     }
     let path = model_file_at(&http, base, r.source)?;
+    if let Some(want) = r.source_sha256 {
+        // ollama names a blob by the sha256 it verified while downloading it
+        let got = digest_of_blob_path(&path).unwrap_or_default();
+        if got != want {
+            if pulled_here { let _ = delete_model(&http, base, r.source); }
+            return Err(format!(
+                "the upload {} is not the file this sigil-top was tested with (sha256 {}… instead of {}…). Its uploader can \
+                 change it at any time, so it was not installed{}. An updated sigil-top will know the new file once it has been checked.",
+                r.source, &got.get(..12).unwrap_or("?"), &want[..12], if pulled_here { " and the download was removed" } else { "" }));
+        }
+        emit(tx, format!("  ✓ the upload is the tested file (sha256 {}…)", &want[..12]));
+    }
     let plan = crate::gguf_repair::Plan::inspect(&path)?;
     let (digest, repaired) = if plan.needs_repair() {
         emit(tx, format!(
@@ -933,6 +962,11 @@ pub(crate) fn install_repaired_at(base: &str, r: &Recipe, tx: &Sender<SetupEvent
             let pct = done * 100 / total.max(1);
             if pct / 25 > shown / 25 { shown = pct; emit(tx, format!("  · fingerprinting the repaired copy {pct}%")); }
         })?;
+        if let Some(want) = r.target_sha256 {
+            if digest != want {
+                return Err(format!("the repaired copy is not the tested file (sha256 {}… instead of {}…); not installed", &digest[..12], &want[..12]));
+            }
+        }
         (digest, Some(plan))
     } else {
         emit(tx, "  · the upload needs no layer repair; registering it with the chat format");
@@ -950,7 +984,8 @@ pub(crate) fn install_repaired_at(base: &str, r: &Recipe, tx: &Sender<SetupEvent
     create_from_blob(&http, base, r, &digest)?;
     crate::flux_moe::forget_caps(r.target);
     let caps = crate::flux_moe::fetch_caps_at(&http, base, r.target);
-    if !caps.has("tools") {
+    // delete only when ollama SAYS it has no tools; a failed question is not an answer (audit 11-26)
+    if matches!(caps, crate::flux_moe::Caps::Known(_)) && !caps.has("tools") {
         let _ = delete_model(&http, base, r.target);
         return Err(format!(
             "ollama registered {} without the Qwen 3.5 chat format (it reports {caps:?}), so the model could not use tools. This ollama is probably too old for that format: update ollama and type `model mythos` again.",
@@ -1352,6 +1387,24 @@ mod repair_tests {
         Sha256::digest(&v).iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// The real recipe minus the sha256 pins (the stand-in's file is a tiny test GGUF).
+    const UNPINNED: Recipe = Recipe { source_sha256: None, target_sha256: None, ..MYTHOS };
+
+    #[test]
+    fn a_changed_upload_is_refused_before_it_is_read_and_the_download_removed() {
+        let file = upload_file("changed");
+        let state = Arc::new(Mutex::new(Fake { source_file: file, caps_after_create: vec!["tools".into()], ..Default::default() }));
+        let base = fake_ollama(state.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let s2 = state.clone();
+        let pull = move |m: &str, _: &Sender<SetupEvent>| { s2.lock().unwrap().tags.push(m.to_string()); Ok(()) };
+        let e = install_repaired_at(&base, &MYTHOS, &tx, &pull).unwrap_err();
+        assert!(e.contains("not the file this sigil-top was tested with"), "{e}");
+        let st = state.lock().unwrap();
+        assert!(st.created.is_none() && st.blobs.is_empty(), "nothing registered, nothing uploaded");
+        assert_eq!(st.deleted, vec![MYTHOS.source.to_string()], "the download is removed");
+    }
+
     #[test]
     fn mythos_is_pulled_repaired_registered_with_tools_and_the_upload_removed() {
         let file = upload_file("full");
@@ -1361,7 +1414,7 @@ mod repair_tests {
         let pulled = Arc::new(Mutex::new(Vec::<String>::new()));
         let (p2, s2) = (pulled.clone(), state.clone());
         let pull = move |m: &str, _: &Sender<SetupEvent>| { p2.lock().unwrap().push(m.to_string()); s2.lock().unwrap().tags.push(m.to_string()); Ok(()) };
-        install_repaired_at(&base, &MYTHOS, &tx, &pull).expect("install");
+        install_repaired_at(&base, &UNPINNED, &tx, &pull).expect("install");
         let lines: Vec<String> = rx.try_iter().filter_map(|e| if let SetupEvent::Line(l) = e { Some(l) } else { None }).collect();
         let st = state.lock().unwrap();
         assert_eq!(*pulled.lock().unwrap(), vec![MYTHOS.source.to_string()], "the upload is pulled once");
@@ -1383,7 +1436,7 @@ mod repair_tests {
         let base = fake_ollama(state.clone());
         let (tx, _rx) = std::sync::mpsc::channel();
         let pull = |_: &str, _: &Sender<SetupEvent>| -> Result<(), String> { panic!("must not pull what is already here") };
-        install_repaired_at(&base, &MYTHOS, &tx, &pull).expect("install");
+        install_repaired_at(&base, &UNPINNED, &tx, &pull).expect("install");
         let st = state.lock().unwrap();
         assert!(st.deleted.is_empty(), "the user's own download is not removed");
         assert!(!st.log.iter().any(|l| l.starts_with("POST /api/blobs/")), "no second upload: {:?}", st.log);
@@ -1397,7 +1450,7 @@ mod repair_tests {
         let base = fake_ollama(state.clone());
         let (tx, _rx) = std::sync::mpsc::channel();
         let pull = |_: &str, _: &Sender<SetupEvent>| -> Result<(), String> { Ok(()) };
-        let e = install_repaired_at(&base, &MYTHOS, &tx, &pull).unwrap_err();
+        let e = install_repaired_at(&base, &UNPINNED, &tx, &pull).unwrap_err();
         assert!(e.contains("too old") && e.contains("could not use tools"), "{e}");
         assert_eq!(state.lock().unwrap().deleted, vec![MYTHOS.target.to_string()], "the tool-less copy is removed again");
     }
@@ -1487,7 +1540,7 @@ mod repair_tests {
             a("  · model choice: qwythos-9b:flux"), a("  ✓ qwythos-9b:flux answered in 22s — \"READY\""),
             a("✓ flux-moe ready on qwythos-9b:flux — ask me about mining"),
             u("what is a note?"), a("A note is like a sealed envelope with an amount inside."),
-            u("model qwen3:1.7b"), a("`qwen3:1.7b` is not on this machine yet. It is a ~1 GB download."), u("no"), a("Cancelled. Nothing was downloaded."),
+            u("model qwen3:1.7b"), a("`qwen3:1.7b` is not on this machine yet. It is a ~1 GB download.\nType yes to download it. Anything else cancels."), u("no"), a("Cancelled. Nothing was downloaded."),
             u("and the fee?"), a("The fee is paid by the sender."),
         ];
         assert_eq!(conversation_only(&t), vec![u("what is a note?"), a("A note is like a sealed envelope with an amount inside."),
@@ -1499,6 +1552,39 @@ mod repair_tests {
         let p = crate::flux_moe::system_prompt();
         assert!(p.contains("call the matching SIGIL tool when you have one"), "the pre-tools rule said 'say which screen shows it' and fought the tools");
         assert!(p.contains("Never invent balances, prices, hashrates, heights or amounts"));
+    }
+
+    #[test]
+    fn terminal_text_carries_no_control_sequences() {
+        use crate::flux_moe::sanitize_for_terminal as s;
+        let osc52 = "pay \u{1b}]52;c;cWVua2M=\u{07}now";
+        assert!(!s(osc52).chars().any(|c| c == '\u{1b}' || c == '\u{07}'), "OSC 52 clipboard write removed");
+        assert!(!s("a\rb\u{1b}[1A\u{9b}31m").chars().any(|c| c.is_control()), "CR, cursor-up, C1 CSI removed");
+        assert!(!s("addr \u{202E}1234").contains('\u{202E}'), "bidi override removed");
+        assert_eq!(s("plain text, 26,000,065 · ✓ 🔧"), "plain text, 26,000,065 · ✓ 🔧", "ordinary text untouched");
+    }
+
+    #[test]
+    fn a_payment_proposal_must_use_the_users_own_address_and_amount() {
+        use crate::ai_tools::proposal_matches_user as m;
+        let addr = "9f2c".repeat(16);
+        let said = vec![format!("send 2,5 SIGIL to {addr} please")];
+        assert!(m(&addr, 2.5, &said).is_ok());
+        assert!(m(&addr.to_uppercase(), 2.5, &said).is_ok(), "case of hex does not matter");
+        assert!(m(&"7c1e".repeat(16), 2.5, &said).unwrap_err().contains("address was not typed"), "an injected address is refused");
+        assert!(m(&addr, 250.0, &said).unwrap_err().contains("amount was not typed"), "an inflated amount is refused");
+        assert!(m(&addr, 2.5, &[]).is_err());
+        assert!(crate::ai_tools::is_known_tool("sigil_network_status") && !crate::ai_tools::is_known_tool("sigil_balance\u{1b}]52;c;x\u{7}"));
+    }
+
+    #[test]
+    fn a_yes_to_the_model_is_conversation_a_yes_to_sigil_top_is_not() {
+        use crate::flux_moe::conversation_only;
+        let a = |s: &str| ("assistant".to_string(), s.to_string());
+        let u = |s: &str| ("user".to_string(), s.to_string());
+        let t = vec![u("explain notes"), a("A note is a sealed envelope. Shall I explain spending one?"), u("yes"), a("Spending opens it…"),
+                     u("model qwen3:1.7b"), a("`qwen3:1.7b` is not on this machine yet. Type yes to download it."), u("no"), a("Cancelled. Nothing was downloaded.")];
+        assert_eq!(conversation_only(&t), vec![u("explain notes"), a("A note is a sealed envelope. Shall I explain spending one?"), u("yes"), a("Spending opens it…")]);
     }
 
     #[test]

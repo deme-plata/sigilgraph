@@ -155,7 +155,59 @@ pub(crate) fn is_shielded_addr(s: &str) -> bool {
     }
 }
 
-fn short(a: &str) -> String { if a.len() > 16 { format!("{}…{}", &a[..8], &a[a.len() - 4..]) } else { a.to_string() } }
+// Character-safe (audit 11-26): it sliced BYTES, so a non-ASCII 'address' over 16 bytes panicked the agent thread and
+// froze the AI tab until a restart.
+fn short(a: &str) -> String {
+    let n = a.chars().count();
+    if n > 16 {
+        let head: String = a.chars().take(8).collect();
+        let tail: String = a.chars().skip(n - 4).collect();
+        format!("{head}…{tail}")
+    } else { a.to_string() }
+}
+
+/// At most this many tool calls run per model step (audit 11-26: nothing limited a runaway or hijacked model).
+const MAX_CALLS_PER_STEP: usize = 4;
+
+/// True for a tool sigil-top actually offers. A name the model made up is refused and NEVER echoed: it used to be
+/// printed in a gold receipt row, so a model could fake a trusted-looking receipt (audit 11-26).
+pub(crate) fn is_known_tool(name: &str) -> bool {
+    tool_defs().as_array().is_some_and(|a| a.iter().any(|t| t.pointer("/function/name").and_then(|n| n.as_str()) == Some(name)))
+}
+
+/// Pure: numbers the user wrote ("2", "2.5", "2,5", "1 000"? no — digits with one . or , as the decimal mark).
+fn numbers_in(text: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    let b: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let mut s = String::new();
+            let mut seen_mark = false;
+            while i < b.len() && (b[i].is_ascii_digit() || (!seen_mark && (b[i] == '.' || b[i] == ',') && i + 1 < b.len() && b[i + 1].is_ascii_digit())) {
+                if b[i] == ',' || b[i] == '.' { seen_mark = true; s.push('.'); } else { s.push(b[i]); }
+                i += 1;
+            }
+            if let Ok(v) = s.parse::<f64>() { out.push(v); }
+        } else { i += 1; }
+    }
+    out
+}
+
+/// Pure: a payment proposal must name an address AND an amount the user typed in this conversation (audit 11-26).
+/// Without it a hijacked or backdoored model could propose a payment to its own address, and the receipt told the
+/// user to sign it. Text from tools never counts, only what the user wrote.
+pub(crate) fn proposal_matches_user(to: &str, amount: f64, user_texts: &[String]) -> Result<(), String> {
+    let to_l = to.trim().to_ascii_lowercase();
+    if to_l.is_empty() || !user_texts.iter().any(|t| t.to_ascii_lowercase().contains(&to_l)) {
+        return Err("that address was not typed by the user in this conversation; ask the user to paste the recipient's address".into());
+    }
+    let typed = user_texts.iter().flat_map(|t| numbers_in(t)).any(|v| (v - amount).abs() <= 1e-9 * amount.abs().max(1.0));
+    if !typed {
+        return Err("that amount was not typed by the user; ask the user for the exact amount".into());
+    }
+    Ok(())
+}
 
 /// The mining wallet's PUBLIC balance, polled every 30 s on a background thread for the dashboard
 /// card (2026-10-19: that line read 0.00 for everyone — nothing ever filled it). Same node as [W]'s
@@ -436,6 +488,9 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
     // (with them the mythos model invented a height instead of calling a tool, 11-26).
     let history_owned = flux_moe::conversation_only(history);
     let history = history_owned.as_slice();
+    // What the USER typed in this conversation: the only source a payment proposal may take its address and amount from.
+    let mut user_texts: Vec<String> = history.iter().filter(|(r, _)| r == "user").map(|(_, c)| c.clone()).collect();
+    user_texts.push(user.to_string());
     let system = format!("{}{}{}", flux_moe::system_prompt(), extra_system, TOOLS_SYSTEM);
     let remote = !matches!(route, flux_moe::AiRoute::Local);
     // L4: an off-box model gets ONE de-identified question rewritten on this device —
@@ -525,10 +580,20 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
             let _ = tx.send(done_ev.unwrap_or(StreamEv::Done { eval_count: 0, eval_ns: 0, prompt_count: 0, reason: "interrupted".into() }));
             return;
         }
+        if calls.len() > MAX_CALLS_PER_STEP {
+            let note = format!("🔒 the model asked for {} tools at once; only the first {MAX_CALLS_PER_STEP} ran", calls.len());
+            if tx.send(StreamEv::ToolRan(note)).is_err() { return; }
+            calls.truncate(MAX_CALLS_PER_STEP);
+        }
         messages.push(json!({"role":"assistant","content": text, "tool_calls": calls}));
         let mut step_findings: Vec<(sigil_veil::Kind, String)> = Vec::new();
         for c in &calls {
             let name = c.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            if !is_known_tool(&name) {
+                if tx.send(StreamEv::ToolRan("🔒 the model asked for a tool that does not exist — refused".into())).is_err() { return; }
+                messages.push(json!({"role":"tool","tool_name": "unknown", "content": json!({"error": "no such tool; use only the tools you were given"}).to_string()}));
+                continue;
+            }
             let args = c.pointer("/function/arguments").cloned().unwrap_or(json!({}));
             let mut args = match args { Value::String(s) => serde_json::from_str(&s).unwrap_or(json!({})), v => v };
             // Model output is DATA: a tool it was not given is refused, not run — even
@@ -545,10 +610,24 @@ pub(crate) fn chat_agent_at(model: &str, history: &[(String, String)], user: &st
                 let _ = tx.send(StreamEv::Confirm { summary: action_summary(&name), name, args });
                 return;
             }
+            if name == "sigil_propose_private_send" {
+                let to = args.get("to").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let amt = args.get("amount").and_then(|a| a.as_f64().or_else(|| a.as_str().and_then(|s| s.trim().replace(',', ".").parse().ok()))).unwrap_or(0.0);
+                if let Err(why) = proposal_matches_user(&to, amt, &user_texts) {
+                    if tx.send(StreamEv::ToolRan(format!("🔒 payment proposal refused — {why}"))).is_err() { return; }
+                    messages.push(json!({"role":"tool","tool_name": name, "content": json!({"error": why}).to_string()}));
+                    continue;
+                }
+            }
             let (result, receipt) = run_read(&name, &args, base);
             if tx.send(StreamEv::ToolRan(receipt)).is_err() { return; }
             let mut s = result.to_string();
-            s.truncate(2000);
+            if s.len() > 2000 {
+                // char-safe (audit 11-26): truncate() panics off a character boundary
+                let mut end = 2000;
+                while !s.is_char_boundary(end) { end -= 1; }
+                s.truncate(end);
+            }
             // ...and the result goes back to an off-box model with its identifiers hidden
             if let Some(m) = veil.as_mut() {
                 let (hidden, f) = sigil_veil::pseudonymize(&s, m);
